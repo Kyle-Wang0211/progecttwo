@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Timestamp jitter analyzer
 ///
@@ -120,47 +123,71 @@ public actor TimestampJitterAnalyzer {
             )
         }
         
-        // Compute intervals between consecutive timestamps
-        var intervals: [Double] = []
+        var intervalsSeconds: [Double] = []
+        intervalsSeconds.reserveCapacity(timestamps.count - 1)
         for i in 1..<timestamps.count {
-            let interval = (timestamps[i] - timestamps[i-1]) * 1000.0  // Convert to ms
-            intervals.append(interval)
+            intervalsSeconds.append(Swift.max(1e-6, timestamps[i] - timestamps[i - 1]))
         }
-        
-        // Compute statistics
-        let mean = intervals.reduce(0.0, +) / Double(intervals.count)
-        let variance = intervals.map { pow($0 - mean, 2) }.reduce(0.0, +) / Double(intervals.count)
-        let stdDev = sqrt(variance)
-        let min = intervals.min() ?? 0.0
-        let max = intervals.max() ?? 0.0
+
+        let intervalsMs = intervalsSeconds.map { $0 * 1000.0 }
+        let minValue = intervalsMs.min() ?? 0.0
+        let maxValue = intervalsMs.max() ?? 0.0
+        #if canImport(CAetherNativeBridge)
+        var analysis = aether_mobile_frame_interval_analysis_t()
+        let rc = intervalsSeconds.withUnsafeBufferPointer { ptr in
+            aether_mobile_analyze_frame_intervals(ptr.baseAddress, Int32(intervalsSeconds.count), &analysis)
+        }
+        let meanMs = rc == 0 ? analysis.average_interval_s * 1000.0 : (intervalsMs.reduce(0.0, +) / Double(intervalsMs.count))
+        let stdDevMs = rc == 0 ? (analysis.coefficient_of_variation * meanMs) : 0.0
+        let varianceMs = stdDevMs * stdDevMs
+        #else
+        let meanMs = intervalsMs.reduce(0.0, +) / Double(intervalsMs.count)
+        let varianceMs = intervalsMs.map { pow($0 - meanMs, 2) }.reduce(0.0, +) / Double(intervalsMs.count)
+        let stdDevMs = sqrt(varianceMs)
+        #endif
         
         return JitterStats(
-            meanMs: mean,
-            varianceMs: variance,
-            stdDevMs: stdDev,
-            minMs: min,
-            maxMs: max
+            meanMs: meanMs,
+            varianceMs: varianceMs,
+            stdDevMs: stdDevMs,
+            minMs: minValue,
+            maxMs: maxValue
         )
     }
     
     /// Compute delta jitter between camera and IMU timestamps
     private func computeDeltaJitter() -> JitterStats? {
         guard timestampPairs.count >= 2 else { return nil }
-        
-        let deltas = timestampPairs.map { $0.delta * 1000.0 }  // Convert to ms
-        
-        let mean = deltas.reduce(0.0, +) / Double(deltas.count)
-        let variance = deltas.map { pow($0 - mean, 2) }.reduce(0.0, +) / Double(deltas.count)
-        let stdDev = sqrt(variance)
-        let min = deltas.min() ?? 0.0
-        let max = deltas.max() ?? 0.0
+
+        let deltasSec = timestampPairs.map { Swift.max(1e-6, $0.delta) }
+        let deltasMs = deltasSec.map { $0 * 1000.0 }
+        let minValue = deltasMs.min() ?? 0.0
+        let maxValue = deltasMs.max() ?? 0.0
+        #if canImport(CAetherNativeBridge)
+        var analysis = aether_mobile_frame_interval_analysis_t()
+        let rc = deltasSec.withUnsafeBufferPointer { ptr in
+            aether_mobile_analyze_frame_intervals(ptr.baseAddress, Int32(deltasSec.count), &analysis)
+        }
+        let meanMs = rc == 0 ? analysis.average_interval_s * 1000.0 : (deltasMs.reduce(0.0, +) / Double(deltasMs.count))
+        let stdDevMs = rc == 0 ? (analysis.coefficient_of_variation * meanMs) : 0.0
+        let varianceMs = stdDevMs * stdDevMs
+        #else
+        let meanMs = deltasMs.reduce(0.0, +) / Double(deltasMs.count)
+        var varianceAccum = 0.0
+        for value in deltasMs {
+            let diff = value - meanMs
+            varianceAccum += diff * diff
+        }
+        let varianceMs = varianceAccum / Double(deltasMs.count)
+        let stdDevMs = sqrt(varianceMs)
+        #endif
         
         return JitterStats(
-            meanMs: mean,
-            varianceMs: variance,
-            stdDevMs: stdDev,
-            minMs: min,
-            maxMs: max
+            meanMs: meanMs,
+            varianceMs: varianceMs,
+            stdDevMs: stdDevMs,
+            minMs: minValue,
+            maxMs: maxValue
         )
     }
     

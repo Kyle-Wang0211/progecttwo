@@ -152,42 +152,28 @@ public final class PatchEvidenceMap {
         var entry = patches[patchId] ?? PatchEntry(lastUpdateMs: timestampMs)
         
         let previousEvidence = entry.evidence
-        
-        // Handle unknown verdict as suspect
-        let effectiveVerdict: ObservationVerdict
-        if verdict == .unknown {
-            effectiveVerdict = .suspect
-            EvidenceLogger.warn("Unknown verdict treated as suspect for patch \(patchId)")
-        } else {
-            effectiveVerdict = verdict
-        }
-        
-        // Check locking FIRST (V4: locking only affects ledger, not display)
-        if entry.isLocked {
-            // LOCKED: Only allow increases, no penalties
-            switch effectiveVerdict {
-            case .good:
-                if ledgerQuality > entry.evidence {
-                    entry.evidence = ledgerQuality
-                    entry.bestFrameId = frameId
-                    entry.lastGoodUpdateMs = timestampMs
-                }
-                entry.errorStreak = 0
-            case .suspect, .bad:
-                // Record but don't penalize (V4: locking only protects ledger)
-                entry.suspectCount += 1
-                if effectiveVerdict == .bad {
-                    entry.errorCount += 1
-                }
-            case .unknown:
-                entry.suspectCount += 1
+
+        if let native = NativePatchEvidenceBridge.patchEvidenceStep(
+            entry: entry,
+            ledgerQuality: ledgerQuality,
+            verdict: verdict,
+            timestampMs: timestampMs
+        ) {
+            if native.verdict_was_unknown != 0 {
+                EvidenceLogger.warn("Unknown verdict treated as suspect for patch \(patchId)")
             }
-            
-            entry.lastUpdateMs = timestampMs
-            entry.observationCount += 1
+            entry.evidence = native.evidence
+            entry.lastUpdateMs = native.last_update_ms
+            entry.observationCount = max(0, Int(native.observation_count))
+            entry.errorCount = max(0, Int(native.error_count))
+            entry.errorStreak = max(0, Int(native.error_streak))
+            entry.lastGoodUpdateMs = native.last_good_update_ms >= 0 ? native.last_good_update_ms : nil
+            entry.suspectCount = max(0, Int(native.suspect_count))
+            if native.should_update_best_frame != 0 {
+                entry.bestFrameId = frameId
+            }
             patches[patchId] = entry
-            
-            // Update aggregator
+
             let weight = computeBaseWeight(entry: entry, timestampMs: timestampMs)
             aggregator.updatePatch(
                 patchId: patchId,
@@ -195,55 +181,22 @@ public final class PatchEvidenceMap {
                 baseWeight: weight,
                 timestamp: Double(timestampMs) / 1000.0
             )
-            
+
             return PatchEntryUpdateResult(
-                wasUpdated: entry.evidence > previousEvidence,
+                wasUpdated: native.was_updated != 0,
                 previousEvidence: previousEvidence,
                 newEvidence: entry.evidence,
-                isLocked: true
+                isLocked: native.is_locked != 0
             )
         }
         
-        // Normal (unlocked) update logic
-        switch effectiveVerdict {
-        case .good:
-            // Reset error streak, update evidence if better
-            entry.errorStreak = 0
-            entry.lastGoodUpdateMs = timestampMs
-            
-            if ledgerQuality > entry.evidence {
-                entry.evidence = ledgerQuality
-                entry.bestFrameId = frameId
-            }
-            
-        case .suspect:
-            // Don't penalize, but don't reset error streak
-            // Just record the observation (for analytics)
-            entry.suspectCount += 1
-            
-        case .bad:
-            // Apply gradual penalty with cooldown
-            entry.errorStreak += 1
-            entry.errorCount += 1
-            
-            let penalty = computePenalty(
-                errorStreak: entry.errorStreak,
-                lastGoodUpdateMs: entry.lastGoodUpdateMs,
-                currentTimeMs: timestampMs
-            )
-            
-            entry.evidence = max(0.0, entry.evidence - penalty)
-            
-        case .unknown:
-            // Treat as suspect
-            entry.suspectCount += 1
-        }
-        
-        entry.lastUpdateMs = timestampMs
-        entry.observationCount += 1
+        _ = ledgerQuality
+        _ = verdict
+        _ = frameId
+        _ = errorType
+        EvidenceLogger.warn("Native patch-evidence kernel unavailable for patch \(patchId); update skipped")
         patches[patchId] = entry
-        
-        // Update aggregator
+
         let weight = computeBaseWeight(entry: entry, timestampMs: timestampMs)
         aggregator.updatePatch(
             patchId: patchId,
@@ -251,9 +204,9 @@ public final class PatchEvidenceMap {
             baseWeight: weight,
             timestamp: Double(timestampMs) / 1000.0
         )
-        
+
         return PatchEntryUpdateResult(
-            wasUpdated: entry.evidence != previousEvidence,
+            wasUpdated: false,
             previousEvidence: previousEvidence,
             newEvidence: entry.evidence,
             isLocked: entry.isLocked

@@ -152,6 +152,14 @@ Quat quat_slerp(Quat a, Quat b, float t) {
         a.z * w0 + b.z * w1});
 }
 
+float quat_angular_distance_rad(const Quat& a_in, const Quat& b_in) {
+    const Quat a = quat_normalize(a_in);
+    const Quat b = quat_normalize(b_in);
+    float d = a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z;
+    d = std::fabs(clampf(d, -1.0f, 1.0f));
+    return 2.0f * std::acos(clampf(d, -1.0f, 1.0f));
+}
+
 Quat quat_from_pose_matrix(const float m[16]) {
     // Matrix is treated as column-major (translation in m[12..14]).
     // rXY means row X, col Y.
@@ -260,6 +268,103 @@ Quat integrate_gyro(const Quat& base, const Vec3& gyro_rad_s, float dt_s) {
     return quat_normalize(quat_mul(base, delta));
 }
 
+// ── 15×15 matrix utilities for IESKF covariance propagation ──
+// Row-major layout, no Eigen dependency. State: [δp(3), δv(3), δθ(3), δbg(3), δba(3)]
+
+constexpr int kN = 15;
+
+inline float& mat15(float* M, int r, int c) { return M[r * kN + c]; }
+inline float mat15c(const float* M, int r, int c) { return M[r * kN + c]; }
+
+void mat15_zero(float* M) {
+    for (int i = 0; i < kN * kN; ++i) M[i] = 0.0f;
+}
+
+void mat15_identity(float* M) {
+    mat15_zero(M);
+    for (int i = 0; i < kN; ++i) mat15(M, i, i) = 1.0f;
+}
+
+// C = A * B (all kN×kN)
+void mat15_mul(float* C, const float* A, const float* B) {
+    float tmp[kN * kN];
+    for (int i = 0; i < kN; ++i) {
+        for (int j = 0; j < kN; ++j) {
+            float sum = 0.0f;
+            for (int k = 0; k < kN; ++k) {
+                sum += mat15c(A, i, k) * mat15c(B, k, j);
+            }
+            mat15(tmp, i, j) = sum;
+        }
+    }
+    for (int i = 0; i < kN * kN; ++i) C[i] = tmp[i];
+}
+
+// C = A + B
+void mat15_add(float* C, const float* A, const float* B) {
+    for (int i = 0; i < kN * kN; ++i) C[i] = A[i] + B[i];
+}
+
+// B = Aᵀ
+void mat15_transpose(float* B, const float* A) {
+    float tmp[kN * kN];
+    for (int i = 0; i < kN; ++i)
+        for (int j = 0; j < kN; ++j)
+            mat15(tmp, j, i) = mat15c(A, i, j);
+    for (int i = 0; i < kN * kN; ++i) B[i] = tmp[i];
+}
+
+// 3×3 skew-symmetric matrix from vector
+void skew3x3(float m[9], float x, float y, float z) {
+    m[0] = 0.0f;  m[1] = -z;    m[2] = y;
+    m[3] = z;      m[4] = 0.0f;  m[5] = -x;
+    m[6] = -y;     m[7] = x;     m[8] = 0.0f;
+}
+
+// Invert a 6×6 matrix via Gauss-Jordan elimination.
+bool invert6x6(float out[36], const float in_m[36]) {
+    float aug[72];
+    for (int i = 0; i < 6; ++i) {
+        for (int j = 0; j < 6; ++j) {
+            aug[i * 12 + j] = in_m[i * 6 + j];
+            aug[i * 12 + 6 + j] = (i == j) ? 1.0f : 0.0f;
+        }
+    }
+    for (int col = 0; col < 6; ++col) {
+        int pivot = col;
+        float maxVal = std::fabs(aug[col * 12 + col]);
+        for (int row = col + 1; row < 6; ++row) {
+            float v = std::fabs(aug[row * 12 + col]);
+            if (v > maxVal) { maxVal = v; pivot = row; }
+        }
+        if (maxVal < 1e-12f) return false;
+        if (pivot != col) {
+            for (int j = 0; j < 12; ++j) std::swap(aug[col * 12 + j], aug[pivot * 12 + j]);
+        }
+        float diagInv = 1.0f / aug[col * 12 + col];
+        for (int j = 0; j < 12; ++j) aug[col * 12 + j] *= diagInv;
+        for (int row = 0; row < 6; ++row) {
+            if (row == col) continue;
+            float factor = aug[row * 12 + col];
+            for (int j = 0; j < 12; ++j) aug[row * 12 + j] -= factor * aug[col * 12 + j];
+        }
+    }
+    for (int i = 0; i < 6; ++i)
+        for (int j = 0; j < 6; ++j)
+            out[i * 6 + j] = aug[i * 12 + 6 + j];
+    return true;
+}
+
+// Rotation matrix (3×3 row-major) from quaternion (wxyz)
+void quat_to_rot3(float R[9], float qw, float qx, float qy, float qz) {
+    float n = std::sqrt(std::max(kEps, qw*qw + qx*qx + qy*qy + qz*qz));
+    float inv = 1.0f / n;
+    qw *= inv; qx *= inv; qy *= inv; qz *= inv;
+    R[0] = 1-2*(qy*qy+qz*qz); R[1] = 2*(qx*qy-qw*qz);   R[2] = 2*(qx*qz+qw*qy);
+    R[3] = 2*(qx*qy+qw*qz);   R[4] = 1-2*(qx*qx+qz*qz); R[5] = 2*(qy*qz-qw*qx);
+    R[6] = 2*(qx*qz-qw*qy);   R[7] = 2*(qy*qz+qw*qx);   R[8] = 1-2*(qx*qx+qy*qy);
+}
+
 }  // namespace
 
 PoseStabilizer::PoseStabilizer(const PoseStabilizerConfig& config)
@@ -293,6 +398,19 @@ void PoseStabilizer::reset() {
     angular_velocity_ = {{0.0f, 0.0f, 0.0f}};
     gyro_bias_ = {{0.0f, 0.0f, 0.0f}};
     accel_bias_ = {{0.0f, 0.0f, 0.0f}};
+
+    // Initialize IESKF covariance with conservative diagonal values
+    mat15_identity(P_.data());
+    // Position uncertainty: 10cm
+    for (int i = 0; i < 3; ++i) mat15(P_.data(), i, i) = 0.01f;
+    // Velocity uncertainty: 0.1 m/s
+    for (int i = 3; i < 6; ++i) mat15(P_.data(), i, i) = 0.01f;
+    // Orientation uncertainty: ~5.7° (0.1 rad)
+    for (int i = 6; i < 9; ++i) mat15(P_.data(), i, i) = 0.01f;
+    // Gyro bias uncertainty
+    for (int i = 9; i < 12; ++i) mat15(P_.data(), i, i) = 1e-6f;
+    // Accel bias uncertainty
+    for (int i = 12; i < 15; ++i) mat15(P_.data(), i, i) = 1e-4f;
 }
 
 core::Status PoseStabilizer::update(
@@ -364,21 +482,283 @@ core::Status PoseStabilizer::update(
             mul(corrected_accel, 0.5f * dt_s * dt_s * 0.1f)));
 
     const float gyro_mag = norm(corrected_gyro);
-    float translation_blend = config_.translation_alpha / (1.0f + 0.75f * gyro_mag);
-    float rotation_blend = config_.rotation_alpha / (1.0f + 0.55f * gyro_mag);
+    const float innovation_translation_m = norm(sub(raw_position, predicted_position));
+    const float innovation_rotation_rad = quat_angular_distance_rad(raw_rotation, predicted_rotation);
+
+    // Innovation gating suppresses abrupt raw-pose outliers so overlays stay spatially stable.
+    constexpr float kInnovationPosSoft = 0.08f;  // 8 cm
+    constexpr float kInnovationPosHard = 0.25f;  // 25 cm
+    constexpr float kInnovationRotSoft = 0.20f;  // ~11.5 deg
+    constexpr float kInnovationRotHard = 0.70f;  // ~40 deg
+
+    const float pos_trust = 1.0f - clamp01(
+        (innovation_translation_m - kInnovationPosSoft) /
+        std::max(kEps, kInnovationPosHard - kInnovationPosSoft));
+    const float rot_trust = 1.0f - clamp01(
+        (innovation_rotation_rad - kInnovationRotSoft) /
+        std::max(kEps, kInnovationRotHard - kInnovationRotSoft));
+    const float innovation_trust = clampf(std::min(pos_trust, rot_trust), 0.0f, 1.0f);
+
+    Vec3 fused_position;
+    Quat fused_rotation;
+
     if (config_.use_ieskf) {
-        // Reserve a stable tuning branch for high-precision mode.
-        translation_blend *= 0.85f;
-        rotation_blend *= 0.85f;
+        // ── IESKF: Iterated Error-State Kalman Filter ──
+        // 15-state: [δp(3), δv(3), δθ(3), δbg(3), δba(3)]
+
+        // Step 1: Prediction — propagate nominal state
+        // Position: p = p + v*dt + 0.5*R*(a-ba)*dt²
+        // Velocity: v = v + R*(a-ba)*dt + g*dt
+        // Rotation: R = R * Exp(ω*dt) (already done by integrate_gyro)
+        // Biases: constant (random walk added via Q)
+
+        // Get rotation matrix for current orientation
+        float R3[9];
+        quat_to_rot3(R3, prev_rotation.w, prev_rotation.x, prev_rotation.y, prev_rotation.z);
+
+        // Rotate accelerometer measurement to world frame: a_w = R * (a - ba)
+        float accel_body[3] = {corrected_accel.x, corrected_accel.y, corrected_accel.z};
+        float accel_world[3];
+        for (int i = 0; i < 3; ++i) {
+            accel_world[i] = R3[i*3+0]*accel_body[0] + R3[i*3+1]*accel_body[1] + R3[i*3+2]*accel_body[2];
+        }
+
+        // Step 2: Build F (state transition Jacobian, 15×15)
+        // F = I + Fₓ*dt where Fₓ is the continuous-time Jacobian
+        float F[kN * kN];
+        mat15_identity(F);
+
+        // dp/dv = I*dt  (rows 0-2, cols 3-5)
+        for (int i = 0; i < 3; ++i) mat15(F, i, 3+i) = dt_s;
+
+        // dv/dθ = -R*[a-ba]× * dt  (rows 3-5, cols 6-8)
+        float skew_a[9];
+        skew3x3(skew_a, accel_body[0], accel_body[1], accel_body[2]);
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                float val = 0.0f;
+                for (int k = 0; k < 3; ++k) {
+                    val -= R3[i*3+k] * skew_a[k*3+j];
+                }
+                mat15(F, 3+i, 6+j) = val * dt_s;
+            }
+        }
+
+        // dv/dba = -R*dt  (rows 3-5, cols 12-14)
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                mat15(F, 3+i, 12+j) = -R3[i*3+j] * dt_s;
+
+        // dθ/dbg = -I*dt  (rows 6-8, cols 9-11)
+        for (int i = 0; i < 3; ++i) mat15(F, 6+i, 9+i) = -dt_s;
+
+        // Step 3: Build Q (process noise covariance)
+        float Q[kN * kN];
+        mat15_zero(Q);
+        const auto& ip = config_.ieskf_params;
+        float dt2 = dt_s * dt_s;
+        // Position noise from acceleration
+        for (int i = 0; i < 3; ++i) mat15(Q, i, i) = ip.accel_noise * dt2 * dt2 * 0.25f;
+        // Velocity noise
+        for (int i = 3; i < 6; ++i) mat15(Q, i, i) = ip.accel_noise * dt2;
+        // Orientation noise
+        for (int i = 6; i < 9; ++i) mat15(Q, i, i) = ip.gyro_noise * dt2;
+        // Gyro bias random walk
+        for (int i = 9; i < 12; ++i) mat15(Q, i, i) = ip.gyro_bias_noise * dt_s;
+        // Accel bias random walk
+        for (int i = 12; i < 15; ++i) mat15(Q, i, i) = ip.accel_bias_noise * dt_s;
+
+        // Step 4: Propagate covariance: P = F * P * Fᵀ + Q
+        float FP[kN * kN];
+        mat15_mul(FP, F, P_.data());
+        float Ft[kN * kN];
+        mat15_transpose(Ft, F);
+        float FPFt[kN * kN];
+        mat15_mul(FPFt, FP, Ft);
+        mat15_add(P_.data(), FPFt, Q);
+
+        // Step 5: Iterated update (IEKF)
+        // Observation: z = [position(3), rotation_error(3)]  (6-dim)
+        // h(x) = [p, 0]  for error-state at linearization point
+        // Innovation: y = [p_obs - p_pred, 2*quat_error_xyz]
+
+        // Compute innovation
+        float innov_pos[3] = {
+            raw_position.x - predicted_position.x,
+            raw_position.y - predicted_position.y,
+            raw_position.z - predicted_position.z
+        };
+
+        // Rotation error: δq = q_obs * q_pred⁻¹, error ≈ 2*δq.xyz
+        Quat q_pred_inv = quat_normalize(Quat{predicted_rotation.w, -predicted_rotation.x,
+                                                -predicted_rotation.y, -predicted_rotation.z});
+        Quat dq = quat_normalize(quat_mul(raw_rotation, q_pred_inv));
+        if (dq.w < 0.0f) { dq.w = -dq.w; dq.x = -dq.x; dq.y = -dq.y; dq.z = -dq.z; }
+        float innov_rot[3] = {2.0f * dq.x, 2.0f * dq.y, 2.0f * dq.z};
+
+        // Clamp innovation by trust to harden against relocalization spikes / tracking glitches.
+        const float innovation_scale = std::max(0.05f, innovation_trust);
+        innov_pos[0] *= innovation_scale;
+        innov_pos[1] *= innovation_scale;
+        innov_pos[2] *= innovation_scale;
+        innov_rot[0] *= innovation_scale;
+        innov_rot[1] *= innovation_scale;
+        innov_rot[2] *= innovation_scale;
+
+        // H matrix (6×15): observation Jacobian
+        // H = [I₃ 0 0 0 0]  (position observes δp)
+        //     [0  0 I₃ 0 0]  (rotation observes δθ)
+        // R matrix (6×6): observation noise
+        float R_obs[36];
+        for (int i = 0; i < 36; ++i) R_obs[i] = 0.0f;
+        for (int i = 0; i < 3; ++i) R_obs[i*6+i] = ip.pos_obs_noise * ip.pos_obs_noise;
+        for (int i = 3; i < 6; ++i) R_obs[i*6+i] = ip.rot_obs_noise * ip.rot_obs_noise;
+
+        // Iterated update: refine state estimate
+        float dx[kN] = {};  // cumulative error-state correction
+
+        for (int iter = 0; iter < ip.max_iterations; ++iter) {
+            // S = H * P * Hᵀ + R  (6×6)
+            // With our H structure: S_ij = P[row_i][col_j] + R_ij
+            // where row mapping: obs 0-2 → state 0-2, obs 3-5 → state 6-8
+            int h_rows[6] = {0, 1, 2, 6, 7, 8};
+            float S[36];
+            for (int i = 0; i < 6; ++i) {
+                for (int j = 0; j < 6; ++j) {
+                    S[i*6+j] = mat15c(P_.data(), h_rows[i], h_rows[j]) + R_obs[i*6+j];
+                }
+            }
+
+            // S⁻¹
+            float S_inv[36];
+            if (!invert6x6(S_inv, S)) {
+                // Singular — fall back to EMA
+                break;
+            }
+
+            // K = P * Hᵀ * S⁻¹  (15×6)
+            // PHt[i][j] = P[i][h_rows[j]]
+            float K[kN * 6];
+            for (int i = 0; i < kN; ++i) {
+                for (int j = 0; j < 6; ++j) {
+                    float sum = 0.0f;
+                    for (int k = 0; k < 6; ++k) {
+                        sum += mat15c(P_.data(), i, h_rows[k]) * S_inv[k*6+j];
+                    }
+                    K[i*6+j] = sum;
+                }
+            }
+
+            // Innovation vector (adjusted for current dx estimate)
+            float y[6] = {innov_pos[0] - dx[0], innov_pos[1] - dx[1], innov_pos[2] - dx[2],
+                          innov_rot[0] - dx[6], innov_rot[1] - dx[7], innov_rot[2] - dx[8]};
+
+            // dx = K * y
+            float new_dx[kN];
+            for (int i = 0; i < kN; ++i) {
+                float sum = 0.0f;
+                for (int j = 0; j < 6; ++j) {
+                    sum += K[i*6+j] * y[j];
+                }
+                new_dx[i] = sum;
+            }
+
+            // Check convergence
+            float diff_sq = 0.0f;
+            for (int i = 0; i < kN; ++i) diff_sq += (new_dx[i] - dx[i]) * (new_dx[i] - dx[i]);
+            for (int i = 0; i < kN; ++i) dx[i] = new_dx[i];
+
+            if (diff_sq < ip.convergence_threshold * ip.convergence_threshold) break;
+        }
+
+        // Step 6: Apply error-state correction to nominal state
+        fused_position = Vec3{
+            predicted_position.x + dx[0],
+            predicted_position.y + dx[1],
+            predicted_position.z + dx[2]
+        };
+
+        // Velocity correction
+        linear_velocity_ = {{
+            linear_velocity_[0] + dx[3],
+            linear_velocity_[1] + dx[4],
+            linear_velocity_[2] + dx[5]
+        }};
+
+        // Rotation correction: q = Exp(δθ/2) ⊗ q_pred
+        float half_angle = 0.5f * std::sqrt(dx[6]*dx[6] + dx[7]*dx[7] + dx[8]*dx[8]);
+        Quat dq_corr;
+        if (half_angle > kEps) {
+            float sinc = std::sin(half_angle) / half_angle;
+            dq_corr = Quat{std::cos(half_angle), 0.5f*dx[6]*sinc, 0.5f*dx[7]*sinc, 0.5f*dx[8]*sinc};
+        } else {
+            dq_corr = Quat{1.0f, 0.5f*dx[6], 0.5f*dx[7], 0.5f*dx[8]};
+        }
+        fused_rotation = quat_normalize(quat_mul(dq_corr, predicted_rotation));
+
+        // Bias corrections
+        gyro_bias_[0] += dx[9];
+        gyro_bias_[1] += dx[10];
+        gyro_bias_[2] += dx[11];
+        accel_bias_[0] += dx[12];
+        accel_bias_[1] += dx[13];
+        accel_bias_[2] += dx[14];
+
+        // Step 7: Update covariance: P = (I - K*H) * P
+        int h_rows[6] = {0, 1, 2, 6, 7, 8};
+        float KH[kN * kN];
+        mat15_zero(KH);
+
+        // Recompute K for final covariance update
+        float S_final[36];
+        for (int i = 0; i < 6; ++i)
+            for (int j = 0; j < 6; ++j)
+                S_final[i*6+j] = mat15c(P_.data(), h_rows[i], h_rows[j]) +
+                    R_obs[i*6+j];
+        float S_inv_final[36];
+        if (invert6x6(S_inv_final, S_final)) {
+            float K_final[kN * 6];
+            for (int i = 0; i < kN; ++i) {
+                for (int j = 0; j < 6; ++j) {
+                    float sum = 0.0f;
+                    for (int k = 0; k < 6; ++k)
+                        sum += mat15c(P_.data(), i, h_rows[k]) * S_inv_final[k*6+j];
+                    K_final[i*6+j] = sum;
+                }
+            }
+            // KH[i][j] = sum_k K[i][k] * H[k][j]  where H[k][j] = delta(h_rows[k], j)
+            for (int i = 0; i < kN; ++i)
+                for (int k = 0; k < 6; ++k)
+                    mat15(KH, i, h_rows[k]) += K_final[i*6+k];
+
+            // P = (I - KH) * P
+            float IminusKH[kN * kN];
+            mat15_identity(IminusKH);
+            for (int i = 0; i < kN * kN; ++i) IminusKH[i] -= KH[i];
+            float newP[kN * kN];
+            mat15_mul(newP, IminusKH, P_.data());
+            for (int i = 0; i < kN * kN; ++i) P_.data()[i] = newP[i];
+        }
+
+    } else {
+        // ── EMA fallback (original implementation) ──
+        float translation_blend = config_.translation_alpha / (1.0f + 0.75f * gyro_mag);
+        float rotation_blend = config_.rotation_alpha / (1.0f + 0.55f * gyro_mag);
+        translation_blend *= (0.25f + 0.75f * innovation_trust);
+        rotation_blend *= (0.20f + 0.80f * innovation_trust);
+        translation_blend = clampf(translation_blend, 0.05f, 0.90f);
+        rotation_blend = clampf(rotation_blend, 0.04f, 0.90f);
+
+        fused_position = lerp(predicted_position, raw_position, translation_blend);
+        fused_rotation = quat_slerp(predicted_rotation, raw_rotation, rotation_blend);
     }
-    translation_blend = clampf(translation_blend, 0.05f, 0.90f);
-    rotation_blend = clampf(rotation_blend, 0.04f, 0.90f);
 
-    const Vec3 fused_position = lerp(predicted_position, raw_position, translation_blend);
-    const Quat fused_rotation = quat_slerp(predicted_rotation, raw_rotation, rotation_blend);
-
-    const Vec3 velocity = mul(sub(fused_position, prev_position), 1.0f / std::max(dt_s, 1e-4f));
-    linear_velocity_ = to_array(velocity);
+    if (!config_.use_ieskf) {
+        // EMA mode: compute velocity from position delta
+        const Vec3 velocity = mul(sub(fused_position, prev_position), 1.0f / std::max(dt_s, 1e-4f));
+        linear_velocity_ = to_array(velocity);
+    }
+    // IESKF mode: linear_velocity_ already updated with Kalman correction
     angular_velocity_ = to_array(corrected_gyro);
     filtered_position_ = to_array(fused_position);
     filtered_rotation_ = {{fused_rotation.w, fused_rotation.x, fused_rotation.y, fused_rotation.z}};
@@ -394,11 +774,14 @@ core::Status PoseStabilizer::update(
         ? clampf((dt_s - (1.0f / 30.0f)) / 0.05f, 0.0f, 1.0f)
         : 0.0f;
 
+    const float innovation_penalty = 1.0f - innovation_trust;
+
     float quality = 1.0f
         - (0.35f * motion_penalty)
         - (0.25f * accel_penalty)
         - (0.25f * jitter_penalty)
-        - (0.15f * dt_penalty);
+        - (0.15f * dt_penalty)
+        - (0.18f * innovation_penalty);
     quality = clamp01(quality);
 
     if (frame_count_ <= config_.init_frames) {

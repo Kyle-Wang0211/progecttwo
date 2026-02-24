@@ -164,20 +164,26 @@ public enum ScanGuidanceConstants {
 
     /// Maximum inflight Metal buffers
     public static let kMaxInflightBuffers: Int = 3
-    /// Nominal tier: max triangles
-    public static let thermalNominalMaxTriangles: Int = 5000
-    /// Fair tier: max triangles
-    public static let thermalFairMaxTriangles: Int = 3000
-    /// Serious tier: max triangles
-    public static let thermalSeriousMaxTriangles: Int = 1500
-    /// Critical tier: max triangles
-    public static let thermalCriticalMaxTriangles: Int = 500
+    /// Nominal tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
+    public static let thermalNominalMaxTriangles: Int = 20000
+    /// Fair tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
+    public static let thermalFairMaxTriangles: Int = 12000
+    /// Serious tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
+    public static let thermalSeriousMaxTriangles: Int = 6000
+    /// Critical tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
+    public static let thermalCriticalMaxTriangles: Int = 3000
     /// Thermal hysteresis duration (seconds)
     public static let thermalHysteresisS: Double = 10.0
     /// Frame budget overshoot threshold (ratio of target frame time)
     public static let frameBudgetOvershootRatio: Double = 1.2
     /// Frame budget measurement window (frames)
     public static let frameBudgetWindowFrames: Int = 30
+    /// Proactive .fair entry: median GPU utilization threshold (ratio of frame budget)
+    public static let proactiveFairThresholdRatio: Double = 0.70
+    /// Cool-down threshold: p95 must be below this ratio to de-escalate
+    public static let coolDownThresholdRatio: Double = 0.60
+    /// Cool-down hysteresis multiplier (longer than escalation to prevent oscillation)
+    public static let coolDownHysteresisMultiplier: Double = 2.0
 
     // MARK: - Section 9: Accessibility (4 constants)
 
@@ -958,7 +964,43 @@ public enum ScanGuidanceConstants {
             value: frameBudgetWindowFrames,
             documentation: "Frame budget measurement window in frames"
         )),
-        
+        .threshold(ThresholdSpec(
+            ssotId: "ScanGuidanceConstants.proactiveFairThresholdRatio",
+            name: "Proactive Fair Threshold Ratio",
+            unit: .dimensionless,
+            category: .performance,
+            min: 0.50,
+            max: 0.90,
+            defaultValue: proactiveFairThresholdRatio,
+            onExceed: .warn,
+            onUnderflow: .reject,
+            documentation: "Median GPU utilization ratio to proactively enter .fair tier"
+        )),
+        .threshold(ThresholdSpec(
+            ssotId: "ScanGuidanceConstants.coolDownThresholdRatio",
+            name: "Cool-Down Threshold Ratio",
+            unit: .dimensionless,
+            category: .performance,
+            min: 0.30,
+            max: 0.80,
+            defaultValue: coolDownThresholdRatio,
+            onExceed: .warn,
+            onUnderflow: .reject,
+            documentation: "P95 GPU utilization ratio below which tier de-escalates"
+        )),
+        .threshold(ThresholdSpec(
+            ssotId: "ScanGuidanceConstants.coolDownHysteresisMultiplier",
+            name: "Cool-Down Hysteresis Multiplier",
+            unit: .dimensionless,
+            category: .performance,
+            min: 1.0,
+            max: 5.0,
+            defaultValue: coolDownHysteresisMultiplier,
+            onExceed: .warn,
+            onUnderflow: .reject,
+            documentation: "Multiplier on thermalHysteresisS for cool-down (prevents oscillation)"
+        )),
+
         // Section 9: Accessibility (2 constants - both Double, Bool constants excluded)
         .threshold(ThresholdSpec(
             ssotId: "ScanGuidanceConstants.minContrastRatio",
@@ -995,11 +1037,34 @@ public enum ScanGuidanceConstants {
         if hapticBlurThreshold != QualityThresholds.laplacianBlurThreshold {
             errors.append("hapticBlurThreshold (\(hapticBlurThreshold)) != QualityThresholds.laplacianBlurThreshold (\(QualityThresholds.laplacianBlurThreshold))")
         }
+        // S-threshold monotonicity
         let thresholds = [s0ToS1Threshold, s1ToS2Threshold, s2ToS3Threshold, s3ToS4Threshold, s4ToS5Threshold]
         for i in 1..<thresholds.count {
             if thresholds[i] <= thresholds[i-1] {
                 errors.append("S-thresholds not monotonic at index \(i)")
             }
+        }
+        // Flip animation duration must be positive
+        if flipDurationS <= 0 {
+            errors.append("flipDurationS must be > 0, got \(flipDurationS)")
+        }
+        // Ripple damping must be in (0, 1]
+        if rippleDampingPerHop <= 0 || rippleDampingPerHop > 1.0 {
+            errors.append("rippleDampingPerHop must be in (0, 1], got \(rippleDampingPerHop)")
+        }
+        // Border gamma must be positive
+        if borderGamma <= 0 {
+            errors.append("borderGamma must be > 0, got \(borderGamma)")
+        }
+        // Thermal tier triangle budgets must be descending
+        if thermalFairMaxTriangles >= thermalNominalMaxTriangles {
+            errors.append("thermalFairMaxTriangles (\(thermalFairMaxTriangles)) must be < thermalNominalMaxTriangles (\(thermalNominalMaxTriangles))")
+        }
+        if thermalSeriousMaxTriangles >= thermalFairMaxTriangles {
+            errors.append("thermalSeriousMaxTriangles (\(thermalSeriousMaxTriangles)) must be < thermalFairMaxTriangles (\(thermalFairMaxTriangles))")
+        }
+        if thermalCriticalMaxTriangles >= thermalSeriousMaxTriangles {
+            errors.append("thermalCriticalMaxTriangles (\(thermalCriticalMaxTriangles)) must be < thermalSeriousMaxTriangles (\(thermalSeriousMaxTriangles))")
         }
         return errors
     }

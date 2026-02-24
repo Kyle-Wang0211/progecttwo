@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// Confidence decay for stale patches
 ///
@@ -32,8 +33,17 @@ public enum ConfidenceDecay {
         lastUpdateMs: Int64,
         currentTimeMs: Int64
     ) -> Double {
-        let age = Double(currentTimeMs - lastUpdateMs) / 1000.0  // Convert to seconds
-        return pow(0.5, age / halfLifeSec)
+        var out: Double = 1.0
+        let rc = aether_confidence_aggregation_weight(
+            lastUpdateMs,
+            currentTimeMs,
+            halfLifeSec,
+            &out
+        )
+        if rc == 0 {
+            return out
+        }
+        return 1.0
     }
     
     /// Compute weight from TimeInterval (convenience)
@@ -41,7 +51,8 @@ public enum ConfidenceDecay {
         lastUpdate: TimeInterval,
         currentTime: TimeInterval
     ) -> Double {
-        let age = currentTime - lastUpdate
-        return pow(0.5, age / halfLifeSec)
+        let lastUpdateMs = Int64(lastUpdate * 1000.0)
+        let currentTimeMs = Int64(currentTime * 1000.0)
+        return aggregationWeight(lastUpdateMs: lastUpdateMs, currentTimeMs: currentTimeMs)
     }
 }

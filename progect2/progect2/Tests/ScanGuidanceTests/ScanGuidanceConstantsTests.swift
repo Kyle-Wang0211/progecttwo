@@ -12,9 +12,9 @@ final class ScanGuidanceConstantsTests: XCTestCase {
     
     func testAllSpecsRegistered() {
         // Verify all specs are registered.
-        // Note: 70 Double/Int specs are registered; Bool constants are intentionally excluded.
+        // Note: 73 Double/Int specs are registered; Bool constants are intentionally excluded.
         // The 2 Bool constants (reduceMotionDisablesFlip, reduceMotionDisablesRipple) are NOT registered
-        XCTAssertEqual(ScanGuidanceConstants.allSpecs.count, 70, "Should have 70 registered specs (all Double/Int constants, Bool excluded)")
+        XCTAssertEqual(ScanGuidanceConstants.allSpecs.count, 73, "Should have 73 registered specs (all Double/Int constants, Bool excluded)")
     }
     
     func testSSOTRegistration() {

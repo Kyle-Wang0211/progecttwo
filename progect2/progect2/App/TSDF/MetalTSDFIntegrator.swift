@@ -13,6 +13,7 @@ import ARKit
 import Metal
 import MetalKit
 import CoreVideo
+import Aether3DCore
 
 /// Swift-side GPUBlockIndex struct matching Metal shader layout
 struct GPUBlockIndex {
@@ -48,7 +49,7 @@ struct BlockEntry {
 ///   - Hash table metadata: single persistent MTLBuffer
 /// Conforms to TSDFIntegrationBackend (Section 0.6) — the Metal production implementation.
 /// TSDFVolume calls backend.processFrame() after all gates pass.
-public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
+public final class MetalTSDFIntegrator: TSDFIntegrationBackend, @unchecked Sendable {
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let textureCache: CVMetalTextureCache
@@ -57,6 +58,7 @@ public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
     private let integratePipeline: MTLComputePipelineState
 
     private let inflightSemaphore = DispatchSemaphore(value: TSDFConstants.metalInflightBuffers)
+    private let semaphoreWaitQueue = DispatchQueue(label: "app.tsdf.integrator.semaphore.wait", qos: .userInitiated)
     private let sharedEvent: MTLSharedEvent
     private var frameNumber: UInt64 = 0
 
@@ -161,10 +163,8 @@ public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
         let startTime = ProcessInfo.processInfo.systemUptime
 
         // Wait on semaphore (with timeout guard)
-        let waitResult = inflightSemaphore.wait(
-            timeout: .now() + .milliseconds(Int(TSDFConstants.semaphoreWaitTimeoutMs))
-        )
-        if waitResult == .timedOut {
+        let acquiredSlot = await waitForInflightSlot(timeoutMs: TSDFConstants.semaphoreWaitTimeoutMs)
+        if !acquiredSlot {
             return IntegrationResult.IntegrationStats(
                 blocksUpdated: 0, blocksAllocated: 0,
                 voxelsUpdated: 0, gpuTimeMs: 0, totalTimeMs: 0
@@ -309,8 +309,12 @@ public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
         encoder1.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
         encoder1.endEncoding()
         
-        cb1.commit()
-        cb1.waitUntilCompleted()  // CPU blocks here (~0.3ms for 256×192)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            cb1.addCompletedHandler { _ in
+                continuation.resume()
+            }
+            cb1.commit()
+        }
 
         // Guardrail #19: Command buffer error check
         if cb1.status == .error {
@@ -448,6 +452,16 @@ public final class MetalTSDFIntegrator: TSDFIntegrationBackend {
     }
 
     // MARK: - Private Helpers
+
+    private func waitForInflightSlot(timeoutMs: Double) async -> Bool {
+        await withCheckedContinuation { continuation in
+            semaphoreWaitQueue.async { [inflightSemaphore] in
+                let timeout = DispatchTime.now() + .milliseconds(Int(timeoutMs))
+                let result = inflightSemaphore.wait(timeout: timeout)
+                continuation.resume(returning: result == .success)
+            }
+        }
+    }
 
     private func createTexture(from pixelBuffer: CVPixelBuffer, format: MTLPixelFormat) -> MTLTexture? {
         var texture: CVMetalTexture?

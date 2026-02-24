@@ -38,7 +38,9 @@ public enum SSOT {
     public static var sfmRegistrationMinRatio: Double { QualityThresholds.sfmRegistrationMinRatio }
     
     /// Minimum PSNR value (dB)
-    public static var psnrMinDb: Double { QualityThresholds.psnrMinDb }
+    /// **Deprecated:** Use QualityThresholds.psnrMin8BitDb or psnrMin12BitDb instead
+    @available(*, deprecated, message: "Use QualityThresholds.psnrMin8BitDb or psnrMin12BitDb instead")
+    public static var psnrMinDb: Double { 30.0 }
     
     /// PSNR warning threshold (dB)
     public static var psnrWarnDb: Double { QualityThresholds.psnrWarnDb }

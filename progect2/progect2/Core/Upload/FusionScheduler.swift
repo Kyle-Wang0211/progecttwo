@@ -5,39 +5,19 @@
 // Cross-Platform: macOS + Linux (pure Foundation)
 
 import Foundation
+import CAetherNativeBridge
 
-/// 5 parallel controllers (4 classical + ML) fusion scheduler.
-///
-/// **Purpose**: MPC×ABR×EWMA×Kalman×ML 5-theory fusion with Lyapunov DPP stability,
-/// Thompson Sampling CDN selection.
-///
-/// **5 Parallel Controllers**:
-/// 1. **MPC (Model Predictive Control)**: Predict next 5 steps, minimize Σ(latency)
-/// 2. **ABR (Adaptive Bitrate)**: Buffer-Based Approach variant. Queue length → chunk size mapping
-/// 3. **EWMA**: α=0.3, compute "chunk size that transmits in 3 seconds at estimated speed"
-/// 4. **Kalman**: Use KalmanBandwidthPredictor output + trend
-/// 5. **ML (when available)**: Use MLBandwidthPredictor 5-step lookahead
-///
-/// **Fusion**: Weighted trimmed mean of all controller outputs.
-/// **Lyapunov Drift-Plus-Penalty**: Safety valve to prevent queue drift.
 public actor FusionScheduler {
-    
-    // MARK: - State
-    
+
     private let kalmanPredictor: KalmanBandwidthPredictor
     private let mlPredictor: MLBandwidthPredictor?
-    
-    private var controllerAccuracies: [Double] = [1.0, 1.0, 1.0, 1.0, 1.0]  // MPC, ABR, EWMA, Kalman, ML
+
+    // MPC, ABR, EWMA, Kalman, ML
+    private var controllerAccuracies: [Double] = [1.0, 1.0, 1.0, 1.0, 1.0]
     private var queueLength: Int64 = 0
     private var lastChunkSize: Int = UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-    
-    // MARK: - Initialization
-    
-    /// Initialize fusion scheduler.
-    ///
-    /// - Parameters:
-    ///   - kalmanPredictor: Kalman bandwidth predictor
-    ///   - mlPredictor: Optional ML bandwidth predictor
+    private var nativeEnabled = true
+
     public init(
         kalmanPredictor: KalmanBandwidthPredictor,
         mlPredictor: MLBandwidthPredictor? = nil
@@ -45,153 +25,86 @@ public actor FusionScheduler {
         self.kalmanPredictor = kalmanPredictor
         self.mlPredictor = mlPredictor
     }
-    
-    // MARK: - Chunk Size Decision
-    
-    /// Decide next chunk size using 5-theory fusion.
-    ///
-    /// - Returns: Optimal chunk size in bytes
+
     public func decideChunkSize() async -> Int {
-        // Get predictions from all controllers
         let kalmanPrediction = await kalmanPredictor.predict()
         let mlPrediction = await (mlPredictor?.predict() ?? kalmanPrediction)
-        
-        // MPC: Predict next 5 steps (simplified)
-        let mpcSize = computeMPCChunkSize()
-        
-        // ABR: Buffer-based
-        let abrSize = computeABRChunkSize(queueLength: queueLength)
-        
-        // EWMA: 3-second transmission target
-        let ewmaSize = computeEWMAChunkSize(predictedBps: kalmanPrediction.predictedBps)
-        
-        // Kalman: Based on trend
-        let kalmanSize = computeKalmanChunkSize(prediction: kalmanPrediction)
-        
-        // ML: 5-step lookahead
-        let mlSize = computeMLChunkSize(prediction: mlPrediction)
-        
-        // Collect candidates
-        var candidates: [Int] = [mpcSize, abrSize, ewmaSize, kalmanSize]
-        if mlPredictor != nil {
-            candidates.append(mlSize)
+        guard nativeEnabled else {
+            let failClosed = UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
+            lastChunkSize = failClosed
+            return failClosed
         }
-        
-        // Weighted trimmed mean
-        let weights = controllerAccuracies.prefix(candidates.count)
-        let finalSize = weightedTrimmedMean(candidates: candidates, weights: Array(weights))
-        
-        // Lyapunov Drift-Plus-Penalty safety valve
-        let safeSize = applyLyapunovSafetyValve(chunkSize: finalSize)
-        
-        // Align to 16KB page boundary
-        let alignedSize = (safeSize / 16384) * 16384
-        
-        // Clamp to valid range
-        return max(UploadConstants.CHUNK_SIZE_MIN_BYTES,
-                  min(UploadConstants.CHUNK_SIZE_MAX_BYTES, alignedSize))
-    }
-    
-    // MARK: - Controller Implementations
-    
-    /// Compute MPC chunk size (simplified).
-    private func computeMPCChunkSize() -> Int {
-        // Simplified MPC: predict next 5 steps, minimize latency
-        // In production, use proper MPC optimization
-        return UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-    }
-    
-    /// Compute ABR chunk size based on queue length.
-    private func computeABRChunkSize(queueLength: Int64) -> Int {
-        // Buffer-based ABR: larger chunks when queue is empty
-        if queueLength < 1024 * 1024 {  // <1MB queued
-            return UploadConstants.CHUNK_SIZE_MAX_BYTES
-        } else if queueLength < 10 * 1024 * 1024 {  // <10MB
-            return UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-        } else {
-            return UploadConstants.CHUNK_SIZE_MIN_BYTES
+
+        var input = aether_upload_fusion_scheduler_input_t()
+        input.queue_length_bytes = queueLength
+        input.last_chunk_size_bytes = Int32(clamping: lastChunkSize)
+        input.kalman_predicted_bps = sanitizeBps(kalmanPrediction.predictedBps)
+        input.kalman_trend = nativeTrendCode(kalmanPrediction.trend)
+        input.ml_predicted_bps = sanitizeBps(mlPrediction.predictedBps)
+        input.has_ml_prediction = mlPredictor == nil ? 0 : 1
+        input.controller_accuracy_mpc = controllerAccuracy(at: 0)
+        input.controller_accuracy_abr = controllerAccuracy(at: 1)
+        input.controller_accuracy_ewma = controllerAccuracy(at: 2)
+        input.controller_accuracy_kalman = controllerAccuracy(at: 3)
+        input.controller_accuracy_ml = controllerAccuracy(at: 4)
+        input.chunk_size_min_bytes = Int32(clamping: UploadConstants.CHUNK_SIZE_MIN_BYTES)
+        input.chunk_size_default_bytes = Int32(clamping: UploadConstants.CHUNK_SIZE_DEFAULT_BYTES)
+        input.chunk_size_max_bytes = Int32(clamping: UploadConstants.CHUNK_SIZE_MAX_BYTES)
+        input.chunk_size_step_bytes = Int32(clamping: UploadConstants.CHUNK_SIZE_STEP_BYTES)
+        input.ewma_alpha = 0.3
+        input.ewma_target_seconds = 3.0
+        input.ml_norm_bps = 10_000_000.0
+        input.alignment_bytes = 16 * 1024
+
+        var output = aether_upload_fusion_scheduler_output_t()
+        let rc = aether_upload_fusion_decide_chunk_size(&input, &output)
+        guard rc == 0 else {
+            nativeEnabled = false
+            let failClosed = UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
+            lastChunkSize = failClosed
+            return failClosed
         }
+
+        let nextChunkSize = clampAndAlign(Int(output.final_chunk_size_bytes))
+        lastChunkSize = nextChunkSize
+        return nextChunkSize
     }
-    
-    /// Compute EWMA chunk size (3-second transmission target).
-    private func computeEWMAChunkSize(predictedBps: Double) -> Int {
-        let alpha = 0.3
-        let targetSeconds = 3.0
-        
-        // Chunk size that transmits in 3 seconds
-        let targetBytes = Int(predictedBps / 8.0 * targetSeconds)
-        
-        // EWMA smoothing
-        let smoothed = Int(Double(lastChunkSize) * (1.0 - alpha) + Double(targetBytes) * alpha)
-        
-        return smoothed
-    }
-    
-    /// Compute Kalman chunk size based on trend.
-    private func computeKalmanChunkSize(prediction: BandwidthPrediction) -> Int {
-        switch prediction.trend {
-        case .rising:
-            return min(UploadConstants.CHUNK_SIZE_MAX_BYTES,
-                      lastChunkSize + UploadConstants.CHUNK_SIZE_STEP_BYTES)
-        case .falling:
-            return max(UploadConstants.CHUNK_SIZE_MIN_BYTES,
-                      lastChunkSize - UploadConstants.CHUNK_SIZE_STEP_BYTES)
-        case .stable:
-            return lastChunkSize
-        }
-    }
-    
-    /// Compute ML chunk size (5-step lookahead).
-    private func computeMLChunkSize(prediction: BandwidthPrediction) -> Int {
-        // Use ML prediction for chunk size
-        // Simplified: scale based on predicted bandwidth
-        let baseSize = UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-        let scaleFactor = prediction.predictedBps / 10_000_000.0  // Normalize to 10 Mbps
-        return Int(Double(baseSize) * scaleFactor)
-    }
-    
-    // MARK: - Fusion
-    
-    /// Weighted trimmed mean (remove highest/lowest, weighted average).
-    private func weightedTrimmedMean(candidates: [Int], weights: [Double]) -> Int {
-        guard !candidates.isEmpty else {
-            return UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-        }
-        
-        // Sort candidates with weights
-        let sorted = zip(candidates, weights).sorted { $0.0 < $1.0 }
-        
-        // Remove highest and lowest
-        guard sorted.count > 2 else {
-            return sorted.first?.0 ?? UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-        }
-        
-        let trimmed = Array(sorted[1..<(sorted.count - 1)])
-        
-        // Weighted average
-        let totalWeight = trimmed.map { $0.1 }.reduce(0, +)
-        guard totalWeight > 0 else {
-            return UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-        }
-        
-        let weightedSum = trimmed.map { Double($0.0) * $0.1 }.reduce(0, +)
-        return Int(weightedSum / totalWeight)
-    }
-    
-    /// Apply Lyapunov Drift-Plus-Penalty safety valve.
-    private func applyLyapunovSafetyValve(chunkSize: Int) -> Int {
-        // Simplified Lyapunov check
-        // In production, compute queue drift and apply threshold
-        return chunkSize
-    }
-    
-    /// Update queue length.
+
     public func updateQueueLength(_ length: Int64) {
-        queueLength = length
+        queueLength = max(0, length)
     }
-    
-    /// Update last chunk size.
+
     public func updateLastChunkSize(_ size: Int) {
-        lastChunkSize = size
+        lastChunkSize = clampAndAlign(size)
+    }
+
+    private func controllerAccuracy(at index: Int) -> Double {
+        guard controllerAccuracies.indices.contains(index) else { return 1.0 }
+        let value = controllerAccuracies[index]
+        return value.isFinite ? value : 1.0
+    }
+
+    private func sanitizeBps(_ value: Double) -> Double {
+        guard value.isFinite, value > 0 else { return 0.0 }
+        return value
+    }
+
+    private func nativeTrendCode(_ trend: BandwidthTrend) -> Int32 {
+        switch trend {
+        case .rising:
+            return 0
+        case .stable:
+            return 1
+        case .falling:
+            return 2
+        }
+    }
+
+    private func clampAndAlign(_ size: Int) -> Int {
+        let minSize = UploadConstants.CHUNK_SIZE_MIN_BYTES
+        let maxSize = UploadConstants.CHUNK_SIZE_MAX_BYTES
+        let clamped = max(minSize, min(maxSize, size))
+        let aligned = (clamped / 16384) * 16384
+        return max(minSize, min(maxSize, aligned))
     }
 }

@@ -43,9 +43,23 @@ public final class FlipAnimationController {
     private var previousDisplay: [String: Double] = [:]
     private var timelineNow: TimeInterval?
 
+    /// External time source injected by the render pipeline for clock consistency.
+    /// When set, `currentTime()` uses this instead of `ProcessInfo.systemUptime`,
+    /// ensuring flip animations are synchronized with the Metal frame timeline
+    /// (which uses `CACurrentMediaTime()` in the App layer).
+    private var externalTimeSource: (() -> TimeInterval)?
+
+    /// Inject an external time source for clock consistency with the render pipeline.
+    public func setTimeSource(_ source: @escaping () -> TimeInterval) {
+        self.externalTimeSource = source
+    }
+
     private func currentTime() -> TimeInterval {
         if let timelineNow {
             return timelineNow
+        }
+        if let externalTimeSource {
+            return externalTimeSource()
         }
         return ProcessInfo.processInfo.systemUptime
     }
@@ -98,7 +112,10 @@ public final class FlipAnimationController {
         triangleIDs: [Int]? = nil
     ) -> [Int] {
         defer {
-            self.previousDisplay = currentDisplay
+            // Store current display for next frame's threshold crossing detection
+            // Prune to only current triangle set to prevent unbounded memory growth
+            let currentPatchIds = Set(triangles.map { $0.patchId })
+            self.previousDisplay = currentDisplay.filter { currentPatchIds.contains($0.key) }
         }
         guard let nativeRuntime, !triangles.isEmpty else {
             return []
@@ -288,14 +305,6 @@ public final class FlipAnimationController {
                 &hash
             )
         }
-        if rc == 0 {
-            return hash
-        }
-        var fallback: UInt64 = BridgeInteropConstants.fnv1a64OffsetBasis
-        for byte in bytes {
-            fallback ^= UInt64(byte)
-            fallback &*= BridgeInteropConstants.fnv1a64Prime
-        }
-        return fallback
+        return rc == 0 ? hash : 0
     }
 }

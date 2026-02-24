@@ -9,6 +9,7 @@
 // ============================================================================
 
 import Foundation
+import CAetherNativeBridge
 
 // ============================================================================
 // MARK: - Network Speed Classification
@@ -178,23 +179,21 @@ public final class NetworkSpeedMonitor {
         qos: .userInitiated
     )
 
-    /// Recorded speed samples
+    /// Recorded speed samples (debug/inspection only; decision logic in native core).
     private var samples: [SpeedSample] = []
 
-    /// Maximum samples to retain
     private let maxSamples: Int
 
-    /// Time window for sample validity (seconds)
     private let windowSeconds: TimeInterval
 
-    /// Current speed classification (cached)
     private var _currentClass: NetworkSpeedClass = .unknown
 
-    /// Current estimated speed in Mbps (cached)
     private var _currentSpeedMbps: Double = 0.0
 
-    /// Last calculation timestamp
-    private var lastCalculationTime: Date = .distantPast
+    private var _currentSampleCount: Int = 0
+    private var _currentReliable: Bool = false
+    private var nativeEnabled = true
+    private var nativeState = aether_network_speed_state_t()
 
     // =========================================================================
     // MARK: - Initialization
@@ -210,6 +209,11 @@ public final class NetworkSpeedMonitor {
     ) {
         self.maxSamples = max(1, maxSamples)
         self.windowSeconds = max(1, windowSeconds)
+        nativeEnabled = aether_network_speed_reset(
+            &nativeState,
+            Int32(self.maxSamples),
+            self.windowSeconds
+        ) == 0
     }
 
     // =========================================================================
@@ -228,62 +232,100 @@ public final class NetworkSpeedMonitor {
             bytesTransferred: bytesTransferred,
             durationSeconds: durationSeconds
         )
-
-        queue.sync {
-            samples.append(sample)
-            pruneOldSamples()
-            recalculateSpeed()
-        }
+        recordSample(sample)
     }
 
     /// Record a speed sample from a SpeedSample struct.
     /// - Parameter sample: The sample to record
     public func recordSample(_ sample: SpeedSample) {
         guard sample.bytesTransferred > 0, sample.durationSeconds > 0 else { return }
-
         queue.sync {
             samples.append(sample)
             pruneOldSamples()
-            recalculateSpeed()
+            recordNativeSampleLocked(sample)
+            refreshSnapshotLocked(now: sample.timestamp.timeIntervalSince1970)
         }
     }
 
     /// Get current speed classification.
     /// - Returns: Network speed class based on recent measurements
     public func getSpeedClass() -> NetworkSpeedClass {
-        return queue.sync { _currentClass }
+        return queue.sync {
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
+            return _currentClass
+        }
     }
 
     /// Get current estimated speed in Mbps.
     /// - Returns: Speed in megabits per second
     public func getSpeedMbps() -> Double {
-        return queue.sync { _currentSpeedMbps }
+        return queue.sync {
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
+            return _currentSpeedMbps
+        }
     }
 
     /// Get current estimated speed in bytes per second.
     /// - Returns: Speed in bytes per second
     public func getSpeedBps() -> Double {
-        return queue.sync { (_currentSpeedMbps * 1024.0 * 1024.0) / 8.0 }
+        return queue.sync {
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
+            return (_currentSpeedMbps * 1_000_000.0) / 8.0
+        }
     }
 
     /// Get recommended chunk size based on current network conditions.
     /// - Returns: Recommended chunk size in bytes
     public func getRecommendedChunkSize() -> Int {
-        return getSpeedClass().recommendedChunkSize
+        return queue.sync {
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
+            guard nativeEnabled else {
+                return UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
+            }
+            var recommended: Int32 = Int32(UploadConstants.CHUNK_SIZE_DEFAULT_BYTES)
+            let rc = aether_network_speed_recommended_chunk_size(
+                nativeClassCode(_currentClass),
+                Int32(UploadConstants.CHUNK_SIZE_MIN_BYTES),
+                Int32(UploadConstants.CHUNK_SIZE_DEFAULT_BYTES),
+                Int32(UploadConstants.CHUNK_SIZE_MAX_BYTES),
+                &recommended
+            )
+            guard rc == 0 else {
+                nativeEnabled = false
+                return UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
+            }
+            return Int(recommended)
+        }
     }
 
     /// Get recommended parallel upload count.
     /// - Returns: Recommended number of parallel uploads
     public func getRecommendedParallelCount() -> Int {
-        return getSpeedClass().recommendedParallelCount
+        return queue.sync {
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
+            guard nativeEnabled else {
+                return 2
+            }
+            var recommended: Int32 = 2
+            let rc = aether_network_speed_recommended_parallel_count(
+                nativeClassCode(_currentClass),
+                Int32(UploadConstants.MAX_PARALLEL_CHUNK_UPLOADS),
+                &recommended
+            )
+            guard rc == 0 else {
+                nativeEnabled = false
+                return 2
+            }
+            return Int(recommended)
+        }
     }
 
     /// Check if we have enough samples for reliable estimation.
     /// - Returns: True if estimation is statistically reliable
     public func hasReliableEstimate() -> Bool {
         return queue.sync {
-            let validSamples = samples.filter { $0.isRecent(window: windowSeconds) }
-            return validSamples.count >= UploadConstants.NETWORK_SPEED_MIN_SAMPLES
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
+            return _currentReliable
         }
     }
 
@@ -291,7 +333,8 @@ public final class NetworkSpeedMonitor {
     /// - Returns: Number of valid samples in window
     public func getSampleCount() -> Int {
         return queue.sync {
-            samples.filter { $0.isRecent(window: windowSeconds) }.count
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
+            return _currentSampleCount
         }
     }
 
@@ -310,14 +353,21 @@ public final class NetworkSpeedMonitor {
             samples.removeAll()
             _currentClass = .unknown
             _currentSpeedMbps = 0.0
-            lastCalculationTime = .distantPast
+            _currentSampleCount = 0
+            _currentReliable = false
+            nativeState = aether_network_speed_state_t()
+            nativeEnabled = aether_network_speed_reset(
+                &nativeState,
+                Int32(maxSamples),
+                windowSeconds
+            ) == 0
         }
     }
 
     /// Force recalculation of speed (for testing).
     public func forceRecalculate() {
         queue.sync {
-            recalculateSpeed()
+            refreshSnapshotLocked(now: Date().timeIntervalSince1970)
         }
     }
 
@@ -329,18 +379,27 @@ public final class NetworkSpeedMonitor {
     /// - Returns: Statistics tuple (min, max, avg, stddev) or nil if insufficient data
     public func getSpeedStatistics() -> (min: Double, max: Double, avg: Double, stddev: Double)? {
         return queue.sync {
-            let validSamples = samples.filter { $0.isRecent(window: windowSeconds) }
-            guard validSamples.count >= 2 else { return nil }
-
-            let speeds = validSamples.map { $0.speedMbps }
-            let minSpeed = speeds.min() ?? 0
-            let maxSpeed = speeds.max() ?? 0
-            let avgSpeed = speeds.reduce(0, +) / Double(speeds.count)
-
-            let variance = speeds.map { pow($0 - avgSpeed, 2) }.reduce(0, +) / Double(speeds.count)
-            let stddev = sqrt(variance)
-
-            return (min: minSpeed, max: maxSpeed, avg: avgSpeed, stddev: stddev)
+            guard nativeEnabled else {
+                return nil
+            }
+            var stats = aether_network_speed_statistics_t(
+                min_mbps: 0,
+                max_mbps: 0,
+                avg_mbps: 0,
+                stddev_mbps: 0,
+                sample_count: 0
+            )
+            let now = Date().timeIntervalSince1970
+            let rc = aether_network_speed_statistics(&nativeState, now, &stats)
+            guard rc == 0, stats.sample_count >= 2 else {
+                return nil
+            }
+            return (
+                min: stats.min_mbps,
+                max: stats.max_mbps,
+                avg: stats.avg_mbps,
+                stddev: stats.stddev_mbps
+            )
         }
     }
 
@@ -360,51 +419,84 @@ public final class NetworkSpeedMonitor {
         }
     }
 
-    /// Recalculate speed and classification.
-    /// Must be called within queue.sync block.
-    private func recalculateSpeed() {
-        let validSamples = samples.filter { $0.isRecent(window: windowSeconds) }
-
-        guard validSamples.count >= UploadConstants.NETWORK_SPEED_MIN_SAMPLES else {
+    /// Refresh snapshot from native core.
+    /// Must be called inside queue.sync.
+    private func refreshSnapshotLocked(now: TimeInterval) {
+        guard nativeEnabled else {
             _currentClass = .unknown
             _currentSpeedMbps = 0.0
+            _currentSampleCount = 0
+            _currentReliable = false
             return
         }
 
-        // Weighted average: recent samples have more weight
-        var weightedSum: Double = 0.0
-        var weightSum: Double = 0.0
-        let now = Date()
-
-        for sample in validSamples {
-            let age = now.timeIntervalSince(sample.timestamp)
-            // Linear decay: newer samples weighted more heavily
-            let weight = max(0.1, 1.0 - (age / windowSeconds))
-            weightedSum += sample.speedMbps * weight
-            weightSum += weight
+        var rawClass: Int32 = Int32(AETHER_NETWORK_SPEED_CLASS_UNKNOWN)
+        var rawSpeedMbps: Double = 0
+        var rawSampleCount: Int32 = 0
+        var rawReliable: Int32 = 0
+        let rc = aether_network_speed_snapshot(
+            &nativeState,
+            now,
+            &rawClass,
+            &rawSpeedMbps,
+            &rawSampleCount,
+            &rawReliable
+        )
+        guard rc == 0 else {
+            nativeEnabled = false
+            _currentClass = .unknown
+            _currentSpeedMbps = 0.0
+            _currentSampleCount = 0
+            _currentReliable = false
+            return
         }
-
-        _currentSpeedMbps = weightSum > 0 ? weightedSum / weightSum : 0.0
-        _currentClass = classifySpeed(_currentSpeedMbps)
-        lastCalculationTime = now
+        _currentClass = fromNativeClass(rawClass)
+        _currentSpeedMbps = max(0, rawSpeedMbps.isFinite ? rawSpeedMbps : 0)
+        _currentSampleCount = max(0, Int(rawSampleCount))
+        _currentReliable = rawReliable != 0
     }
 
-    /// Classify speed into a NetworkSpeedClass.
-    /// - Parameter mbps: Speed in megabits per second
-    /// - Returns: Corresponding speed class
-    private func classifySpeed(_ mbps: Double) -> NetworkSpeedClass {
-        // Protect threshold comparisons from floating-point boundary jitter.
-        let epsilon = 1e-9
-        if mbps + epsilon < UploadConstants.NETWORK_SPEED_SLOW_MBPS {
+    private func recordNativeSampleLocked(_ sample: SpeedSample) {
+        guard nativeEnabled else { return }
+        let rcRecord = aether_network_speed_record_sample(
+            &nativeState,
+            sample.bytesTransferred,
+            sample.durationSeconds,
+            sample.timestamp.timeIntervalSince1970
+        )
+        if rcRecord != 0 {
+            nativeEnabled = false
+        }
+    }
+
+    private func fromNativeClass(_ raw: Int32) -> NetworkSpeedClass {
+        switch raw {
+        case Int32(AETHER_NETWORK_SPEED_CLASS_SLOW):
             return .slow
-        }
-        if mbps + epsilon < UploadConstants.NETWORK_SPEED_NORMAL_MBPS {
+        case Int32(AETHER_NETWORK_SPEED_CLASS_NORMAL):
             return .normal
-        }
-        if mbps + epsilon < UploadConstants.NETWORK_SPEED_ULTRAFAST_MBPS {
+        case Int32(AETHER_NETWORK_SPEED_CLASS_FAST):
             return .fast
+        case Int32(AETHER_NETWORK_SPEED_CLASS_ULTRAFAST):
+            return .ultrafast
+        default:
+            return .unknown
         }
-        return .ultrafast
+    }
+
+    private func nativeClassCode(_ speedClass: NetworkSpeedClass) -> Int32 {
+        switch speedClass {
+        case .slow:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_SLOW)
+        case .normal:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_NORMAL)
+        case .fast:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_FAST)
+        case .ultrafast:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_ULTRAFAST)
+        case .unknown:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_UNKNOWN)
+        }
     }
 }
 

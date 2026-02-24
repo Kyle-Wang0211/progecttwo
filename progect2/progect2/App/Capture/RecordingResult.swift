@@ -13,35 +13,35 @@ import Foundation
 /// Recording Result
 ///
 /// Result of a video recording session.
-public struct RecordingResult: Sendable {
+struct RecordingResult {
     /// Output file URL
-    public let fileURL: URL
+    let fileURL: URL
     
     /// Recording duration (seconds)
-    public let duration: TimeInterval
+    let duration: TimeInterval
     
     /// File size (bytes)
-    public let fileSize: Int64
+    let fileSize: Int64
     
     /// Recording start time
-    public let startTime: Date
+    let startTime: Date
     
     /// Recording end time
-    public let endTime: Date
+    let endTime: Date
     
     /// Capture metadata
-    public let metadata: CaptureMetadata?
+    let metadata: CaptureMetadata?
     
     /// IMU data (if collected)
-    public let imuData: [IMUDataPoint]?
+    let imuData: [IMUDataPoint]?
     
     /// LiDAR depth data (if collected)
-    public let lidarData: [LiDARDepthFrame]?
+    let lidarData: [LiDARDepthFrame]?
     
     /// Recording errors (if any)
-    public let errors: [RecordingError]?
+    let errors: [RecordingResultError]?
     
-    public init(
+    init(
         fileURL: URL,
         duration: TimeInterval,
         fileSize: Int64,
@@ -50,7 +50,7 @@ public struct RecordingResult: Sendable {
         metadata: CaptureMetadata? = nil,
         imuData: [IMUDataPoint]? = nil,
         lidarData: [LiDARDepthFrame]? = nil,
-        errors: [RecordingError]? = nil
+        errors: [RecordingResultError]? = nil
     ) {
         self.fileURL = fileURL
         self.duration = duration
@@ -93,7 +93,7 @@ public struct LiDARDepthFrame: Sendable {
 }
 
 /// Recording Error
-public enum RecordingError: Error, Sendable {
+enum RecordingResultError: Error, Sendable {
     case permissionDenied
     case cameraUnavailable
     case recordingFailed(String)
@@ -103,7 +103,7 @@ public enum RecordingError: Error, Sendable {
     case interruption(String)
     case configurationFailed(ConfigurationError)
     
-    public enum ConfigurationError: Sendable {
+    enum ConfigurationError: Sendable {
         case permissionNotDetermined
         case cameraUnavailable
         case formatNotSupported

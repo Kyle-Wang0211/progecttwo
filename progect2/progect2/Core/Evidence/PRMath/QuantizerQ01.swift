@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Type-safe quantizer for [0, 1] values only
 ///
@@ -21,6 +24,12 @@ public enum QuantizerQ01 {
     public static let scale: Double = 1e12
     public static let scaleInt64: Int64 = 1_000_000_000_000
 
+    @inline(__always)
+    private static func failClosed<T>(_ fallback: T) -> T {
+        assertionFailure("CAetherNativeBridge is required for QuantizerQ01 kernels")
+        return fallback
+    }
+
     /// Quantize [0, 1] value to Int64
     ///
     /// PRECONDITION: value ∈ [0, 1]
@@ -30,10 +39,12 @@ public enum QuantizerQ01 {
     /// - Returns: Quantized Int64 value
     @inlinable
     public static func quantize(_ value: Double) -> Int64 {
-        // Clamp to valid range (defensive)
-        let clamped = max(0.0, min(1.0, value))
-        // Round half away from zero (deterministic)
-        return Int64((clamped * scale).rounded(.toNearestOrAwayFromZero))
+        #if canImport(CAetherNativeBridge)
+        return aether_quantize_q01(value)
+        #else
+        _ = value
+        return failClosed(0)
+        #endif
     }
 
     /// Dequantize Int64 back to Double
@@ -42,7 +53,12 @@ public enum QuantizerQ01 {
     /// - Returns: Double value ∈ [0, 1]
     @inlinable
     public static func dequantize(_ q: Int64) -> Double {
-        return Double(q) / scale
+        #if canImport(CAetherNativeBridge)
+        return aether_dequantize_q01(q)
+        #else
+        _ = q
+        return failClosed(0.0)
+        #endif
     }
 
     /// Check if two quantized values are equal
@@ -65,6 +81,13 @@ public enum QuantizerQ01 {
     /// - Returns: true if within tolerance
     @inlinable
     public static func areClose(_ a: Int64, _ b: Int64, tolerance: Int64 = 1) -> Bool {
-        return abs(a - b) <= tolerance
+        #if canImport(CAetherNativeBridge)
+        return aether_quantized_are_close(a, b, tolerance) != 0
+        #else
+        _ = a
+        _ = b
+        _ = tolerance
+        return failClosed(false)
+        #endif
     }
 }

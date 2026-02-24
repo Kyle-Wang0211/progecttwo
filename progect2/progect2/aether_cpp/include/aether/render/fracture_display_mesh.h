@@ -26,6 +26,11 @@ struct FragmentVisualParams {
     float metallic{0.0f};
     float roughness{0.0f};
     float wedge_thickness{0.0f};
+
+    // PBR extension fields (Cook-Torrance material)
+    float f0{0.04f};                   // Fresnel reflectance at normal incidence
+    float clearcoat{0.0f};             // Clearcoat layer intensity [0,1]
+    float ambient_occlusion{1.0f};     // Ambient occlusion factor [0,1]
 };
 
 core::Status generate_fracture_fragments(

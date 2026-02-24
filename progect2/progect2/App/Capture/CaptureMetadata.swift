@@ -15,6 +15,7 @@
 
 import Foundation
 import AVFoundation
+import Aether3DCore
 
 // MARK: - Error Types
 
@@ -146,13 +147,13 @@ enum WarningCode: String, Codable {
 
 // MARK: - v4.2 Types
 
-enum VideoCodec: String, Codable {
+enum VideoCodec: String, Codable, Sendable {
     case hevc
     case h264
     case unknown
 }
 
-enum DiagnosticEventCode: String, Codable {
+enum DiagnosticEventCode: String, Codable, Sendable {
     case startRequested
     case sessionConfigured
     case formatSelected
@@ -190,12 +191,12 @@ enum DiagnosticEventCode: String, Codable {
 
 // MARK: - v4.3 Types
 
-enum FinishDeliveryWinner: String, Codable {
+enum FinishDeliveryWinner: String, Codable, Sendable {
     case didFinish
     case finalizeTimeout
 }
 
-enum DiagnosticNote: Codable, Equatable {
+enum DiagnosticNote: Codable, Equatable, Sendable {
     case tierFpsCodec(tier: ResolutionTier, fps: Int, codec: VideoCodec)
     case elapsedSeconds(Int)
     case reasonCode(String)  // Closed set: "diskFull", "systemError", "finishWithoutStart", "unknown"
@@ -354,4 +355,3 @@ struct CaptureMetadata: Codable, Equatable {
         diagnostics = newList
     }
 }
-

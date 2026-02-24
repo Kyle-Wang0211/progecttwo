@@ -97,7 +97,7 @@ kernel void integrateTSDF(
         );
 
         // Bounds check (BUG-11: use params, fix off-by-one: valid range [0, width) and [0, height))
-        if (pixel.x < 0 || pixel.x >= params.depthWidth || pixel.y < 0 || pixel.y >= params.depthHeight) continue;
+        if (pixel.x < 0 || pixel.x >= float(params.depthWidth) || pixel.y < 0 || pixel.y >= float(params.depthHeight)) continue;
 
         // Bilinear-sampled depth (hardware-accelerated, improves sub-pixel quality)
         constexpr sampler depthSampler(coord::pixel, filter::linear, address::clamp_to_edge);
@@ -105,7 +105,7 @@ kernel void integrateTSDF(
 
         if (isnan(measured_depth) || measured_depth < params.depthMin) continue;
 
-        precise float sdf = measured_depth - p_cam.z;  // precise: prevent reordering
+        float sdf = measured_depth - p_cam.z;  // precise: prevent reordering
 
         if (sdf > truncation) continue;  // Too far in front
 
@@ -141,17 +141,17 @@ kernel void integrateTSDF(
         float w_dist = 1.0 / (1.0 + params.distanceDecayAlpha * depth * depth);
 
         float w_obs = w_conf * w_angle * w_dist;
-        precise float sdf_normalized = clamp(sdf / truncation, -1.0f, 1.0f);
+        float sdf_normalized = clamp(sdf / truncation, -1.0f, 1.0f);
 
         // Running weighted average fusion (Curless & Levoy 1996)
-        precise float new_sdf = (float(old_sdf) * old_weight + sdf_normalized * w_obs)
+        float new_sdf = (float(old_sdf) * old_weight + sdf_normalized * w_obs)
                                / (old_weight + w_obs);
         
         // Guardrail #26: SDF range check — clamp normalized SDF to [-1.0, +1.0]
         new_sdf = clamp(new_sdf, -1.0f, 1.0f);
         
         // UX-1: SDF Dead Zone (BUG-11: from params)
-        precise float sdfDelta = abs(new_sdf - float(old_sdf));
+        float sdfDelta = abs(new_sdf - float(old_sdf));
         float deadZone = params.sdfDeadZoneBase + params.sdfDeadZoneWeightScale * (float(old_weight) / float(params.weightMax));
         if (sdfDelta < deadZone) {
             continue;  // Skip update — no visible change

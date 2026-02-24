@@ -21,19 +21,20 @@ fatalError("Crypto module required")
 // MARK: - Repo Root Detection
 
 func findRepoRoot() -> String {
-    // Try git rev-parse first
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["git", "rev-parse", "--show-toplevel"]
-    
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = Pipe()
-    
+    // Try git rev-parse first (only available on macOS)
+    #if os(macOS)
     do {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "rev-parse", "--show-toplevel"]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+
         try process.run()
         process.waitUntilExit()
-        
+
         if process.terminationStatus == 0 {
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             if let root = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -44,7 +45,8 @@ func findRepoRoot() -> String {
     } catch {
         // Fall through to walking
     }
-    
+    #endif
+
     // Fallback: walk up from current directory to find Package.swift
     var currentDir = FileManager.default.currentDirectoryPath
     while currentDir != "/" {

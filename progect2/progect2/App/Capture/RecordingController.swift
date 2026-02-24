@@ -19,6 +19,14 @@ import Foundation
 import AVFoundation
 import UIKit
 import os.log
+import Aether3DCore
+
+private enum RecordingControllerConstants {
+    static let thermalPlatform = "ios"
+    static let timestampFormat = "yyyyMMdd'T'HHmmss'Z'"
+    static let timestampLocale = "en_US_POSIX"
+    static let maxFilenameCollisionRetries = 3
+}
 
 // MARK: - Dependency Protocols
 
@@ -77,8 +85,11 @@ private struct DefaultFileManagerProvider: FileManagerProvider {
     }
     
     func freeDiskBytes(for url: URL) -> UInt64? {
-        try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage
+        guard let bytes = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage else {
+            return nil
+        }
+        return UInt64(clamping: bytes)
     }
     
     func createDirectory(at url: URL, withIntermediateDirectories createIntermediates: Bool) throws {
@@ -105,7 +116,7 @@ enum RecordingState: Equatable {
     case failed(RecordingError)
 }
 
-final class RecordingController: NSObject {
+final class RecordingController: NSObject, @unchecked Sendable {
     private let cameraSession: CameraSessionProtocol
     private let interruptionHandler: InterruptionHandler
     private let thermalProvider: ThermalStateProvider
@@ -130,7 +141,7 @@ final class RecordingController: NSObject {
     var onFinish: ((Result<CaptureMetadata, RecordingError>) -> Void)?
     var onStateChange: ((String) -> Void)?
     
-    init(cameraSession: CameraSessionProtocol,
+    fileprivate init(cameraSession: CameraSessionProtocol,
          interruptionHandler: InterruptionHandler,
          thermalProvider: ThermalStateProvider = DefaultThermalStateProvider(),
          fileManager: FileManagerProvider = DefaultFileManagerProvider(),
@@ -156,7 +167,7 @@ final class RecordingController: NSObject {
             appVersion: bundleInfo.appVersion,
             thermalPreflightWeight: thermalProvider.currentState.weight,
             thermalMaxWeight: thermalProvider.currentState.weight,
-            thermalPlatform: CaptureRecordingConstants.thermalPlatform,
+            thermalPlatform: RecordingControllerConstants.thermalPlatform,
             maxBytesConfigured: CaptureRecordingConstants.maxBytes,
             maxDurationConfigured: CaptureRecordingConstants.maxDurationSeconds,
             audioPolicy: .ignored,
@@ -358,9 +369,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
     private func startFileSizePolling(fileURL: URL) {
         // Initial delay before first poll
         sizePollToken = timerScheduler.schedule(after: CaptureRecordingConstants.fileSizePollStartDelaySeconds) { [weak self] in
-            DispatchQueue.main.async {
-                self?.pollFileSize(fileURL: fileURL)
-            }
+            self?.pollFileSize(fileURL: fileURL)
         }
     }
     
@@ -406,9 +415,7 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
         }
         
         sizePollToken = timerScheduler.schedule(after: interval) { [weak self] in
-            DispatchQueue.main.async {
-                self?.pollFileSize(fileURL: fileURL)
-            }
+            self?.pollFileSize(fileURL: fileURL)
         }
     }
     
@@ -671,14 +678,14 @@ extension RecordingController: AVCaptureFileOutputRecordingDelegate {
         
         let uuid = UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
         let formatter = DateFormatter()
-        formatter.dateFormat = CaptureRecordingConstants.timestampFormat
-        formatter.locale = Locale(identifier: CaptureRecordingConstants.timestampLocale)
+        formatter.dateFormat = RecordingControllerConstants.timestampFormat
+        formatter.locale = Locale(identifier: RecordingControllerConstants.timestampLocale)
         formatter.timeZone = TimeZone(identifier: "UTC")
         let timestamp = formatter.string(from: clock.now())
         let baseName = "\(uuid)_\(timestamp)"
         var candidate = directory.appendingPathComponent("\(baseName).mov")
         
-        for i in 0..<CaptureRecordingConstants.maxFilenameCollisionRetries {
+        for i in 0..<RecordingControllerConstants.maxFilenameCollisionRetries {
             if !fileManager.fileExists(at: candidate) {
                 if i > 0 {
                     addWarning(.filenameCollision)
@@ -783,4 +790,3 @@ extension ProcessInfo.ThermalState {
         }
     }
 }
-

@@ -25,6 +25,20 @@ std::uint8_t level_from_observation_count(int observation_count) {
     return 6u;
 }
 
+std::uint32_t default_view_count_for_level(std::uint8_t level) {
+    switch (level) {
+        case 0u: return 0u;
+        case 1u: return 1u;
+        case 2u: return 3u;
+        case 3u: return 6u;
+        case 4u: return 10u;
+        case 5u: return 15u;
+        case 6u:
+        default:
+            return 25u;
+    }
+}
+
 bool is_valid_config(const CoverageEstimatorConfig& config) {
     if (!(config.ema_alpha >= 0.0 && config.ema_alpha <= 1.0) ||
         !(config.max_coverage_delta_per_sec >= 0.0) ||
@@ -93,6 +107,8 @@ core::Status CoverageEstimator::update(
     for (std::size_t i = 0u; i < cell_count; ++i) {
         const auto& cell = cells[i];
         const std::uint8_t level = cell.level < 7u ? cell.level : 6u;
+        const std::uint32_t view_count =
+            cell.view_count > 0u ? cell.view_count : default_view_count_for_level(level);
         const double area = std::max(0.0, cell.area_weight);
         if (area <= 0.0) {
             continue;
@@ -107,7 +123,7 @@ core::Status CoverageEstimator::update(
         const double unknown = clamp01(sealed.unknown);
         const double plausibility = clamp01(occupied + unknown);  // DS Pl upper bound
 
-        const double view_norm = clamp01(static_cast<double>(cell.view_count) / 12.0);
+        const double view_norm = clamp01(static_cast<double>(view_count) / 12.0);
         const double diversity_factor = 1.0 + config_.view_diversity_boost * view_norm;
         const double effective_area = area * diversity_factor;
 
@@ -119,7 +135,7 @@ core::Status CoverageEstimator::update(
             // Higher Fisher → more informative cell → higher weight.
             const double p_safe = std::max(0.01, std::min(0.99, occupied));
             const double n = static_cast<double>(
-                std::max(1u, static_cast<unsigned>(cell.view_count)));
+                std::max(1u, static_cast<unsigned>(view_count)));
             const double fisher = n / (p_safe * (1.0 - p_safe));
             weight = std::min(1.0,
                 config_.fisher_floor + (1.0 - config_.fisher_floor)
@@ -157,7 +173,7 @@ core::Status CoverageEstimator::update(
             const double kl = b * std::log(2.0 * b)
                             + (1.0 - b) * std::log(2.0 * (1.0 - b));
             const double n_obs = static_cast<double>(
-                std::max(1u, static_cast<unsigned>(cell.view_count)));
+                std::max(1u, static_cast<unsigned>(view_count)));
             const double cell_risk = std::exp(-n_obs * std::max(0.0, kl));
             pac_sum += cell_risk;
             if (cell_risk > pac_max) pac_max = cell_risk;

@@ -299,73 +299,74 @@ public enum PureVisionRuntimeGateEvaluator {
         if let native = NativePureVisionRuntimeBridge.evaluateGates(metrics) {
             return native
         }
-        return evaluateSwift(metrics)
+        return failClosed(metrics)
     }
 
     public static func failedGateIDs(_ metrics: PureVisionRuntimeMetrics) -> [PureVisionGateID] {
         if let native = NativePureVisionRuntimeBridge.failedGateIDs(metrics) {
             return native
         }
-        return evaluateSwift(metrics).filter { !$0.passed }.map(\.gateId)
+        return PureVisionGateID.allCases
     }
 
-    private static func evaluateSwift(_ metrics: PureVisionRuntimeMetrics) -> [PureVisionGateResult] {
-        [
+    private static func failClosed(_ metrics: PureVisionRuntimeMetrics) -> [PureVisionGateResult] {
+        let reasonThreshold = Double.infinity
+        return [
             .init(
                 gateId: .baseline,
-                passed: metrics.baselinePixels >= PureVisionRuntimeConstants.K_OBS_MIN_BASELINE_PIXELS,
+                passed: false,
                 observed: metrics.baselinePixels,
-                threshold: PureVisionRuntimeConstants.K_OBS_MIN_BASELINE_PIXELS,
-                comparator: ">="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
             .init(
                 gateId: .blur,
-                passed: metrics.blurLaplacian >= CoreBlurThresholds.frameRejection,
+                passed: false,
                 observed: metrics.blurLaplacian,
-                threshold: CoreBlurThresholds.frameRejection,
-                comparator: ">="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
             .init(
                 gateId: .orbFeatures,
-                passed: metrics.orbFeatures >= FrameQualityConstants.MIN_ORB_FEATURES_FOR_SFM,
+                passed: false,
                 observed: Double(metrics.orbFeatures),
-                threshold: Double(FrameQualityConstants.MIN_ORB_FEATURES_FOR_SFM),
-                comparator: ">="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
             .init(
                 gateId: .parallax,
-                passed: metrics.parallaxRatio >= PureVisionRuntimeConstants.K_OBS_REQ_PARALLAX_RATIO,
+                passed: false,
                 observed: metrics.parallaxRatio,
-                threshold: PureVisionRuntimeConstants.K_OBS_REQ_PARALLAX_RATIO,
-                comparator: ">="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
             .init(
                 gateId: .depthSigma,
-                passed: metrics.depthSigmaMeters <= PureVisionRuntimeConstants.K_OBS_SIGMA_Z_TARGET_M,
+                passed: false,
                 observed: metrics.depthSigmaMeters,
-                threshold: PureVisionRuntimeConstants.K_OBS_SIGMA_Z_TARGET_M,
-                comparator: "<="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
             .init(
                 gateId: .closureRatio,
-                passed: metrics.closureRatio >= PureVisionRuntimeConstants.K_VOLUME_CLOSURE_RATIO_MIN,
+                passed: false,
                 observed: metrics.closureRatio,
-                threshold: PureVisionRuntimeConstants.K_VOLUME_CLOSURE_RATIO_MIN,
-                comparator: ">="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
             .init(
                 gateId: .unknownVoxelRatio,
-                passed: metrics.unknownVoxelRatio <= PureVisionRuntimeConstants.K_VOLUME_UNKNOWN_VOXEL_MAX,
+                passed: false,
                 observed: metrics.unknownVoxelRatio,
-                threshold: PureVisionRuntimeConstants.K_VOLUME_UNKNOWN_VOXEL_MAX,
-                comparator: "<="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
             .init(
                 gateId: .thermal,
-                passed: metrics.thermalCelsius <= ThermalConstants.thermalCriticalC,
+                passed: false,
                 observed: metrics.thermalCelsius,
-                threshold: ThermalConstants.thermalCriticalC,
-                comparator: "<="
+                threshold: reasonThreshold,
+                comparator: "native_unavailable"
             ),
         ]
     }
@@ -554,4 +555,3 @@ public enum FirstScanKPIEvaluator {
         return "unknown_failure"
     }
 }
-

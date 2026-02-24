@@ -9,9 +9,11 @@
 //
 
 import UIKit
+import Aether3DCore
 #if canImport(SceneKit) && canImport(ModelIO)
 import ModelIO
 import SceneKit
+import SceneKit.ModelIO
 #endif
 
 enum ViewerError: Error {
@@ -107,12 +109,14 @@ final class WhiteboxViewerViewController: UIViewController {
         }
 
         let asset = MDLAsset(url: artifactURL)
-        guard asset.count > 0 else { return nil }
-
+        asset.loadTextures()
+        guard let mdlScene = try? SCNScene(mdlAsset: asset),
+              !mdlScene.rootNode.childNodes.isEmpty else {
+            return nil
+        }
         let root = SCNNode()
-        for i in 0..<asset.count {
-            let object = asset.object(at: i)
-            root.addChildNode(SCNNode(mdlObject: object))
+        for node in mdlScene.rootNode.childNodes {
+            root.addChildNode(node.clone())
         }
         return root.childNodes.isEmpty ? nil : root
     }

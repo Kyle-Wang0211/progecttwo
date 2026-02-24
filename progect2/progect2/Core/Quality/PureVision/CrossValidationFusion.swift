@@ -84,15 +84,10 @@ public enum CrossValidationFusion {
         if let native = NativePureVisionRuntimeBridge.evaluateOutlier(input) {
             return native
         }
-
-        let mlSaysInlier = input.mlInlierScore >= input.mlInlierThreshold
-        if input.ruleInlier && mlSaysInlier {
-            return .init(decision: .keep, reasonCode: "OUTLIER_BOTH_INLIER")
-        }
-        if !input.ruleInlier && !mlSaysInlier {
-            return .init(decision: .reject, reasonCode: "OUTLIER_BOTH_REJECT")
-        }
-        return .init(decision: .downgrade, reasonCode: "OUTLIER_DISAGREEMENT_DOWNGRADE")
+        return .init(
+            decision: .downgrade,
+            reasonCode: "OUTLIER_NATIVE_RUNTIME_UNAVAILABLE"
+        )
     }
 
     /// Calibration is promoted to measured-grade only when both lanes are good and mutually consistent.
@@ -100,19 +95,9 @@ public enum CrossValidationFusion {
         if let native = NativePureVisionRuntimeBridge.evaluateCalibration(input) {
             return native
         }
-
-        let baselineGood = input.baselineErrorCm <= input.maxAllowedErrorCm
-        let mlGood = input.mlErrorCm <= input.maxAllowedErrorCm
-        let divergence = abs(input.baselineErrorCm - input.mlErrorCm)
-        let consistent = divergence <= input.maxDivergenceCm
-
-        if baselineGood && mlGood && consistent {
-            return .init(decision: .keep, reasonCode: "CALIBRATION_BOTH_PASS")
-        }
-        if !baselineGood && !mlGood {
-            return .init(decision: .reject, reasonCode: "CALIBRATION_BOTH_FAIL")
-        }
-        return .init(decision: .downgrade, reasonCode: "CALIBRATION_DISAGREEMENT_OR_DIVERGENCE")
+        return .init(
+            decision: .downgrade,
+            reasonCode: "CALIBRATION_NATIVE_RUNTIME_UNAVAILABLE"
+        )
     }
 }
-

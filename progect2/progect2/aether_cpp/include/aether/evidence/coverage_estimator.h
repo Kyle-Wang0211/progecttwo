@@ -94,6 +94,12 @@ struct CoverageResult {
 
     // Number of cells with individual risk < 0.01 (well-certified cells).
     std::size_t pac_certified_cell_count{0};
+
+    // ── Monte Carlo confidence intervals (P2b extension) ──
+    double coverage_ci_low{0.0};       // 5th percentile of coverage
+    double coverage_ci_high{0.0};      // 95th percentile of coverage
+    double belief_ci_low{0.0};         // 5th percentile of DS Belief
+    double belief_ci_high{0.0};        // 95th percentile of DS Belief
 };
 
 class CoverageEstimator {

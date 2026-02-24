@@ -46,28 +46,33 @@ public struct DirectionalAffordanceView: View {
             
             // Convert 3D direction to 2D screen direction
             let screenDir = projectToScreen(direction: hints.direction)
-            let angle = atan2(screenDir.y, screenDir.x)
+            let angle = CGFloat(atan2(screenDir.y, screenDir.x))
             
             // Arrow shape
-            Path { path in
+            let arrowPath = Path { path in
                 let arrowLength: CGFloat = 30 * CGFloat(hints.intensity)
                 let arrowWidth: CGFloat = 15
+                let cosA = cos(angle)
+                let sinA = sin(angle)
+                let halfLength = arrowLength * 0.5
+                let perpX = -sinA
+                let perpY = cosA
                 
                 // Arrow tip
-                let tipX = centerX + cos(angle) * arrowLength
-                let tipY = centerY + sin(angle) * arrowLength
+                let tipX = centerX + cosA * arrowLength
+                let tipY = centerY + sinA * arrowLength
                 
                 // Arrow base
-                let baseX = centerX - cos(angle) * arrowLength * 0.5
-                let baseY = centerY - sin(angle) * arrowLength * 0.5
+                let baseX = centerX - cosA * halfLength
+                let baseY = centerY - sinA * halfLength
                 
                 // Left wing
-                let leftWingX = baseX + cos(angle + .pi / 2) * arrowWidth
-                let leftWingY = baseY + sin(angle + .pi / 2) * arrowWidth
+                let leftWingX = baseX + perpX * arrowWidth
+                let leftWingY = baseY + perpY * arrowWidth
                 
                 // Right wing
-                let rightWingX = baseX + cos(angle - .pi / 2) * arrowWidth
-                let rightWingY = baseY + sin(angle - .pi / 2) * arrowWidth
+                let rightWingX = baseX - perpX * arrowWidth
+                let rightWingY = baseY - perpY * arrowWidth
                 
                 path.move(to: CGPoint(x: tipX, y: tipY))
                 path.addLine(to: CGPoint(x: leftWingX, y: leftWingY))
@@ -75,8 +80,11 @@ public struct DirectionalAffordanceView: View {
                 path.addLine(to: CGPoint(x: rightWingX, y: rightWingY))
                 path.closeSubpath()
             }
-            .fill(Color.white.opacity(Double(hints.intensity)))
-            .stroke(Color.white.opacity(Double(hints.intensity)), lineWidth: 2)
+            let opacity = Double(hints.intensity)
+            ZStack {
+                arrowPath.fill(Color.white.opacity(opacity))
+                arrowPath.stroke(Color.white.opacity(opacity), lineWidth: 2)
+            }
         }
     }
     

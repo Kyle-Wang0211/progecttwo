@@ -10,12 +10,21 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Frame pacing normalizer
 ///
 /// Estimates FPS, detects frame drops, and normalizes timing windows.
 /// Ensures consistent frame pacing analysis.
 public actor FramePacingNormalizer {
+    #if canImport(CAetherNativeBridge)
+    private final class NativeRuntimeHandle: @unchecked Sendable {
+        let pointer: OpaquePointer
+        init(pointer: OpaquePointer) { self.pointer = pointer }
+    }
+    #endif
     
     // MARK: - Configuration
     
@@ -28,6 +37,11 @@ public actor FramePacingNormalizer {
     
     /// Estimated FPS
     private var estimatedFPS: Double?
+
+    /// Native pacing runtime handle
+    #if canImport(CAetherNativeBridge)
+    private let nativeRuntime: NativeRuntimeHandle?
+    #endif
     
     /// Frame drop history
     private var frameDrops: [(timestamp: Date, expectedInterval: TimeInterval, actualInterval: TimeInterval)] = []
@@ -36,6 +50,23 @@ public actor FramePacingNormalizer {
     
     public init(config: ExtremeProfile) {
         self.config = config
+        #if canImport(CAetherNativeBridge)
+        var runtime: OpaquePointer?
+        if aether_mobile_frame_pacing_create(1.0 / 60.0, 120, &runtime) == 0,
+           let runtime {
+            self.nativeRuntime = NativeRuntimeHandle(pointer: runtime)
+        } else {
+            self.nativeRuntime = nil
+        }
+        #endif
+    }
+
+    deinit {
+        #if canImport(CAetherNativeBridge)
+        if let nativeRuntime {
+            _ = aether_mobile_frame_pacing_destroy(nativeRuntime.pointer)
+        }
+        #endif
     }
     
     // MARK: - Frame Recording
@@ -49,65 +80,78 @@ public actor FramePacingNormalizer {
             frameTimestamps.removeFirst()
         }
         
-        // Update FPS estimate
-        if frameTimestamps.count >= 10 {
-            estimateFPS()
-        }
-        
-        // Detect frame drops
         if frameTimestamps.count >= 2 {
-            detectFrameDrops()
+            let last = frameTimestamps[frameTimestamps.count - 1]
+            let prev = frameTimestamps[frameTimestamps.count - 2]
+            let interval = max(1e-6, last.timeIntervalSince(prev))
+
+            #if canImport(CAetherNativeBridge)
+            if let nativeRuntime {
+                var pacingResult = aether_mobile_frame_pacing_result_t()
+                _ = aether_mobile_frame_pacing_record(nativeRuntime.pointer, interval, &pacingResult)
+            }
+            #endif
+
+            updateFromNativeIntervals()
         }
     }
-    
-    // MARK: - FPS Estimation
-    
-    /// Estimate FPS from timestamp history
-    private func estimateFPS() {
+
+    private func updateFromNativeIntervals() {
         guard frameTimestamps.count >= 2 else {
             estimatedFPS = nil
             return
         }
-        
-        // Compute average interval
-        var intervals: [TimeInterval] = []
+        var intervals = [Double]()
+        intervals.reserveCapacity(frameTimestamps.count - 1)
         for i in 1..<frameTimestamps.count {
-            let interval = frameTimestamps[i].timeIntervalSince(frameTimestamps[i-1])
-            intervals.append(interval)
+            let interval = frameTimestamps[i].timeIntervalSince(frameTimestamps[i - 1])
+            intervals.append(max(1e-6, interval))
         }
-        
-        // Use median to avoid outliers
-        intervals.sort()
-        let medianInterval = intervals[intervals.count / 2]
-        
-        estimatedFPS = 1.0 / medianInterval
-    }
-    
-    // MARK: - Frame Drop Detection
-    
-    /// Detect frame drops
-    private func detectFrameDrops() {
-        guard let fps = estimatedFPS, frameTimestamps.count >= 2 else { return }
-        
-        let expectedInterval = 1.0 / fps
-        
-        // Check last interval
-        let lastIndex = frameTimestamps.count - 1
-        let actualInterval = frameTimestamps[lastIndex].timeIntervalSince(frameTimestamps[lastIndex - 1])
-        
-        // If actual interval is significantly longer than expected, it's a drop
-        if actualInterval > expectedInterval * 1.5 {
+
+        #if canImport(CAetherNativeBridge)
+        var analysis = aether_mobile_frame_interval_analysis_t()
+        let rc = intervals.withUnsafeBufferPointer { ptr in
+            aether_mobile_analyze_frame_intervals(
+                ptr.baseAddress,
+                Int32(intervals.count),
+                &analysis
+            )
+        }
+        guard rc == 0 else {
+            estimatedFPS = nil
+            return
+        }
+
+        estimatedFPS = analysis.fps > 0 ? analysis.fps : nil
+
+        if let lastInterval = intervals.last,
+           analysis.average_interval_s > 0,
+           lastInterval > analysis.average_interval_s * 1.5 {
             frameDrops.append((
-                timestamp: frameTimestamps[lastIndex],
-                expectedInterval: expectedInterval,
-                actualInterval: actualInterval
+                timestamp: frameTimestamps.last ?? Date(),
+                expectedInterval: analysis.average_interval_s,
+                actualInterval: lastInterval
             ))
-            
-            // Keep only recent drops (last 50)
             if frameDrops.count > 50 {
                 frameDrops.removeFirst()
             }
         }
+        #else
+        let mean = intervals.reduce(0.0, +) / Double(intervals.count)
+        estimatedFPS = mean > 0 ? (1.0 / mean) : nil
+        if let lastInterval = intervals.last,
+           mean > 0,
+           lastInterval > mean * 1.5 {
+            frameDrops.append((
+                timestamp: frameTimestamps.last ?? Date(),
+                expectedInterval: mean,
+                actualInterval: lastInterval
+            ))
+            if frameDrops.count > 50 {
+                frameDrops.removeFirst()
+            }
+        }
+        #endif
     }
     
     // MARK: - Time Window Normalization
@@ -150,14 +194,20 @@ public actor FramePacingNormalizer {
     /// Compute average interval
     private func computeAverageInterval() -> TimeInterval? {
         guard frameTimestamps.count >= 2 else { return nil }
-        
-        var intervals: [TimeInterval] = []
+        var intervals = [Double]()
+        intervals.reserveCapacity(frameTimestamps.count - 1)
         for i in 1..<frameTimestamps.count {
-            let interval = frameTimestamps[i].timeIntervalSince(frameTimestamps[i-1])
-            intervals.append(interval)
+            intervals.append(max(1e-6, frameTimestamps[i].timeIntervalSince(frameTimestamps[i - 1])))
         }
-        
+        #if canImport(CAetherNativeBridge)
+        var analysis = aether_mobile_frame_interval_analysis_t()
+        let rc = intervals.withUnsafeBufferPointer { ptr in
+            aether_mobile_analyze_frame_intervals(ptr.baseAddress, Int32(intervals.count), &analysis)
+        }
+        return rc == 0 ? analysis.average_interval_s : nil
+        #else
         return intervals.reduce(0.0, +) / Double(intervals.count)
+        #endif
     }
     
     // MARK: - Queries

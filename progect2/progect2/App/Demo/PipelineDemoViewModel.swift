@@ -10,6 +10,7 @@
 
 import Foundation
 import SwiftUI
+import Aether3DCore
 #if canImport(AVFoundation)
 import AVFoundation
 #endif
@@ -100,7 +101,7 @@ final class PipelineDemoViewModel: ObservableObject {
         uiState = .generating(progress: nil)
         isRunning = true
         
-        currentTask = Task {
+        currentTask = Task { @MainActor in
             #if canImport(AVFoundation)
             let deviceTier = DeviceTier.current()
             let asset = AVAsset(url: url)

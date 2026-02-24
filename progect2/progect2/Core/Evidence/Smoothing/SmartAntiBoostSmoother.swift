@@ -28,15 +28,7 @@ public final class SmartAntiBoostSmoother: @unchecked Sendable {
     // ═══════════════════════════════════════════════════════════════════════
 
     private let config: SmootherConfig
-    private let windowSize: Int
     private let nativeHandle: OpaquePointer?
-
-    /// History buffer (pre-allocated)
-    private var history: ContiguousArray<Double>
-    private var historyCount: Int = 0
-
-    /// Last valid value (for trend detection)
-    private var lastValid: Double?
 
     /// Previous smoothed value (for change detection)
     private var previousSmoothed: Double?
@@ -54,12 +46,11 @@ public final class SmartAntiBoostSmoother: @unchecked Sendable {
     ///   - windowSize: Window size for median computation
     ///   - config: Configuration (default if not specified)
     public init(windowSize: Int = 5, config: SmootherConfig = .default) {
-        self.windowSize = max(1, windowSize)
+        let resolvedWindowSize = max(1, windowSize)
         self.config = config
-        self.history = ContiguousArray(repeating: 0.0, count: self.windowSize)
 #if canImport(CAetherNativeBridge)
         var nativeConfig = aether_smart_smoother_config_t(
-            window_size: Int32(self.windowSize),
+            window_size: Int32(resolvedWindowSize),
             jitter_band: config.jitterBand,
             anti_boost_factor: config.antiBoostFactor,
             normal_improve_factor: config.normalImproveFactor,
@@ -106,36 +97,13 @@ public final class SmartAntiBoostSmoother: @unchecked Sendable {
             }
         }
 #endif
-        // Check validity
+        // Fail-closed bridge behavior when native kernel is unavailable.
         guard value.isFinite else {
             return handleInvalidInput()
         }
-
-        // Reset invalid counter on valid input
         consecutiveInvalidCount = 0
-
-        // Update last valid
-        lastValid = value
-
-        // Update history (circular buffer style)
-        if historyCount < windowSize {
-            history[historyCount] = value
-            historyCount += 1
-        } else {
-            // Shift and add (could optimize with ring buffer index)
-            for i in 0..<(windowSize - 1) {
-                history[i] = history[i + 1]
-            }
-            history[windowSize - 1] = value
-        }
-
-        // Compute smoothed value
-        let smoothed = computeSmoothed(newValue: value)
-
-        // Update previous for next iteration
-        previousSmoothed = smoothed
-
-        return smoothed
+        previousSmoothed = value
+        return value
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -155,52 +123,6 @@ public final class SmartAntiBoostSmoother: @unchecked Sendable {
         return previousSmoothed ?? config.worstCaseFallback
     }
 
-    private func computeSmoothed(newValue: Double) -> Double {
-        guard historyCount > 0 else { return newValue }
-
-        // Compute median
-        let median = computeMedian()
-
-        // Get previous smoothed (or median if first time)
-        let previous = previousSmoothed ?? median
-
-        // Compute change
-        let change = newValue - previous
-
-        // Determine response based on change characteristics
-        if abs(change) < config.jitterBand {
-            // Within jitter band: use median (stable)
-            return median
-        } else if change > 0 {
-            // Improving: check if suspicious jump
-            if change > config.jitterBand * 3 {
-                // Suspicious jump (> 3x jitter band): use anti-boost
-                return previous + change * config.antiBoostFactor
-            } else {
-                // Normal improvement: use normal factor
-                return previous + change * config.normalImproveFactor
-            }
-        } else {
-            // Degrading: use degradation factor (usually 1.0 = immediate)
-            return previous + change * config.degradeFactor
-        }
-    }
-
-    private func computeMedian() -> Double {
-        guard historyCount > 0 else { return 0.0 }
-
-        // Copy valid portion and sort
-        var sorted = Array(history[0..<historyCount])
-        sorted.sort()
-
-        // Compute median
-        if historyCount % 2 == 0 {
-            return (sorted[historyCount / 2 - 1] + sorted[historyCount / 2]) / 2.0
-        } else {
-            return sorted[historyCount / 2]
-        }
-    }
-
     /// Reset all state
     public func reset() {
 #if canImport(CAetherNativeBridge)
@@ -208,8 +130,6 @@ public final class SmartAntiBoostSmoother: @unchecked Sendable {
             _ = aether_smart_smoother_reset(nativeHandle)
         }
 #endif
-        historyCount = 0
-        lastValid = nil
         previousSmoothed = nil
         consecutiveInvalidCount = 0
     }

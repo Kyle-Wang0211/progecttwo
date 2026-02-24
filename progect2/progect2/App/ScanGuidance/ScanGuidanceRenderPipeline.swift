@@ -13,6 +13,7 @@ import Metal
 import MetalKit
 import simd
 import QuartzCore  // for CACurrentMediaTime — OK in App/
+import Aether3DCore
 
 public final class ScanGuidanceRenderPipeline {
 
@@ -22,14 +23,20 @@ public final class ScanGuidanceRenderPipeline {
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
-    private var wedgeFillPipeline: MTLRenderPipelineState!
-    private var borderStrokePipeline: MTLRenderPipelineState!
-    private var depthStencilState: MTLDepthStencilState!
+    private var wedgeFillPipeline: MTLRenderPipelineState?
+    private var borderStrokePipeline: MTLRenderPipelineState?
+    private var metallicLightingPipeline: MTLRenderPipelineState?
+    private var colorCorrectionPipeline: MTLRenderPipelineState?
+    private var ambientOcclusionPipeline: MTLRenderPipelineState?
+    private var postProcessPipeline: MTLRenderPipelineState?
+    private var depthStencilState: MTLDepthStencilState?
     private var currentVertexCount: Int = 0
     private var currentIndexCount: Int = 0
+    private var lastWrittenBufferIndex: Int = 0
 
     // Sub-systems (Core/ pure algorithms)
     private let wedgeGenerator: WedgeGeometryGenerator
+    private let borderCalculator: AdaptiveBorderCalculator
     private let thermalAdapter: ThermalQualityAdapter
 
     // Sub-systems (App/ platform-specific)
@@ -49,6 +56,7 @@ public final class ScanGuidanceRenderPipeline {
         self.commandQueue = queue
         self.inflightSemaphore = DispatchSemaphore(value: Self.kMaxInflightBuffers)
         self.wedgeGenerator = WedgeGeometryGenerator()
+        self.borderCalculator = AdaptiveBorderCalculator()
         self.lightEstimator = EnvironmentLightEstimator()
         self.thermalAdapter = ThermalQualityAdapter()
         
@@ -172,7 +180,9 @@ public final class ScanGuidanceRenderPipeline {
         commandBuffer.addCompletedHandler { [weak self] _ in
             self?.inflightSemaphore.signal()
         }
-        let bufferIndex = currentBufferIndex
+        // Read from the buffer that was last written to by update()
+        let bufferIndex = lastWrittenBufferIndex
+        // Advance write index for next update() call
         currentBufferIndex = (currentBufferIndex + 1) % Self.kMaxInflightBuffers
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(
@@ -181,8 +191,22 @@ public final class ScanGuidanceRenderPipeline {
 
         encodeWedgeFill(encoder: encoder, bufferIndex: bufferIndex)
         encodeBorderStroke(encoder: encoder, bufferIndex: bufferIndex)
-        // Phase 2: Metallic lighting pass not implemented
-        // encodeMetallicLighting(encoder: encoder, bufferIndex: bufferIndex)
+
+        // Pass 3-6: thermal-aware pass mask from C++ engine
+        let mask = thermalAdapter.passMask
+        if mask & 0x04 != 0 {  // bit2: metallic lighting
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: metallicLightingPipeline)
+        }
+        if mask & 0x08 != 0 {  // bit3: color correction
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: colorCorrectionPipeline)
+        }
+        if mask & 0x10 != 0 {  // bit4: ambient occlusion
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: ambientOcclusionPipeline)
+        }
+        if mask & 0x20 != 0 {  // bit5: post-processing
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: postProcessPipeline)
+        }
+
         encoder.endEncoding()
     }
 
@@ -193,10 +217,6 @@ public final class ScanGuidanceRenderPipeline {
     public func resetPersistentVisualState() {
         wedgeGenerator.resetPersistentVisualState()
         borderCalculator.resetPersistentBorderState()
-    }
-
-    public func resetPersistentVisualState() {
-        wedgeGenerator.resetPersistentVisualState()
     }
 
     // MARK: - Private Methods
@@ -262,11 +282,44 @@ public final class ScanGuidanceRenderPipeline {
         } catch {
             throw ScanGuidanceError.pipelineCreationFailed("Failed to create border stroke pipeline: \(error)")
         }
+
+        // ── Pass 3-6: Additional rendering passes ──
+        // All share wedgeFillVertex; differ only in fragment function and blend mode.
+        // These passes are lightweight compositing layers — they fail gracefully if shader not found.
+
+        let additionalPasses: [(name: String, fragmentFn: String, target: ReferenceWritableKeyPath<ScanGuidanceRenderPipeline, MTLRenderPipelineState?>)] = [
+            ("Aether3D Metallic Lighting", "metallicLightingFragment", \.metallicLightingPipeline),
+            ("Aether3D Color Correction", "colorCorrectionFragment", \.colorCorrectionPipeline),
+            ("Aether3D Ambient Occlusion", "ambientOcclusionFragment", \.ambientOcclusionPipeline),
+            ("Aether3D Post-Processing", "postProcessFragment", \.postProcessPipeline),
+        ]
+
+        for pass in additionalPasses {
+            guard let fragmentFn = library.makeFunction(name: pass.fragmentFn) else {
+                continue  // Graceful: skip passes whose shaders aren't compiled yet
+            }
+            let desc = MTLRenderPipelineDescriptor()
+            desc.label = pass.name
+            desc.vertexFunction = wedgeVertexFn
+            desc.fragmentFunction = fragmentFn
+            desc.vertexDescriptor = ScanGuidanceVertexDescriptor.create()
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            desc.colorAttachments[0].isBlendingEnabled = true
+            desc.colorAttachments[0].sourceRGBBlendFactor = .one
+            desc.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            desc.colorAttachments[0].sourceAlphaBlendFactor = .one
+            desc.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            desc.depthAttachmentPixelFormat = .depth32Float
+
+            if let pipelineState = try? device.makeRenderPipelineState(descriptor: desc) {
+                self[keyPath: pass.target] = pipelineState
+            }
+        }
     }
 
     private func encodeWedgeFill(encoder: MTLRenderCommandEncoder, bufferIndex: Int) {
-        guard wedgeFillPipeline != nil else { return }
-        
+        guard let wedgeFillPipeline else { return }
+
         encoder.setRenderPipelineState(wedgeFillPipeline)
         encoder.setCullMode(.back)
         encoder.setDepthStencilState(depthStencilState)
@@ -299,8 +352,8 @@ public final class ScanGuidanceRenderPipeline {
     }
 
     private func encodeBorderStroke(encoder: MTLRenderCommandEncoder, bufferIndex: Int) {
-        guard borderStrokePipeline != nil else { return }
-        
+        guard let borderStrokePipeline else { return }
+
         encoder.setRenderPipelineState(borderStrokePipeline)
         encoder.setCullMode(.back)
         
@@ -329,6 +382,41 @@ public final class ScanGuidanceRenderPipeline {
         }
     }
 
+    /// Encode an additional compositing pass (Pass 3-6).
+    /// Reuses the same vertex/uniform/perTriangle buffers as wedge fill.
+    private func encodeAdditionalPass(
+        encoder: MTLRenderCommandEncoder,
+        bufferIndex: Int,
+        pipeline: MTLRenderPipelineState?
+    ) {
+        guard let pipeline else { return }
+        guard currentIndexCount > 0 else { return }
+
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setCullMode(.back)
+
+        encoder.setVertexBuffer(vertexBuffers[bufferIndex],
+                               offset: 0,
+                               index: ScanGuidanceVertexDescriptor.BufferIndex.vertexData)
+        encoder.setVertexBuffer(uniformBuffers[bufferIndex],
+                               offset: 0,
+                               index: ScanGuidanceVertexDescriptor.BufferIndex.uniforms)
+        encoder.setVertexBuffer(perTriangleBuffers[bufferIndex],
+                               offset: 0,
+                               index: ScanGuidanceVertexDescriptor.BufferIndex.perTriangleData)
+        encoder.setFragmentBuffer(uniformBuffers[bufferIndex],
+                                 offset: 0,
+                                 index: ScanGuidanceVertexDescriptor.BufferIndex.uniforms)
+
+        encoder.drawIndexedPrimitives(
+            type: .triangle,
+            indexCount: currentIndexCount,
+            indexType: .uint32,
+            indexBuffer: indexBuffers[bufferIndex],
+            indexBufferOffset: 0
+        )
+    }
+
     private func uploadToBuffers(
         wedgeData: WedgeVertexData,
         lightState: LightState,
@@ -343,7 +431,8 @@ public final class ScanGuidanceRenderPipeline {
         qualityTier: Int
     ) {
         let bufferIndex = currentBufferIndex
-        
+        lastWrittenBufferIndex = bufferIndex
+
         // ── Vertex Buffer ──
         let vertexCount = wedgeData.vertices.count
         let stride = MemoryLayout<Float>.size * 10 + MemoryLayout<UInt32>.size  // 44 bytes

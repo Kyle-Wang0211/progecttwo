@@ -9,6 +9,7 @@
 // ============================================================================
 
 import Foundation
+import CAetherNativeBridge
 
 /// Chunk sizing strategy enumeration.
 public enum ChunkSizingStrategy: String, Codable {
@@ -50,33 +51,67 @@ public final class AdaptiveChunkSizer {
 
     /// Calculate optimal chunk size based on current network conditions.
     public func calculateChunkSize() -> Int {
-        switch config.strategy {
-        case .fixed:
-            return UploadConstants.CHUNK_SIZE_DEFAULT_BYTES
-        case .adaptive:
-            return speedMonitor.getRecommendedChunkSize()
-        case .aggressive:
-            let speedClass = speedMonitor.getSpeedClass()
-            return speedClass.allowsAggressiveOptimization
-                ? config.maxChunkSize
-                : speedMonitor.getRecommendedChunkSize()
+        let speedClassCode = nativeSpeedClassCode(speedMonitor.getSpeedClass())
+        let recommended = speedMonitor.getRecommendedChunkSize()
+        var outChunk: Int32 = Int32(recommended)
+        let rc = aether_upload_calculate_chunk_size(
+            nativeStrategyCode(config.strategy),
+            speedClassCode,
+            Int32(recommended),
+            Int32(clamping: UploadConstants.CHUNK_SIZE_DEFAULT_BYTES),
+            Int32(clamping: config.maxChunkSize),
+            &outChunk
+        )
+        if rc == 0 {
+            return Int(outChunk)
         }
+        return recommended
     }
 
     /// Calculate optimal chunk size for a specific file size.
     public func calculateChunkSize(forFileSize fileSize: Int64) -> Int {
         let baseSize = calculateChunkSize()
-
-        // For small files, use smaller chunks
-        if fileSize < Int64(baseSize * 2) {
-            return max(config.minChunkSize, Int(fileSize / 2))
+        var outChunk: Int32 = Int32(clamping: baseSize)
+        let rc = aether_upload_calculate_chunk_size_for_file(
+            Int32(clamping: baseSize),
+            Int32(clamping: config.minChunkSize),
+            fileSize,
+            &outChunk
+        )
+        if rc == 0 {
+            return Int(outChunk)
         }
-
         return baseSize
     }
 
     /// Get recommended parallel upload count.
     public func getRecommendedParallelCount() -> Int {
         return speedMonitor.getRecommendedParallelCount()
+    }
+
+    private func nativeStrategyCode(_ strategy: ChunkSizingStrategy) -> Int32 {
+        switch strategy {
+        case .fixed:
+            return Int32(AETHER_UPLOAD_CHUNK_STRATEGY_FIXED)
+        case .adaptive:
+            return Int32(AETHER_UPLOAD_CHUNK_STRATEGY_ADAPTIVE)
+        case .aggressive:
+            return Int32(AETHER_UPLOAD_CHUNK_STRATEGY_AGGRESSIVE)
+        }
+    }
+
+    private func nativeSpeedClassCode(_ speedClass: NetworkSpeedClass) -> Int32 {
+        switch speedClass {
+        case .slow:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_SLOW)
+        case .normal:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_NORMAL)
+        case .fast:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_FAST)
+        case .ultrafast:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_ULTRAFAST)
+        case .unknown:
+            return Int32(AETHER_NETWORK_SPEED_CLASS_UNKNOWN)
+        }
     }
 }

@@ -61,6 +61,10 @@ public final class WedgeGeometryGenerator {
         case flat = 3
     }
 
+    /// Optional color mapper for perceptual color (Oklab).
+    /// When set, overrides C++ grayscale with Oklab-mapped RGB per display value.
+    public var colorMapper: ((Double) -> (r: Float, g: Float, b: Float))?
+
     private let nativeStyleRuntime: OpaquePointer?
     private var lastResolvedStyles: [aether_capture_style_output_t] = []
 
@@ -103,6 +107,9 @@ public final class WedgeGeometryGenerator {
 
     public func grayscaleForLastGenerate() -> [(Float, Float, Float)] {
         lastResolvedStyles.map { style in
+            if let mapper = colorMapper {
+                return mapper(Double(style.resolved_display))
+            }
             let gray = min(max(style.grayscale, 0.0), 1.0)
             return (gray, gray, gray)
         }
@@ -253,19 +260,7 @@ public final class WedgeGeometryGenerator {
                 SIMD3<Float>(value.x, value.y, value.z)
             }
         }
-
-        guard safeSegments > 0 else {
-            return [simd_normalize(topFaceNormal)]
-        }
-        var fallback: [SIMD3<Float>] = []
-        fallback.reserveCapacity(safeSegments + 1)
-        for i in 0...safeSegments {
-            let t = Float(i) / Float(safeSegments)
-            let mixed = topFaceNormal * (1.0 - t) + sideFaceNormal * t
-            let len = (mixed.x * mixed.x + mixed.y * mixed.y + mixed.z * mixed.z).squareRoot()
-            fallback.append(len > 0 ? mixed / len : mixed)
-        }
-        return fallback
+        return [simd_normalize(topFaceNormal)]
     }
 
     private func generateStateless(
@@ -276,42 +271,54 @@ public final class WedgeGeometryGenerator {
         let areas = triangles.map { max($0.areaSqM, 1e-8) }
         let sortedAreas = areas.sorted()
         let medianArea = max(1e-6, sortedAreas[sortedAreas.count / 2])
+        var config = aether_capture_style_runtime_config_t()
+        if aether_capture_style_runtime_default_config(&config) == 0 {
+            config.smoothing_alpha = 0.2
+            config.freeze_threshold = Float(ScanGuidanceConstants.s3ToS4Threshold)
+            config.min_thickness = Float(ScanGuidanceConstants.wedgeMinThicknessM)
+            config.max_thickness = Float(ScanGuidanceConstants.wedgeBaseThicknessM)
+            config.min_border_width = Float(ScanGuidanceConstants.borderMinWidthPx)
+            config.max_border_width = Float(ScanGuidanceConstants.borderMaxWidthPx)
+        }
+
+        var styleInputs = [aether_capture_style_input_t](
+            repeating: aether_capture_style_input_t(),
+            count: triangles.count
+        )
+        for (index, triangle) in triangles.enumerated() {
+            styleInputs[index].patch_key = stablePatchKey(triangle.patchId)
+            styleInputs[index].display = Float(min(max(displayValues[triangle.patchId] ?? 0.0, 0.0), 1.0))
+            styleInputs[index].area_sq_m = max(triangle.areaSqM, 1e-8)
+        }
+
+        var styleOutputs = [aether_capture_style_output_t](
+            repeating: aether_capture_style_output_t(),
+            count: triangles.count
+        )
+        let styleRC = styleInputs.withUnsafeBufferPointer { inputBuffer in
+            styleOutputs.withUnsafeMutableBufferPointer { outputBuffer in
+                aether_capture_style_resolve_stateless(
+                    &config,
+                    inputBuffer.baseAddress,
+                    Int32(styleInputs.count),
+                    medianArea,
+                    outputBuffer.baseAddress
+                )
+            }
+        }
+        if styleRC != 0 {
+            lastResolvedStyles = []
+            return WedgeVertexData(vertices: [], indices: [], triangleCount: triangles.count)
+        }
+        lastResolvedStyles = styleOutputs
+
         var nativeTriangles = [aether_wedge_input_triangle_t](
             repeating: aether_wedge_input_triangle_t(),
             count: triangles.count
         )
 
         for (index, triangle) in triangles.enumerated() {
-            let display = Float(min(max(displayValues[triangle.patchId] ?? 0.0, 0.0), 1.0))
-            var params = aether_fragment_visual_params_t()
-            let rc = aether_compute_fragment_visual_params(
-                display,
-                1.0,
-                max(triangle.areaSqM, 1e-8),
-                medianArea,
-                &params
-            )
-            let metallic = rc == 0 && params.metallic.isFinite
-                ? min(max(params.metallic, 0.0), 1.0)
-                : Float(ScanGuidanceConstants.metallicBase)
-            let roughness = rc == 0 && params.roughness.isFinite
-                ? min(max(params.roughness, 0.0), 1.0)
-                : Float(ScanGuidanceConstants.roughnessBase)
-            let thickness = rc == 0 && params.wedge_thickness.isFinite
-                ? min(
-                    max(params.wedge_thickness, Float(ScanGuidanceConstants.wedgeMinThicknessM)),
-                    Float(ScanGuidanceConstants.wedgeBaseThicknessM)
-                )
-                : Float(ScanGuidanceConstants.wedgeMinThicknessM)
-            let border = rc == 0 && params.border_width_px.isFinite
-                ? min(
-                    max(params.border_width_px, Float(ScanGuidanceConstants.borderMinWidthPx)),
-                    Float(ScanGuidanceConstants.borderMaxWidthPx)
-                )
-                : Float(ScanGuidanceConstants.borderMinWidthPx)
-            let gray = rc == 0 && params.fill_gray.isFinite
-                ? min(max(params.fill_gray, 0.0), 1.0)
-                : display
+            let style = styleOutputs[index]
 
             let (v0, v1, v2) = triangle.vertices
             nativeTriangles[index].v0 = aether_float3_t(x: v0.x, y: v0.y, z: v0.z)
@@ -322,26 +329,11 @@ public final class WedgeGeometryGenerator {
                 y: triangle.normal.y,
                 z: triangle.normal.z
             )
-            nativeTriangles[index].metallic = metallic
-            nativeTriangles[index].roughness = roughness
-            nativeTriangles[index].display = display
-            nativeTriangles[index].thickness = thickness
+            nativeTriangles[index].metallic = style.metallic
+            nativeTriangles[index].roughness = style.roughness
+            nativeTriangles[index].display = style.resolved_display
+            nativeTriangles[index].thickness = style.thickness
             nativeTriangles[index].triangle_id = UInt32(index)
-
-            var style = aether_capture_style_output_t()
-            style.resolved_display = display
-            style.metallic = metallic
-            style.roughness = roughness
-            style.thickness = thickness
-            style.border_width = border
-            style.grayscale = gray
-            style.visual_should_freeze = display >= Float(ScanGuidanceConstants.s3ToS4Threshold) ? 1 : 0
-            style.border_should_freeze = style.visual_should_freeze
-            if index < lastResolvedStyles.count {
-                lastResolvedStyles[index] = style
-            } else {
-                lastResolvedStyles.append(style)
-            }
         }
 
         return buildGeometry(
@@ -431,14 +423,6 @@ public final class WedgeGeometryGenerator {
                 &hash
             )
         }
-        if rc == 0 {
-            return hash
-        }
-        var fallback: UInt64 = BridgeInteropConstants.fnv1a64OffsetBasis
-        for byte in bytes {
-            fallback ^= UInt64(byte)
-            fallback &*= BridgeInteropConstants.fnv1a64Prime
-        }
-        return fallback
+        return rc == 0 ? hash : 0
     }
 }

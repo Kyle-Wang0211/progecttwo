@@ -750,6 +750,7 @@ private func makeBinaryFixtures() throws -> [BinaryFixture] {
 }
 
 private func swiftVersionString() -> String {
+    #if os(macOS)
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     p.arguments = ["swift", "--version"]
@@ -765,6 +766,9 @@ private func swiftVersionString() -> String {
     } catch {
         return "unknown"
     }
+    #else
+    return "unknown"
+    #endif
 }
 
 private func fixedISO8601FromFixtureEpoch() -> String {

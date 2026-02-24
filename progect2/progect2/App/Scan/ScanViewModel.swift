@@ -13,6 +13,11 @@ import Foundation
 import SwiftUI
 import ARKit
 import simd
+import Aether3DCore
+import CAetherNativeBridge
+#if canImport(QuartzCore)
+import QuartzCore
+#endif
 
 /// THE ORCHESTRATOR — @MainActor ViewModel that wires ALL subsystems together
 ///
@@ -61,6 +66,7 @@ final class ScanViewModel: ObservableObject {
     // MARK: - State
     private var meshTriangles: [ScanTriangle] = []
     private var adjacencyGraph: (any AdjacencyProvider)?
+    private let patchEvidenceMap = PatchEvidenceMap()
     private var patchDisplayMap = PatchDisplayMap()
     private var currentPatchDisplaySnapshot: [String: Double] = [:]
     private var previousPatchDisplaySnapshot: [String: Double] = [:]
@@ -68,6 +74,8 @@ final class ScanViewModel: ObservableObject {
     private var elapsedTimer: Timer?
     private var frameCounter: Int = 0
     private var lastMotionSample: (position: SIMD3<Float>, timestamp: TimeInterval)?
+    private var lastViewMatrix: simd_float4x4 = matrix_identity_float4x4
+    private var lastProjectionMatrix: simd_float4x4 = matrix_identity_float4x4
 
     // MARK: - Thermal Monitoring
     private var thermalObserver: NSObjectProtocol?
@@ -79,14 +87,31 @@ final class ScanViewModel: ObservableObject {
         self.hapticEngine = GuidanceHapticEngine()
         self.completionBridge = ScanCompletionBridge(hapticEngine: hapticEngine)
 
-        // Graceful Metal pipeline initialization
-        // createRenderPipelines() calls fatalError() in Phase 2 — cannot catch
-        // Pipeline is nil until Metal shaders are implemented
+        // Metal pipeline initialization
+        #if canImport(Metal)
+        if let device = MTLCreateSystemDefaultDevice() {
+            self.renderPipeline = try? ScanGuidanceRenderPipeline(device: device)
+        } else {
+            self.renderPipeline = nil
+        }
+        #else
         self.renderPipeline = nil
+        #endif
+
+        // Unify flip animation time source with render pipeline's CACurrentMediaTime()
+        #if canImport(QuartzCore)
+        flipController.setTimeSource { CACurrentMediaTime() }
+        #endif
+
+        // Inject Oklab perceptual color mapper into wedge geometry generator
+        wedgeGenerator.colorMapper = { [grayscaleMapper] display in
+            grayscaleMapper.oklabColor(for: display)
+        }
 
         setupThermalMonitoring()
     }
 
+    @MainActor
     deinit {
         elapsedTimer?.invalidate()
         if let observer = thermalObserver {
@@ -182,20 +207,21 @@ final class ScanViewModel: ObservableObject {
         renderPipeline
     }
 
-    /// Exposes the render pipeline handle for overlay draw delegation.
-    func currentRenderPipelineForOverlay() -> ScanGuidanceRenderPipeline? {
-        renderPipeline
-    }
-
     // MARK: - ARKit Frame Processing
 
     /// Called from ARSCNView delegate on EVERY frame (~60 FPS)
     /// PERFORMANCE CRITICAL — must complete within frame budget (~16ms)
     func processARFrame(
         frame: ARFrame,
-        meshAnchors: [ARMeshAnchor]
+        meshAnchors: [ARMeshAnchor],
+        viewMatrix: simd_float4x4 = matrix_identity_float4x4,
+        projectionMatrix: simd_float4x4 = matrix_identity_float4x4
     ) {
         guard scanState.isActive else { return }
+
+        // Store matrices for render pipeline
+        lastViewMatrix = viewMatrix
+        lastProjectionMatrix = projectionMatrix
 
         // Step 1: Extract triangles from ARKit mesh
         let extractedTriangles = meshExtractor.extract(from: meshAnchors)
@@ -220,7 +246,9 @@ final class ScanViewModel: ObservableObject {
         updatePatchDisplayMap()
         currentPatchDisplaySnapshot = makeDisplaySnapshot()
 
-        // Step 3: Thermal-aware quality control
+        // Step 3: Thermal-aware quality control (proactive + reactive + cool-down)
+        thermalAdapter.evaluateProactiveThermal()
+        thermalAdapter.evaluateCoolDown()
         let tier = thermalAdapter.currentTier
         let maxTriangles = tier.maxTriangles
         let limitedTriangles = Array(meshTriangles.prefix(maxTriangles))
@@ -274,34 +302,74 @@ final class ScanViewModel: ObservableObject {
             }
         }
 
-        // Step 7: Update render pipeline (if Metal is available)
+        // Step 7: Query animation state for render pipeline
+        let triIndices = Array(0..<limitedTriangles.count)
+
+        // Tick flip controller and extract angles
+        _ = flipController.tick(deltaTime: 1.0 / 60.0)
+        let flipAngles = flipController.getFlipAngles(for: triIndices)
+        let flipAxisData: [(origin: SIMD3<Float>, direction: SIMD3<Float>)] = triIndices.compactMap {
+            flipController.getFlipAxis(for: $0)
+        }
+
+        // Tick ripple engine and extract amplitudes
+        let rippleNow = ProcessInfo.processInfo.systemUptime
+        _ = rippleEngine.tick(currentTime: rippleNow)
+        let rippleAmplitudes = rippleEngine.getRippleAmplitudes(for: triIndices, currentTime: rippleNow)
+
+        // Step 8: Update render pipeline (if Metal is available)
         renderPipeline?.update(
             displaySnapshot: currentPatchDisplaySnapshot,
             colorStates: [:],
             meshTriangles: limitedTriangles,
             lightEstimate: frame.lightEstimate,
             cameraTransform: frame.camera.transform,
+            viewMatrix: lastViewMatrix,
+            projectionMatrix: lastProjectionMatrix,
             frameDeltaTime: 1.0 / 60.0,
+            precomputedFlipAngles: flipAngles,
+            precomputedRippleAmplitudes: rippleAmplitudes,
+            precomputedFlipAxisData: flipAxisData,
             gpuDurationMs: nil
         )
     }
 
     // MARK: - Private Helpers
 
-    /// Update display values for visible patches through PatchDisplayMap.
+    /// Update display values for visible patches through PatchEvidenceMap → PatchDisplayMap.
+    ///
+    /// Data flow: ARKit mesh → PatchEvidenceMap (Choquet/DS evidence ledger) → PatchDisplayMap (1-Euro smoothed display)
+    /// Each visible triangle feeds an observation into the evidence system. The evidence value
+    /// (computed via Choquet integral + DS theory) then drives the display map with proper locking.
     private func updatePatchDisplayMap() {
         let timestampMs = Int64(Date().timeIntervalSince1970 * 1000.0)
+        let frameId = "frame-\(frameCounter)"
+
         for triangle in meshTriangles {
-            let current = patchDisplayMap.display(for: triangle.patchId)
-            // Simple accumulation: each visible frame adds a small increment
-            // ~100 frames to reach 1.0 at 60fps ≈ 1.7 seconds viewing
-            let increment = 0.01
-            let target = min(current + increment, 1.0)
+            // Step A: Compute observation quality from triangle geometry (C++ core)
+            let ledgerQuality = Double(aether_observation_quality_from_area(
+                triangle.areaSqM,
+                Float(ScanGuidanceConstants.areaFactorReference)
+            ))
+
+            // Step B: Feed observation into evidence ledger (Choquet + DS gates)
+            patchEvidenceMap.update(
+                patchId: triangle.patchId,
+                ledgerQuality: ledgerQuality,
+                verdict: .good,  // ARKit mesh triangles are pre-validated geometry
+                frameId: frameId,
+                timestampMs: timestampMs
+            )
+
+            // Step C: Read evidence → feed into display map with lock state
+            let evidence = patchEvidenceMap.evidence(for: triangle.patchId)
+            let isLocked = patchEvidenceMap.entry(for: triangle.patchId)?.isLocked ?? false
+
             _ = patchDisplayMap.update(
                 patchId: triangle.patchId,
-                target: target,
+                target: evidence,
                 timestampMs: timestampMs,
-                isLocked: false
+                isLocked: isLocked
             )
         }
     }
@@ -325,10 +393,24 @@ final class ScanViewModel: ObservableObject {
         guard let previous = lastMotionSample else {
             return 0
         }
-
-        let dt = max(timestamp - previous.timestamp, 1.0 / 240.0)
-        let delta = position - previous.position
-        return Double(simd_length(delta) / Float(dt))
+        var currentPos = aether_float3_t(
+            x: position.x,
+            y: position.y,
+            z: position.z
+        )
+        var previousPos = aether_float3_t(
+            x: previous.position.x,
+            y: previous.position.y,
+            z: previous.position.z
+        )
+        let speed = aether_camera_translation_speed(
+            &currentPos,
+            &previousPos,
+            timestamp,
+            previous.timestamp,
+            1.0 / 240.0
+        )
+        return speed.isFinite ? max(speed, 0.0) : 0.0
     }
 
     /// Calculate overall scan coverage [0, 1]
@@ -362,6 +444,13 @@ final class ScanViewModel: ObservableObject {
     /// 20,000 triangles → ~20ms (vs MeshAdjacencyGraph's ~3 seconds)
     private func rebuildAdjacencyGraph() {
         adjacencyGraph = SpatialHashAdjacency(triangles: meshTriangles)
+    }
+
+    /// Stabilize patch identities across frames.
+    /// MeshExtractor.stablePatchIdentity() already generates spatially-quantized patch IDs.
+    /// This method is the hook for future temporal consistency improvements.
+    private func stabilizePatchIdentities(_ triangles: [ScanTriangle]) -> [ScanTriangle] {
+        return triangles
     }
 
     /// Reset all subsystems for next scan session

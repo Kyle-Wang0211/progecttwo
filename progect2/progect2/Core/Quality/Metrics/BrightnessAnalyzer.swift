@@ -11,6 +11,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 #if canImport(Accelerate)
 import Accelerate
 #endif
@@ -42,18 +45,35 @@ public class BrightnessAnalyzer {
     /// Analyze brightness for given quality level
     /// H1: NaN/Inf handling - return nil or 0.0, log, don't propagate
     public func analyze(qualityLevel: QualityLevel) -> MetricResult? {
-        let value: Double
-        let confidence: Double
+        var value: Double = 0.48
+        var confidence: Double = 0.60
+        var resolvedByNative = false
+        #if canImport(CAetherNativeBridge)
+        let nativeLevel: Int32
         switch qualityLevel {
         case .full:
-            value = 0.52
-            confidence = 0.88
+            nativeLevel = 0
         case .degraded:
-            value = 0.50
-            confidence = 0.74
+            nativeLevel = 1
         case .emergency:
-            value = 0.48
-            confidence = 0.60
+            nativeLevel = 2
+        }
+        if aether_brightness_metric_for_quality(nativeLevel, &value, &confidence) == 0 {
+            resolvedByNative = true
+        }
+        #endif
+        if !resolvedByNative {
+            switch qualityLevel {
+            case .full:
+                value = 0.52
+                confidence = 0.88
+            case .degraded:
+                value = 0.50
+                confidence = 0.74
+            case .emergency:
+                value = 0.48
+                confidence = 0.60
+            }
         }
 
         flickerHistory.append(value)

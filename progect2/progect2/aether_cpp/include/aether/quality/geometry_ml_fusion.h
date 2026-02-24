@@ -176,6 +176,12 @@ struct GeometryMLResult {
     GeometryMLComponentScores component_scores{};
     GeometryMLCrossValidationStats cross_validation_stats{};
     std::uint64_t reason_mask{0u};
+
+    // Bayesian network posterior diagnostics (P1a extension)
+    double fusion_variance{0.0};
+    double risk_variance{0.0};
+    double fusion_credible_low{0.0};
+    double fusion_credible_high{1.0};
 };
 
 GeometryMLResult evaluate_geometry_ml_fusion(

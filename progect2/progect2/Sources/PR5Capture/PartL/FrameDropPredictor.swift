@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Frame drop predictor
 ///
@@ -77,22 +80,34 @@ public actor FrameDropPredictor {
     /// Compute drop probability
     private func computeDropProbability(frameTime: TimeInterval, targetTime: TimeInterval) -> Double {
         guard !frameTimes.isEmpty else { return 0.0 }
-        
-        // Check if frame time exceeds target
-        if frameTime > targetTime {
-            return 0.8  // High probability
+        #if canImport(CAetherNativeBridge)
+        var analysis = aether_mobile_frame_interval_analysis_t()
+        let rc = frameTimes.withUnsafeBufferPointer { ptr in
+            aether_mobile_analyze_frame_intervals(
+                ptr.baseAddress,
+                Int32(frameTimes.count),
+                &analysis
+            )
         }
-        
-        // Check trend
+        if rc == 0 {
+            let overload = frameTime > targetTime ? 0.8 : 0.2
+            let trendPenalty = min(0.6, max(0.0, analysis.coefficient_of_variation))
+            return min(1.0, max(overload, analysis.drop_rate, trendPenalty))
+        }
+        return frameTime > targetTime ? 0.8 : 0.2
+        #else
+        if frameTime > targetTime {
+            return 0.8
+        }
         if frameTimes.count >= 3 {
             let recent = Array(frameTimes.suffix(3))
             let trend = recent.last! - recent.first!
             if trend > 0 {
-                return min(0.6, trend / targetTime)  // Increasing trend
+                return min(0.6, trend / targetTime)
             }
         }
-        
-        return 0.2  // Low probability
+        return 0.2
+        #endif
     }
     
     // MARK: - Result Types

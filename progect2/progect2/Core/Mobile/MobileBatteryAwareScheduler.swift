@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// Mobile Battery Aware Scheduler
 ///
@@ -32,25 +33,42 @@ public actor MobileBatteryAwareScheduler {
     /// 
     /// 符合 INV-MOBILE-012: Background processing suspended at battery < 10%
     public func shouldAllowBackgroundProcessing() async -> Bool {
-        #if os(iOS)
-        // Check battery level via UIDevice (requires bridging)
-        // For now, check Low Power Mode as proxy
-        return !isLowPowerModeEnabled
-        #else
-        return true
-        #endif
+        var allow: Int32 = 1
+        let rc = aether_mobile_should_allow_background_processing(
+            isLowPowerModeEnabled ? 1 : 0,
+            &allow
+        )
+        guard rc == 0 else {
+            #if os(iOS)
+            return !isLowPowerModeEnabled
+            #else
+            return true
+            #endif
+        }
+        return allow != 0
     }
     
     /// Get recommended scan quality based on power state
     /// 
     /// 符合 INV-MOBILE-013: Idle power draw < 5% of active scanning
     public func recommendedScanQuality() -> ScanQuality {
-        #if os(iOS)
-        if isLowPowerModeEnabled {
-            return .efficient // Reduced point density, lower SH bands
+        var nativeQuality: Int32 = 1
+        let rc = aether_mobile_recommended_scan_quality(
+            isLowPowerModeEnabled ? 1 : 0,
+            &nativeQuality
+        )
+        guard rc == 0 else {
+            #if os(iOS)
+            return isLowPowerModeEnabled ? .efficient : .balanced
+            #else
+            return .balanced
+            #endif
         }
-        #endif
-        return .balanced
+        switch nativeQuality {
+        case 0: return .maximum
+        case 2: return .efficient
+        default: return .balanced
+        }
     }
     
     /// Scan quality levels

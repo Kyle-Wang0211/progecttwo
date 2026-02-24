@@ -40,12 +40,16 @@ public struct GLTFGaussianSplattingExportOptions: Sendable {
     public let quantizationBits: Int
     public let compressionLevel: Int
     public let embedProvenanceBundle: Bool
-    
-    public init(enableQuantization: Bool = true, quantizationBits: Int = 16, compressionLevel: Int = 6, embedProvenanceBundle: Bool = true) {
+    /// When true, also exports an SPZ (Sorted-Position-Zip) compressed sidecar file.
+    /// SPZ achieves ~90% compression via Morton sorting + fixed-point quantization + delta encoding.
+    public let useSpzCompression: Bool
+
+    public init(enableQuantization: Bool = true, quantizationBits: Int = 16, compressionLevel: Int = 6, embedProvenanceBundle: Bool = true, useSpzCompression: Bool = false) {
         self.enableQuantization = enableQuantization
         self.quantizationBits = quantizationBits
         self.compressionLevel = compressionLevel
         self.embedProvenanceBundle = embedProvenanceBundle
+        self.useSpzCompression = useSpzCompression
     }
 }
 
@@ -133,7 +137,17 @@ public struct GLTFGaussianSplattingExporter {
         
         return glbData
     }
-    
+
+    /// Export splat data to SPZ compressed format.
+    /// - Parameters:
+    ///   - splatData: Gaussian splat data
+    ///   - shDegree: SH degree for compression (0-3)
+    /// - Returns: SPZ compressed data
+    public func exportToSPZ(splatData: GaussianSplatData, shDegree: Int = 0) -> Data {
+        let compressor = SPZCompressor()
+        return compressor.compress(splatData: splatData, shDegree: shDegree)
+    }
+
     /// Create JSON chunk with KHR_gaussian_splatting extension
     private func createJSONChunk(
         binaryLayout: SplatBinaryLayout,

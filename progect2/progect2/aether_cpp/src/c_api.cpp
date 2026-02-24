@@ -10,6 +10,7 @@
 #include "aether/evidence/coverage_estimator.h"
 #include "aether/evidence/deterministic_json.h"
 #include "aether/evidence/ds_mass_function.h"
+#include "aether/evidence/patch_evidence_kernel.h"
 #include "aether/evidence/patch_display_kernel.h"
 #include "aether/evidence/pr1_admission_kernel.h"
 #include "aether/evidence/pr1_information_gain.h"
@@ -26,8 +27,11 @@
 #include "aether/quality/deterministic_triangulator.h"
 #include "aether/quality/image_metrics.h"
 #include "aether/quality/motion_analyzer.h"
+#include "aether/quality/motion_speed.h"
 #include "aether/quality/photometric_checker.h"
+#include "aether/quality/environment_light_estimator.h"
 #include "aether/quality/geometry_ml_fusion.h"
+#include "aether/quality/speed_state.h"
 #include "aether/quality/pure_vision_runtime.h"
 #include "aether/quality/spatial_hash_adjacency.h"
 #include "aether/quality/zero_fabrication_policy.h"
@@ -53,7 +57,9 @@
 #include "aether/tsdf/tsdf_volume.h"
 #include "aether/tsdf/volume_controller.h"
 #include "aether/upload/erasure_coding.h"
+#include "aether/upload/fusion_scheduler.h"
 #include "aether/upload/kalman_bandwidth.h"
+#include "aether/upload/network_speed_monitor.h"
 #include "aether/trainer/da3_depth_fuser.h"
 #include "aether/innovation/f1_progressive_compression.h"
 #include "aether/innovation/f2_scaffold_collision.h"
@@ -74,6 +80,15 @@
 #include "aether/core/canonicalize.h"
 #include "aether/evidence/pr_math.h"
 #include "aether/tsdf/tri_tet_mapping.h"
+#include "aether/render/oklab_color.h"
+#include "aether/quality/thermal_quality_decision.h"
+#include "aether/render/spz_compressor.h"
+#include "aether/quality/multiview_photometric.h"
+#include "aether/quality/bayesian_quality_network.h"
+#include "aether/evidence/choquet_learner.h"
+#include "aether/quality/multiscale_image_quality.h"
+#include "aether/evidence/mc_uncertainty.h"
+#include "aether/render/pbr_material.h"
 
 #include "aether/math/half.h"
 #include <algorithm>
@@ -171,6 +186,12 @@ struct aether_smart_smoother {
     aether::evidence::SmartAntiBoostSmoother impl;
 };
 
+struct aether_light_estimator {
+    explicit aether_light_estimator(const aether::quality::EnvironmentLightConfig& config)
+        : impl(config) {}
+    aether::quality::EnvironmentLightEstimator impl;
+};
+
 struct aether_capture_style_runtime {
     struct PatchState {
         float display{0.0f};
@@ -223,6 +244,17 @@ struct aether_ripple_runtime {
     int triangle_count{0};
     std::vector<Wave> active_waves;
     std::unordered_map<std::int32_t, double> last_spawn_times;
+};
+
+struct aether_haptic_policy {
+    explicit aether_haptic_policy(double debounce_seconds_in, int max_per_minute_in)
+        : debounce_seconds(debounce_seconds_in),
+          max_per_minute(max_per_minute_in) {}
+
+    double debounce_seconds{5.0};
+    int max_per_minute{4};
+    std::unordered_map<int, double> last_fire_time_by_pattern;
+    std::vector<double> recent_fire_times;
 };
 
 struct aether_f7_decoder {
@@ -307,6 +339,57 @@ bool finite_pose(const float* pose16) {
         }
     }
     return true;
+}
+
+int classify_resolution_tier_code(int width, int height) {
+    const int max_dim = std::max(width, height);
+    if (max_dim >= 7680) {
+        return AETHER_RESOLUTION_TIER_8K;
+    }
+    if (max_dim >= 3840) {
+        return AETHER_RESOLUTION_TIER_4K;
+    }
+    if (max_dim >= 2560) {
+        return AETHER_RESOLUTION_TIER_2K;
+    }
+    if (max_dim >= 1920) {
+        return AETHER_RESOLUTION_TIER_1080P;
+    }
+    if (max_dim >= 1280) {
+        return AETHER_RESOLUTION_TIER_720P;
+    }
+    if (max_dim >= 640) {
+        return AETHER_RESOLUTION_TIER_480P;
+    }
+    return AETHER_RESOLUTION_TIER_LOWER;
+}
+
+bool scan_state_transition_allowed(int from_state, int to_state) {
+    switch (from_state) {
+        case AETHER_SCAN_STATE_INITIALIZING:
+            return to_state == AETHER_SCAN_STATE_READY ||
+                   to_state == AETHER_SCAN_STATE_FAILED;
+        case AETHER_SCAN_STATE_READY:
+            return to_state == AETHER_SCAN_STATE_CAPTURING ||
+                   to_state == AETHER_SCAN_STATE_FAILED;
+        case AETHER_SCAN_STATE_CAPTURING:
+            return to_state == AETHER_SCAN_STATE_PAUSED ||
+                   to_state == AETHER_SCAN_STATE_FINISHING ||
+                   to_state == AETHER_SCAN_STATE_FAILED;
+        case AETHER_SCAN_STATE_PAUSED:
+            return to_state == AETHER_SCAN_STATE_CAPTURING ||
+                   to_state == AETHER_SCAN_STATE_READY ||
+                   to_state == AETHER_SCAN_STATE_FINISHING;
+        case AETHER_SCAN_STATE_FINISHING:
+            return to_state == AETHER_SCAN_STATE_COMPLETED ||
+                   to_state == AETHER_SCAN_STATE_FAILED;
+        case AETHER_SCAN_STATE_COMPLETED:
+            return false;
+        case AETHER_SCAN_STATE_FAILED:
+            return to_state == AETHER_SCAN_STATE_READY;
+        default:
+            return false;
+    }
 }
 
 aether::trainer::TriTetClass to_cpp_tri_tet_class(std::uint8_t tri_tet_class) {
@@ -672,6 +755,20 @@ void to_c_geometry_ml_result(
     return out;
 }
 
+[[maybe_unused]] aether::evidence::PatchEvidenceVerdict to_cpp_patch_evidence_verdict(std::int32_t verdict) {
+    switch (verdict) {
+        case 0:
+            return aether::evidence::PatchEvidenceVerdict::kGood;
+        case 1:
+            return aether::evidence::PatchEvidenceVerdict::kSuspect;
+        case 2:
+            return aether::evidence::PatchEvidenceVerdict::kBad;
+        case 3:
+        default:
+            return aether::evidence::PatchEvidenceVerdict::kUnknown;
+    }
+}
+
 [[maybe_unused]] aether::evidence::SmartSmootherConfig to_cpp_smart_smoother_config(
     const aether_smart_smoother_config_t* config_or_null) {
     aether::evidence::SmartSmootherConfig out{};
@@ -880,6 +977,105 @@ aether_capture_style_runtime_config_t capture_style_default_config() {
         config.min_median_area_sq_m = std::max(1e-12f, src.min_median_area_sq_m);
     }
     return config;
+}
+
+int resolve_capture_style_entry(
+    const aether_capture_style_runtime_config_t& config,
+    const aether_capture_style_input_t& in,
+    float median_area_sq_m,
+    aether_capture_style_runtime_t::PatchState* state_or_null,
+    aether_capture_style_output_t* out_state) {
+    if (out_state == nullptr) {
+        return -1;
+    }
+
+    const float current_display = clamp01(std::isfinite(in.display) ? in.display : 0.0f);
+    const float area_sq_m = std::max(
+        config.min_area_sq_m,
+        std::isfinite(in.area_sq_m) ? in.area_sq_m : config.min_area_sq_m);
+    const float median_area = std::max(
+        config.min_median_area_sq_m,
+        std::isfinite(median_area_sq_m) ? median_area_sq_m : config.min_median_area_sq_m);
+
+    float resolved_display = current_display;
+    if (state_or_null != nullptr && state_or_null->has_visual) {
+        const float alpha = clamp01(config.smoothing_alpha);
+        resolved_display = state_or_null->display + alpha * (current_display - state_or_null->display);
+        resolved_display = std::max(state_or_null->display, clamp01(resolved_display));
+    }
+
+    const aether::render::FragmentVisualParams params = aether::render::compute_visual_params(
+        resolved_display,
+        1.0f,
+        area_sq_m,
+        median_area);
+
+    float metallic = std::isfinite(params.metallic) ? clamp01(params.metallic) : 0.0f;
+    float roughness = std::isfinite(params.roughness) ? clamp01(params.roughness) : 1.0f;
+    float thickness = std::isfinite(params.wedge_thickness)
+        ? params.wedge_thickness
+        : config.min_thickness;
+    float border = std::isfinite(params.border_width_px)
+        ? params.border_width_px
+        : config.min_border_width;
+    float grayscale = std::isfinite(params.fill_gray) ? clamp01(params.fill_gray) : resolved_display;
+
+    thickness = std::max(config.min_thickness, std::min(config.max_thickness, thickness));
+    border = std::max(config.min_border_width, std::min(config.max_border_width, border));
+
+    bool visual_frozen = false;
+    bool border_frozen = false;
+    bool should_freeze = resolved_display >= config.freeze_threshold;
+
+    if (state_or_null != nullptr) {
+        if (state_or_null->has_visual) {
+            metallic = std::max(state_or_null->metallic, metallic);
+            roughness = std::min(state_or_null->roughness, roughness);
+            thickness = std::min(state_or_null->thickness, thickness);
+            grayscale = std::max(state_or_null->grayscale, grayscale);
+        }
+        if (state_or_null->has_border) {
+            border = std::min(state_or_null->border_width, border);
+        }
+
+        should_freeze = should_freeze ||
+            state_or_null->visual_frozen ||
+            state_or_null->border_frozen ||
+            state_or_null->display >= config.freeze_threshold;
+        if (should_freeze) {
+            state_or_null->visual_frozen = true;
+            state_or_null->border_frozen = true;
+        }
+        visual_frozen = state_or_null->visual_frozen;
+        border_frozen = state_or_null->border_frozen;
+
+        state_or_null->display = resolved_display;
+        state_or_null->metallic = metallic;
+        state_or_null->roughness = roughness;
+        state_or_null->thickness = thickness;
+        state_or_null->border_width = border;
+        state_or_null->grayscale = grayscale;
+        state_or_null->has_visual = true;
+        state_or_null->has_border = true;
+        state_or_null->has_grayscale = true;
+    } else {
+        visual_frozen = should_freeze;
+        border_frozen = should_freeze;
+    }
+
+    aether_capture_style_output_t out{};
+    out.resolved_display = resolved_display;
+    out.metallic = metallic;
+    out.roughness = roughness;
+    out.thickness = thickness;
+    out.border_width = border;
+    out.grayscale = grayscale;
+    out.visual_frozen = visual_frozen ? 1 : 0;
+    out.border_frozen = border_frozen ? 1 : 0;
+    out.visual_should_freeze = should_freeze ? 1 : 0;
+    out.border_should_freeze = should_freeze ? 1 : 0;
+    *out_state = out;
+    return 0;
 }
 
 aether_flip_runtime_config_t flip_runtime_default_config() {
@@ -1288,7 +1484,7 @@ void to_c_coverage_result(
     dst->lyapunov_rate = src.lyapunov_rate;
     dst->pac_failure_bound = src.pac_failure_bound;
     dst->pac_max_cell_risk = src.pac_max_cell_risk;
-    dst->pac_certified_cell_count = src.pac_certified_cell_count;
+    dst->pac_certified_cell_count = static_cast<uint64_t>(src.pac_certified_cell_count);
 }
 
 const std::string& safe_patch_id(const char* patch_id, std::string* scratch) {
@@ -1443,6 +1639,24 @@ aether::evidence::PR1NoveltyStrategy to_cpp_pr1_novelty_strategy(int strategy) {
     }
 }
 
+// Canonical PR1 mobile runtime defaults:
+// keep policy tuning inside core so Swift stays bridge-only.
+aether::evidence::PR1InformationGainConfig pr1_mobile_default_config(int grid_size) {
+    aether::evidence::PR1InformationGainConfig cfg{};
+    if (grid_size > 0) {
+        cfg.coverage_grid_size = grid_size;
+    }
+    cfg.info_gain_strategy = aether::evidence::PR1InfoGainStrategy::kHybridCrossCheck;
+    cfg.novelty_strategy = aether::evidence::PR1NoveltyStrategy::kHybridCrossCheck;
+    cfg.entropy_weight = 0.12;
+    cfg.rarity_weight = 0.08;
+    cfg.robust_quantile = 0.25;
+    cfg.robustness_scale = 0.35;
+    cfg.hybrid_agreement_tolerance = 0.20;
+    cfg.hybrid_high_weight = 0.50;
+    return cfg;
+}
+
 void to_c_pr1_info_gain_config(
     const aether::evidence::PR1InformationGainConfig& src,
     aether_pr1_info_gain_config_t* dst) {
@@ -1469,10 +1683,7 @@ void to_c_pr1_info_gain_config(
 aether::evidence::PR1InformationGainConfig to_cpp_pr1_info_gain_config(
     const aether_pr1_info_gain_config_t* src,
     int grid_size) {
-    aether::evidence::PR1InformationGainConfig cfg{};
-    if (grid_size > 0) {
-        cfg.coverage_grid_size = grid_size;
-    }
+    aether::evidence::PR1InformationGainConfig cfg = pr1_mobile_default_config(grid_size);
     if (src == nullptr) {
         return cfg;
     }
@@ -2236,6 +2447,122 @@ void to_c_kalman_output(
     out->reliable = in.reliable ? 1 : 0;
 }
 
+aether::upload::NetworkSpeedState to_cpp_network_speed_state(
+    const aether_network_speed_state_t& in) {
+    aether::upload::NetworkSpeedState out{};
+    for (std::size_t i = 0u; i < out.samples.size(); ++i) {
+        out.samples[i].bytes_transferred = in.bytes_transferred[i];
+        out.samples[i].duration_seconds = in.duration_seconds[i];
+        out.samples[i].timestamp_seconds = in.timestamp_seconds[i];
+    }
+    out.head = in.head;
+    out.count = in.count;
+    out.max_samples = in.max_samples;
+    out.window_seconds = in.window_seconds;
+    out.current_speed_mbps = in.current_speed_mbps;
+    switch (in.current_class) {
+    case AETHER_NETWORK_SPEED_CLASS_SLOW:
+        out.current_class = aether::upload::NetworkSpeedClass::kSlow;
+        break;
+    case AETHER_NETWORK_SPEED_CLASS_NORMAL:
+        out.current_class = aether::upload::NetworkSpeedClass::kNormal;
+        break;
+    case AETHER_NETWORK_SPEED_CLASS_FAST:
+        out.current_class = aether::upload::NetworkSpeedClass::kFast;
+        break;
+    case AETHER_NETWORK_SPEED_CLASS_ULTRAFAST:
+        out.current_class = aether::upload::NetworkSpeedClass::kUltraFast;
+        break;
+    case AETHER_NETWORK_SPEED_CLASS_UNKNOWN:
+    default:
+        out.current_class = aether::upload::NetworkSpeedClass::kUnknown;
+        break;
+    }
+    out.reliable = in.reliable != 0;
+    return out;
+}
+
+void to_c_network_speed_state(
+    const aether::upload::NetworkSpeedState& in,
+    aether_network_speed_state_t* out) {
+    if (out == nullptr) {
+        return;
+    }
+    for (std::size_t i = 0u; i < in.samples.size(); ++i) {
+        out->bytes_transferred[i] = in.samples[i].bytes_transferred;
+        out->duration_seconds[i] = in.samples[i].duration_seconds;
+        out->timestamp_seconds[i] = in.samples[i].timestamp_seconds;
+    }
+    out->head = in.head;
+    out->count = in.count;
+    out->max_samples = in.max_samples;
+    out->window_seconds = in.window_seconds;
+    out->current_speed_mbps = in.current_speed_mbps;
+    switch (in.current_class) {
+    case aether::upload::NetworkSpeedClass::kSlow:
+        out->current_class = AETHER_NETWORK_SPEED_CLASS_SLOW;
+        break;
+    case aether::upload::NetworkSpeedClass::kNormal:
+        out->current_class = AETHER_NETWORK_SPEED_CLASS_NORMAL;
+        break;
+    case aether::upload::NetworkSpeedClass::kFast:
+        out->current_class = AETHER_NETWORK_SPEED_CLASS_FAST;
+        break;
+    case aether::upload::NetworkSpeedClass::kUltraFast:
+        out->current_class = AETHER_NETWORK_SPEED_CLASS_ULTRAFAST;
+        break;
+    case aether::upload::NetworkSpeedClass::kUnknown:
+    default:
+        out->current_class = AETHER_NETWORK_SPEED_CLASS_UNKNOWN;
+        break;
+    }
+    out->reliable = in.reliable ? 1 : 0;
+}
+
+bool parse_network_speed_class(int in, aether::upload::NetworkSpeedClass* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    switch (in) {
+    case AETHER_NETWORK_SPEED_CLASS_SLOW:
+        *out = aether::upload::NetworkSpeedClass::kSlow;
+        return true;
+    case AETHER_NETWORK_SPEED_CLASS_NORMAL:
+        *out = aether::upload::NetworkSpeedClass::kNormal;
+        return true;
+    case AETHER_NETWORK_SPEED_CLASS_FAST:
+        *out = aether::upload::NetworkSpeedClass::kFast;
+        return true;
+    case AETHER_NETWORK_SPEED_CLASS_ULTRAFAST:
+        *out = aether::upload::NetworkSpeedClass::kUltraFast;
+        return true;
+    case AETHER_NETWORK_SPEED_CLASS_UNKNOWN:
+        *out = aether::upload::NetworkSpeedClass::kUnknown;
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool parse_chunk_sizing_strategy(int in, aether::upload::ChunkSizingStrategy* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    switch (in) {
+    case AETHER_UPLOAD_CHUNK_STRATEGY_FIXED:
+        *out = aether::upload::ChunkSizingStrategy::kFixed;
+        return true;
+    case AETHER_UPLOAD_CHUNK_STRATEGY_ADAPTIVE:
+        *out = aether::upload::ChunkSizingStrategy::kAdaptive;
+        return true;
+    case AETHER_UPLOAD_CHUNK_STRATEGY_AGGRESSIVE:
+        *out = aether::upload::ChunkSizingStrategy::kAggressive;
+        return true;
+    default:
+        return false;
+    }
+}
+
 aether::tsdf::PoseGraphConfig to_cpp_pose_graph_config(
     const aether_pose_graph_config_t* in) {
     aether::tsdf::PoseGraphConfig out{};
@@ -2310,6 +2637,111 @@ bool map_scheduler_state(int state, aether::scheduler::GPUSchedulerState* out_st
         return true;
     }
     return false;
+}
+
+int to_cpp_visual_state(int state) {
+    switch (state) {
+        case AETHER_QUALITY_VISUAL_STATE_BLACK:
+            return static_cast<int>(aether::quality::VisualState::kBlack);
+        case AETHER_QUALITY_VISUAL_STATE_GRAY:
+            return static_cast<int>(aether::quality::VisualState::kGray);
+        case AETHER_QUALITY_VISUAL_STATE_WHITE:
+            return static_cast<int>(aether::quality::VisualState::kWhite);
+        case AETHER_QUALITY_VISUAL_STATE_CLEAR:
+            return static_cast<int>(aether::quality::VisualState::kClear);
+        default:
+            return -1;
+    }
+}
+
+int from_cpp_visual_state(int state) {
+    switch (state) {
+        case static_cast<int>(aether::quality::VisualState::kBlack):
+            return AETHER_QUALITY_VISUAL_STATE_BLACK;
+        case static_cast<int>(aether::quality::VisualState::kGray):
+            return AETHER_QUALITY_VISUAL_STATE_GRAY;
+        case static_cast<int>(aether::quality::VisualState::kWhite):
+            return AETHER_QUALITY_VISUAL_STATE_WHITE;
+        case static_cast<int>(aether::quality::VisualState::kClear):
+            return AETHER_QUALITY_VISUAL_STATE_CLEAR;
+        default:
+            return AETHER_QUALITY_VISUAL_STATE_BLACK;
+    }
+}
+
+int to_cpp_fps_tier(int tier) {
+    switch (tier) {
+        case AETHER_QUALITY_FPS_TIER_FULL:
+            return static_cast<int>(aether::quality::FpsTier::kFull);
+        case AETHER_QUALITY_FPS_TIER_DEGRADED:
+            return static_cast<int>(aether::quality::FpsTier::kDegraded);
+        case AETHER_QUALITY_FPS_TIER_EMERGENCY:
+            return static_cast<int>(aether::quality::FpsTier::kEmergency);
+        default:
+            return -1;
+    }
+}
+
+int from_cpp_speed_tier(aether::quality::SpeedTier tier) {
+    switch (tier) {
+        case aether::quality::SpeedTier::kExcellent:
+            return AETHER_QUALITY_SPEED_TIER_EXCELLENT;
+        case aether::quality::SpeedTier::kGood:
+            return AETHER_QUALITY_SPEED_TIER_GOOD;
+        case aether::quality::SpeedTier::kModerate:
+            return AETHER_QUALITY_SPEED_TIER_MODERATE;
+        case aether::quality::SpeedTier::kPoor:
+            return AETHER_QUALITY_SPEED_TIER_POOR;
+        case aether::quality::SpeedTier::kStopped:
+        default:
+            return AETHER_QUALITY_SPEED_TIER_STOPPED;
+    }
+}
+
+int from_cpp_transition_reason(aether::quality::TransitionReason reason) {
+    switch (reason) {
+        case aether::quality::TransitionReason::kNone:
+            return AETHER_QUALITY_TRANSITION_REASON_NONE;
+        case aether::quality::TransitionReason::kOnlyFullTierAllowsGrayToWhite:
+            return AETHER_QUALITY_TRANSITION_REASON_ONLY_FULL_TIER;
+        case aether::quality::TransitionReason::kMissingCriticalMetrics:
+            return AETHER_QUALITY_TRANSITION_REASON_MISSING_CRITICAL_METRICS;
+        case aether::quality::TransitionReason::kMissingStability:
+            return AETHER_QUALITY_TRANSITION_REASON_MISSING_STABILITY;
+        case aether::quality::TransitionReason::kConfidenceThresholdNotMet:
+            return AETHER_QUALITY_TRANSITION_REASON_CONFIDENCE_THRESHOLD_NOT_MET;
+        case aether::quality::TransitionReason::kStabilityThresholdExceeded:
+            return AETHER_QUALITY_TRANSITION_REASON_STABILITY_THRESHOLD_EXCEEDED;
+        case aether::quality::TransitionReason::kCannotRetreatVisualState:
+            return AETHER_QUALITY_TRANSITION_REASON_CANNOT_RETREAT;
+        case aether::quality::TransitionReason::kInvalidVisualState:
+        default:
+            return AETHER_QUALITY_TRANSITION_REASON_INVALID_VISUAL_STATE;
+    }
+}
+
+aether::quality::NoProgressWarningState to_cpp_warning_state(int state) {
+    switch (state) {
+        case AETHER_NO_PROGRESS_WARNING_STATE_ARMED:
+            return aether::quality::NoProgressWarningState::kArmed;
+        case AETHER_NO_PROGRESS_WARNING_STATE_FIRED:
+            return aether::quality::NoProgressWarningState::kFired;
+        case AETHER_NO_PROGRESS_WARNING_STATE_COOLDOWN:
+        default:
+            return aether::quality::NoProgressWarningState::kCooldown;
+    }
+}
+
+int from_cpp_warning_state(aether::quality::NoProgressWarningState state) {
+    switch (state) {
+        case aether::quality::NoProgressWarningState::kArmed:
+            return AETHER_NO_PROGRESS_WARNING_STATE_ARMED;
+        case aether::quality::NoProgressWarningState::kFired:
+            return AETHER_NO_PROGRESS_WARNING_STATE_FIRED;
+        case aether::quality::NoProgressWarningState::kCooldown:
+        default:
+            return AETHER_NO_PROGRESS_WARNING_STATE_COOLDOWN;
+    }
 }
 
 }  // namespace
@@ -2816,7 +3248,7 @@ int aether_pr1_info_gain_default_config(aether_pr1_info_gain_config_t* out_confi
     if (out_config == nullptr) {
         return -1;
     }
-    to_c_pr1_info_gain_config(aether::evidence::PR1InformationGainConfig{}, out_config);
+    to_c_pr1_info_gain_config(pr1_mobile_default_config(128), out_config);
     return 0;
 }
 
@@ -2864,7 +3296,7 @@ int aether_pr1_compute_novelty(
     double pose_eps,
     double* out_novelty) {
     aether_pr1_info_gain_config_t config{};
-    to_c_pr1_info_gain_config(aether::evidence::PR1InformationGainConfig{}, &config);
+    to_c_pr1_info_gain_config(pr1_mobile_default_config(128), &config);
     if (pose_eps > 0.0 && std::isfinite(pose_eps)) {
         config.pose_eps = pose_eps;
     }
@@ -3571,6 +4003,229 @@ int aether_motion_analyzer_quality_metric(
     return 0;
 }
 
+double aether_camera_translation_speed(
+    const aether_float3_t* current_position,
+    const aether_float3_t* previous_position,
+    double current_timestamp_s,
+    double previous_timestamp_s,
+    double min_dt_s) {
+    if (current_position == nullptr || previous_position == nullptr) {
+        return 0.0;
+    }
+    const double cur[3] = {
+        static_cast<double>(current_position->x),
+        static_cast<double>(current_position->y),
+        static_cast<double>(current_position->z),
+    };
+    const double prev[3] = {
+        static_cast<double>(previous_position->x),
+        static_cast<double>(previous_position->y),
+        static_cast<double>(previous_position->z),
+    };
+    return aether::quality::camera_translation_speed(
+        cur,
+        prev,
+        current_timestamp_s,
+        previous_timestamp_s,
+        min_dt_s);
+}
+
+int aether_quality_visual_state_update(
+    int current_state,
+    int incoming_state,
+    int* out_state) {
+    if (out_state == nullptr) {
+        return -1;
+    }
+    const int current_cpp = to_cpp_visual_state(current_state);
+    const int incoming_cpp = to_cpp_visual_state(incoming_state);
+    if (current_cpp < 0 || incoming_cpp < 0) {
+        return -1;
+    }
+    const int updated_cpp = aether::quality::monotonic_visual_state_update(current_cpp, incoming_cpp);
+    *out_state = from_cpp_visual_state(updated_cpp);
+    return 0;
+}
+
+int aether_quality_can_transition(
+    int from_state,
+    int to_state,
+    int fps_tier,
+    int has_critical_metrics,
+    double brightness_confidence,
+    double laplacian_confidence,
+    int has_stability,
+    double stability,
+    double confidence_threshold_full,
+    double full_white_stability_max,
+    aether_quality_transition_result_t* out_result) {
+    if (out_result == nullptr) {
+        return -1;
+    }
+    const int from_cpp = to_cpp_visual_state(from_state);
+    const int to_cpp = to_cpp_visual_state(to_state);
+    const int fps_cpp = to_cpp_fps_tier(fps_tier);
+    if (from_cpp < 0 || to_cpp < 0 || fps_cpp < 0) {
+        return -1;
+    }
+
+    const aether::quality::TransitionDecision decision = aether::quality::can_transition(
+        from_cpp,
+        to_cpp,
+        fps_cpp,
+        has_critical_metrics != 0,
+        brightness_confidence,
+        laplacian_confidence,
+        has_stability != 0,
+        stability,
+        confidence_threshold_full,
+        full_white_stability_max);
+    out_result->allowed = decision.allowed ? 1 : 0;
+    out_result->reason = from_cpp_transition_reason(decision.reason);
+    return 0;
+}
+
+int aether_quality_check_black_to_gray(
+    int has_brightness,
+    double brightness_confidence,
+    int has_focus,
+    double focus_confidence,
+    double threshold,
+    int* out_pass) {
+    if (out_pass == nullptr) {
+        return -1;
+    }
+    const bool pass = aether::quality::check_black_to_gray(
+        has_brightness != 0,
+        brightness_confidence,
+        has_focus != 0,
+        focus_confidence,
+        threshold);
+    *out_pass = pass ? 1 : 0;
+    return 0;
+}
+
+int aether_quality_smooth_speed(
+    double current_speed,
+    double target_speed,
+    int64_t time_delta_ms,
+    double max_change_rate,
+    int64_t window_ms,
+    double* out_speed) {
+    if (out_speed == nullptr) {
+        return -1;
+    }
+    *out_speed = aether::quality::smooth_speed(
+        current_speed,
+        target_speed,
+        time_delta_ms,
+        max_change_rate,
+        window_ms);
+    return 0;
+}
+
+int aether_quality_speed_feedback(
+    int white_coverage_increment,
+    int64_t no_progress_duration_ms,
+    double current_animation_speed,
+    int64_t time_delta_ms,
+    double max_change_rate,
+    int64_t window_ms,
+    int64_t no_progress_warning_ms,
+    aether_speed_feedback_result_t* out_result) {
+    if (out_result == nullptr) {
+        return -1;
+    }
+
+    const double progress_speed =
+        aether::quality::progress_speed_from_coverage_increment(white_coverage_increment);
+    aether::quality::SpeedTier tier = aether::quality::speed_tier_from_progress(progress_speed);
+    const int64_t warning_ms = (no_progress_warning_ms > 0) ? no_progress_warning_ms : 2000;
+    if (no_progress_duration_ms >= warning_ms) {
+        tier = aether::quality::SpeedTier::kStopped;
+    }
+    const double target_animation_speed = aether::quality::animation_speed_for_tier(tier);
+    const double safe_current = std::isfinite(current_animation_speed)
+        ? current_animation_speed
+        : target_animation_speed;
+    const double animation_speed = aether::quality::smooth_speed(
+        safe_current,
+        target_animation_speed,
+        time_delta_ms,
+        max_change_rate,
+        window_ms);
+
+    out_result->progress_speed = progress_speed;
+    out_result->tier = from_cpp_speed_tier(tier);
+    out_result->target_animation_speed = target_animation_speed;
+    out_result->animation_speed = animation_speed;
+    return 0;
+}
+
+int aether_quality_no_progress_warning_step(
+    aether_no_progress_warning_state_t* inout_state,
+    int64_t no_progress_duration_ms,
+    int64_t now_ms,
+    int64_t trigger_ms,
+    int64_t cooldown_ms,
+    int* out_warning_active) {
+    if (inout_state == nullptr || out_warning_active == nullptr) {
+        return -1;
+    }
+    const aether::quality::NoProgressWarningStepResult result =
+        aether::quality::step_no_progress_warning(
+            to_cpp_warning_state(inout_state->state),
+            inout_state->armed_time_ms,
+            no_progress_duration_ms,
+            now_ms,
+            trigger_ms,
+            cooldown_ms);
+    inout_state->state = from_cpp_warning_state(result.state);
+    inout_state->armed_time_ms = result.armed_time_ms;
+    *out_warning_active = result.warning_active ? 1 : 0;
+    return 0;
+}
+
+int aether_quality_stopped_animation_alpha(
+    int64_t timestamp_ms,
+    double frequency_hz,
+    double* out_alpha) {
+    if (out_alpha == nullptr) {
+        return -1;
+    }
+    *out_alpha = aether::quality::stopped_animation_alpha(timestamp_ms, frequency_hz);
+    return 0;
+}
+
+int aether_quality_trend_variance(
+    const double* values,
+    const int64_t* timestamps,
+    int count,
+    int64_t now_ms,
+    int64_t window_ms,
+    double* out_variance,
+    int* out_has_value) {
+    if (out_variance == nullptr || out_has_value == nullptr) {
+        return -1;
+    }
+    std::size_t count_size = 0u;
+    if (!checked_count(count, &count_size)) {
+        return -1;
+    }
+    if (count_size > 0u && (values == nullptr || timestamps == nullptr)) {
+        return -1;
+    }
+    const bool ok = aether::quality::trend_variance_in_window(
+        values,
+        timestamps,
+        count_size,
+        now_ms,
+        window_ms,
+        out_variance);
+    *out_has_value = ok ? 1 : 0;
+    return 0;
+}
+
 int aether_laplacian_variance_compute(
     const uint8_t* image,
     int width,
@@ -3687,6 +4342,91 @@ int aether_frame_quality_eval(
         (ten_skip == 0 && out_result->tenengrad_score < tenengrad_threshold * 0.8) ||
         (out_result->is_hand_shake != 0);
     out_result->should_reject = reject ? 1 : 0;
+    return 0;
+}
+
+int aether_exposure_analyze_image(
+    const uint8_t* image,
+    int width,
+    int height,
+    int row_bytes,
+    aether_exposure_analysis_t* out_result) {
+    if (out_result == nullptr) {
+        return -1;
+    }
+    aether::quality::ExposureAnalysis analysis{};
+    const Status status = aether::quality::exposure_analyze(
+        image,
+        width,
+        height,
+        row_bytes,
+        &analysis);
+    if (status != Status::kOk) {
+        return to_rc(status);
+    }
+    out_result->overexpose_ratio = analysis.overexpose_ratio;
+    out_result->underexpose_ratio = analysis.underexpose_ratio;
+    out_result->has_large_blown_region = analysis.has_large_blown_region ? 1 : 0;
+    return 0;
+}
+
+int aether_texture_analyze_image(
+    const uint8_t* image,
+    int width,
+    int height,
+    int row_bytes,
+    aether_texture_analysis_t* out_result) {
+    if (out_result == nullptr) {
+        return -1;
+    }
+    aether::quality::TextureAnalysis analysis{};
+    const Status status = aether::quality::texture_analyze(
+        image,
+        width,
+        height,
+        row_bytes,
+        &analysis);
+    if (status != Status::kOk) {
+        return to_rc(status);
+    }
+    out_result->feature_count = analysis.feature_count;
+    out_result->spatial_spread = analysis.spatial_spread;
+    out_result->entropy = analysis.entropy;
+    out_result->repetitive_penalty = analysis.repetitive_penalty;
+    out_result->fused_score = analysis.fused_score;
+    out_result->confidence = analysis.confidence;
+    return 0;
+}
+
+int aether_brightness_metric_for_quality(
+    int quality_level,
+    double* out_value,
+    double* out_confidence) {
+    return to_rc(aether::quality::brightness_metric_for_quality(
+        quality_level,
+        out_value,
+        out_confidence));
+}
+
+int aether_material_analyze_quality(
+    int quality_level,
+    aether_material_analysis_t* out_result) {
+    if (out_result == nullptr) {
+        return -1;
+    }
+    aether::quality::MaterialAnalysis analysis{};
+    const Status status = aether::quality::material_analyze_for_quality(
+        quality_level,
+        &analysis);
+    if (status != Status::kOk) {
+        return to_rc(status);
+    }
+    out_result->specular_percent = analysis.specular_percent;
+    out_result->transparent_percent = analysis.transparent_percent;
+    out_result->textureless_percent = analysis.textureless_percent;
+    out_result->is_non_lambertian = analysis.is_non_lambertian ? 1 : 0;
+    out_result->confidence = analysis.confidence;
+    out_result->largest_specular_region = analysis.largest_specular_region;
     return 0;
 }
 
@@ -4494,6 +5234,226 @@ int aether_bandwidth_kalman_predict(
         &cpp_out);
     to_c_kalman_output(cpp_out, out);
     return to_rc(status);
+}
+
+int aether_upload_fusion_decide_chunk_size(
+    const aether_upload_fusion_scheduler_input_t* input,
+    aether_upload_fusion_scheduler_output_t* out) {
+    if (input == nullptr || out == nullptr) {
+        return -1;
+    }
+    aether::upload::FusionSchedulerInput cpp{};
+    cpp.queue_length_bytes = input->queue_length_bytes;
+    cpp.last_chunk_size_bytes = input->last_chunk_size_bytes;
+    cpp.kalman_predicted_bps = input->kalman_predicted_bps;
+    cpp.kalman_trend = input->kalman_trend;
+    cpp.ml_predicted_bps = input->ml_predicted_bps;
+    cpp.has_ml_prediction = input->has_ml_prediction != 0;
+    cpp.controller_accuracies = {{
+        input->controller_accuracy_mpc,
+        input->controller_accuracy_abr,
+        input->controller_accuracy_ewma,
+        input->controller_accuracy_kalman,
+        input->controller_accuracy_ml,
+    }};
+    cpp.chunk_size_min_bytes = input->chunk_size_min_bytes;
+    cpp.chunk_size_default_bytes = input->chunk_size_default_bytes;
+    cpp.chunk_size_max_bytes = input->chunk_size_max_bytes;
+    cpp.chunk_size_step_bytes = input->chunk_size_step_bytes;
+    cpp.ewma_alpha = input->ewma_alpha;
+    cpp.ewma_target_seconds = input->ewma_target_seconds;
+    cpp.ml_norm_bps = input->ml_norm_bps;
+    cpp.alignment_bytes = input->alignment_bytes;
+
+    aether::upload::FusionSchedulerOutput cpp_out{};
+    const Status status = aether::upload::fusion_scheduler_decide_chunk_size(cpp, &cpp_out);
+    if (status != Status::kOk) {
+        return to_rc(status);
+    }
+
+    out->mpc_size_bytes = cpp_out.mpc_size_bytes;
+    out->abr_size_bytes = cpp_out.abr_size_bytes;
+    out->ewma_size_bytes = cpp_out.ewma_size_bytes;
+    out->kalman_size_bytes = cpp_out.kalman_size_bytes;
+    out->ml_size_bytes = cpp_out.ml_size_bytes;
+    out->fused_size_bytes = cpp_out.fused_size_bytes;
+    out->safe_size_bytes = cpp_out.safe_size_bytes;
+    out->final_chunk_size_bytes = cpp_out.final_chunk_size_bytes;
+    return 0;
+}
+
+int aether_network_speed_reset(
+    aether_network_speed_state_t* state,
+    int max_samples,
+    double window_seconds) {
+    if (state == nullptr) {
+        return -1;
+    }
+    aether::upload::NetworkSpeedState cpp{};
+    aether::upload::network_speed_reset(&cpp, max_samples, window_seconds);
+    to_c_network_speed_state(cpp, state);
+    return 0;
+}
+
+int aether_network_speed_record_sample(
+    aether_network_speed_state_t* state,
+    int64_t bytes_transferred,
+    double duration_seconds,
+    double timestamp_seconds) {
+    if (state == nullptr) {
+        return -1;
+    }
+    aether::upload::NetworkSpeedState cpp = to_cpp_network_speed_state(*state);
+    const Status status = aether::upload::network_speed_record_sample(
+        &cpp,
+        bytes_transferred,
+        duration_seconds,
+        timestamp_seconds);
+    to_c_network_speed_state(cpp, state);
+    return to_rc(status);
+}
+
+int aether_network_speed_snapshot(
+    aether_network_speed_state_t* state,
+    double now_seconds,
+    int* out_speed_class,
+    double* out_speed_mbps,
+    int* out_sample_count,
+    int* out_reliable) {
+    if (state == nullptr || out_speed_class == nullptr || out_speed_mbps == nullptr ||
+        out_sample_count == nullptr || out_reliable == nullptr) {
+        return -1;
+    }
+    aether::upload::NetworkSpeedState cpp = to_cpp_network_speed_state(*state);
+    aether::upload::NetworkSpeedSnapshot snapshot{};
+    const Status status = aether::upload::network_speed_snapshot(&cpp, now_seconds, &snapshot);
+    to_c_network_speed_state(cpp, state);
+    if (status != Status::kOk) {
+        return to_rc(status);
+    }
+
+    switch (snapshot.speed_class) {
+    case aether::upload::NetworkSpeedClass::kSlow:
+        *out_speed_class = AETHER_NETWORK_SPEED_CLASS_SLOW;
+        break;
+    case aether::upload::NetworkSpeedClass::kNormal:
+        *out_speed_class = AETHER_NETWORK_SPEED_CLASS_NORMAL;
+        break;
+    case aether::upload::NetworkSpeedClass::kFast:
+        *out_speed_class = AETHER_NETWORK_SPEED_CLASS_FAST;
+        break;
+    case aether::upload::NetworkSpeedClass::kUltraFast:
+        *out_speed_class = AETHER_NETWORK_SPEED_CLASS_ULTRAFAST;
+        break;
+    case aether::upload::NetworkSpeedClass::kUnknown:
+    default:
+        *out_speed_class = AETHER_NETWORK_SPEED_CLASS_UNKNOWN;
+        break;
+    }
+    *out_speed_mbps = snapshot.speed_mbps;
+    *out_sample_count = snapshot.sample_count;
+    *out_reliable = snapshot.reliable ? 1 : 0;
+    return 0;
+}
+
+int aether_network_speed_statistics(
+    aether_network_speed_state_t* state,
+    double now_seconds,
+    aether_network_speed_statistics_t* out_stats) {
+    if (state == nullptr || out_stats == nullptr) {
+        return -1;
+    }
+    aether::upload::NetworkSpeedState cpp = to_cpp_network_speed_state(*state);
+    aether::upload::NetworkSpeedStatistics stats{};
+    const Status status = aether::upload::network_speed_statistics(&cpp, now_seconds, &stats);
+    to_c_network_speed_state(cpp, state);
+    if (status != Status::kOk) {
+        return to_rc(status);
+    }
+    out_stats->min_mbps = stats.min_mbps;
+    out_stats->max_mbps = stats.max_mbps;
+    out_stats->avg_mbps = stats.avg_mbps;
+    out_stats->stddev_mbps = stats.stddev_mbps;
+    out_stats->sample_count = stats.sample_count;
+    return 0;
+}
+
+int aether_network_speed_recommended_chunk_size(
+    int speed_class,
+    int chunk_size_min,
+    int chunk_size_default,
+    int chunk_size_max,
+    int* out_chunk_size) {
+    if (out_chunk_size == nullptr) {
+        return -1;
+    }
+    aether::upload::NetworkSpeedClass cpp_class = aether::upload::NetworkSpeedClass::kUnknown;
+    if (!parse_network_speed_class(speed_class, &cpp_class)) {
+        return -1;
+    }
+    *out_chunk_size = aether::upload::network_speed_recommended_chunk_size(
+        cpp_class,
+        chunk_size_min,
+        chunk_size_default,
+        chunk_size_max);
+    return 0;
+}
+
+int aether_network_speed_recommended_parallel_count(
+    int speed_class,
+    int max_parallel_uploads,
+    int* out_parallel_count) {
+    if (out_parallel_count == nullptr) {
+        return -1;
+    }
+    aether::upload::NetworkSpeedClass cpp_class = aether::upload::NetworkSpeedClass::kUnknown;
+    if (!parse_network_speed_class(speed_class, &cpp_class)) {
+        return -1;
+    }
+    *out_parallel_count = aether::upload::network_speed_recommended_parallel_count(
+        cpp_class,
+        max_parallel_uploads);
+    return 0;
+}
+
+int aether_upload_calculate_chunk_size(
+    int strategy,
+    int speed_class,
+    int recommended_chunk_size,
+    int chunk_size_default,
+    int chunk_size_max,
+    int* out_chunk_size) {
+    if (out_chunk_size == nullptr) {
+        return -1;
+    }
+    aether::upload::ChunkSizingStrategy cpp_strategy = aether::upload::ChunkSizingStrategy::kAdaptive;
+    aether::upload::NetworkSpeedClass cpp_class = aether::upload::NetworkSpeedClass::kUnknown;
+    if (!parse_chunk_sizing_strategy(strategy, &cpp_strategy) ||
+        !parse_network_speed_class(speed_class, &cpp_class)) {
+        return -1;
+    }
+    *out_chunk_size = aether::upload::network_speed_calculate_chunk_size(
+        cpp_strategy,
+        cpp_class,
+        recommended_chunk_size,
+        chunk_size_default,
+        chunk_size_max);
+    return 0;
+}
+
+int aether_upload_calculate_chunk_size_for_file(
+    int base_chunk_size,
+    int chunk_size_min,
+    int64_t file_size_bytes,
+    int* out_chunk_size) {
+    if (out_chunk_size == nullptr) {
+        return -1;
+    }
+    *out_chunk_size = aether::upload::network_speed_calculate_chunk_size_for_file(
+        base_chunk_size,
+        chunk_size_min,
+        file_size_bytes);
+    return 0;
 }
 
 int aether_erasure_select_mode(
@@ -5405,6 +6365,48 @@ int aether_patch_color_evidence(
     return 0;
 }
 
+int aether_patch_evidence_step(
+    const aether_patch_evidence_step_input_t* input,
+    aether_patch_evidence_step_result_t* out_result) {
+    if (input == nullptr || out_result == nullptr) {
+        return -1;
+    }
+
+    aether::evidence::PatchEvidenceStepInput cpp_in{};
+    cpp_in.previous_evidence = input->previous_evidence;
+    cpp_in.last_update_ms = input->last_update_ms;
+    cpp_in.observation_count = std::max<std::int32_t>(0, input->observation_count);
+    cpp_in.error_count = std::max<std::int32_t>(0, input->error_count);
+    cpp_in.error_streak = std::max<std::int32_t>(0, input->error_streak);
+    cpp_in.last_good_update_ms = input->last_good_update_ms;
+    cpp_in.suspect_count = std::max<std::int32_t>(0, input->suspect_count);
+    cpp_in.ledger_quality = input->ledger_quality;
+    cpp_in.verdict = to_cpp_patch_evidence_verdict(input->verdict);
+    cpp_in.timestamp_ms = input->timestamp_ms;
+    cpp_in.lock_threshold = input->lock_threshold;
+    cpp_in.min_observations_for_lock = std::max<std::int32_t>(0, input->min_observations_for_lock);
+    cpp_in.cooldown_seconds = input->cooldown_seconds;
+    cpp_in.corpse_protection_seconds = input->corpse_protection_seconds;
+    cpp_in.base_penalty_per_observation = input->base_penalty_per_observation;
+    cpp_in.max_penalty_per_second = input->max_penalty_per_second;
+    cpp_in.current_frame_rate = input->current_frame_rate;
+
+    const aether::evidence::PatchEvidenceStepResult cpp_out =
+        aether::evidence::patch_evidence_step(cpp_in);
+    out_result->evidence = cpp_out.evidence;
+    out_result->last_update_ms = cpp_out.last_update_ms;
+    out_result->observation_count = cpp_out.observation_count;
+    out_result->error_count = cpp_out.error_count;
+    out_result->error_streak = cpp_out.error_streak;
+    out_result->last_good_update_ms = cpp_out.last_good_update_ms;
+    out_result->suspect_count = cpp_out.suspect_count;
+    out_result->is_locked = cpp_out.is_locked ? 1 : 0;
+    out_result->should_update_best_frame = cpp_out.should_update_best_frame ? 1 : 0;
+    out_result->was_updated = cpp_out.was_updated ? 1 : 0;
+    out_result->verdict_was_unknown = cpp_out.verdict_was_unknown ? 1 : 0;
+    return 0;
+}
+
 int aether_smart_smoother_create(
     const aether_smart_smoother_config_t* config_or_null,
     aether_smart_smoother_t** out_smoother) {
@@ -5627,65 +6629,43 @@ int aether_capture_style_runtime_resolve(
     for (std::size_t i = 0u; i < count; ++i) {
         const aether_capture_style_input_t& in = inputs[i];
         aether_capture_style_runtime_t::PatchState& state = runtime->states[in.patch_key];
-
-        const float current_display = clamp01(std::isfinite(in.display) ? in.display : 0.0f);
-        const float alpha = clamp01(config.smoothing_alpha);
-        float resolved_display = current_display;
-        if (state.has_visual) {
-            resolved_display = state.display + alpha * (current_display - state.display);
-            resolved_display = std::max(state.display, clamp01(resolved_display));
+        const float median_area = std::max(
+            std::max(config.min_area_sq_m, std::isfinite(in.area_sq_m) ? in.area_sq_m : config.min_area_sq_m),
+            config.min_median_area_sq_m);
+        const int rc = resolve_capture_style_entry(config, in, median_area, &state, &out_states[i]);
+        if (rc != 0) {
+            return rc;
         }
+    }
+    return 0;
+}
 
-        const float area_sq_m = std::max(config.min_area_sq_m, std::isfinite(in.area_sq_m) ? in.area_sq_m : config.min_area_sq_m);
-        const aether::render::FragmentVisualParams params = aether::render::compute_visual_params(
-            resolved_display,
-            1.0f,
-            area_sq_m,
-            std::max(area_sq_m, config.min_median_area_sq_m));
+int aether_capture_style_resolve_stateless(
+    const aether_capture_style_runtime_config_t* config_or_null,
+    const aether_capture_style_input_t* inputs,
+    int input_count,
+    float median_area_sq_m,
+    aether_capture_style_output_t* out_states) {
+    std::size_t count = 0u;
+    if (!checked_count(input_count, &count) || inputs == nullptr || out_states == nullptr) {
+        return -1;
+    }
 
-        float metallic = clamp01(params.metallic);
-        float roughness = clamp01(params.roughness);
-        float thickness = std::max(config.min_thickness, std::min(config.max_thickness, params.wedge_thickness));
-        float border = std::max(config.min_border_width, std::min(config.max_border_width, params.border_width_px));
-        float grayscale = clamp01(params.fill_gray);
+    const aether_capture_style_runtime_config_t config = sanitize_capture_style_config(config_or_null);
+    const float sanitized_median = std::max(
+        config.min_median_area_sq_m,
+        std::isfinite(median_area_sq_m) ? median_area_sq_m : config.min_median_area_sq_m);
 
-        if (state.has_visual) {
-            metallic = std::max(state.metallic, metallic);
-            roughness = std::min(state.roughness, roughness);
-            thickness = std::min(state.thickness, thickness);
-            grayscale = std::max(state.grayscale, grayscale);
+    for (std::size_t i = 0u; i < count; ++i) {
+        const int rc = resolve_capture_style_entry(
+            config,
+            inputs[i],
+            sanitized_median,
+            nullptr,
+            &out_states[i]);
+        if (rc != 0) {
+            return rc;
         }
-        if (state.has_border) {
-            border = std::min(state.border_width, border);
-        }
-
-        const bool should_freeze = (state.visual_frozen || state.border_frozen ||
-            resolved_display >= config.freeze_threshold || state.display >= config.freeze_threshold);
-        if (should_freeze) {
-            state.visual_frozen = true;
-            state.border_frozen = true;
-        }
-
-        state.display = resolved_display;
-        state.metallic = metallic;
-        state.roughness = roughness;
-        state.thickness = thickness;
-        state.border_width = border;
-        state.grayscale = grayscale;
-        state.has_visual = true;
-        state.has_border = true;
-        state.has_grayscale = true;
-
-        aether_capture_style_output_t out{};
-        out.resolved_display = resolved_display;
-        out.metallic = metallic;
-        out.roughness = roughness;
-        out.thickness = thickness;
-        out.border_width = border;
-        out.grayscale = grayscale;
-        out.visual_frozen = state.visual_frozen ? 1 : 0;
-        out.border_frozen = state.border_frozen ? 1 : 0;
-        out_states[i] = out;
     }
     return 0;
 }
@@ -6379,6 +7359,25 @@ int aether_decay_confidence(
     return 0;
 }
 
+int aether_confidence_aggregation_weight(
+    int64_t last_update_ms,
+    int64_t current_time_ms,
+    double half_life_sec,
+    double* out_weight) {
+    if (out_weight == nullptr || !std::isfinite(half_life_sec) || half_life_sec <= 0.0) {
+        return -1;
+    }
+    const int64_t delta_ms = std::max<int64_t>(0, current_time_ms - last_update_ms);
+    const double age_sec = static_cast<double>(delta_ms) / 1000.0;
+    const double raw = std::pow(0.5, age_sec / half_life_sec);
+    const double clamped = std::max(0.0, std::min(1.0, raw));
+    if (!std::isfinite(clamped)) {
+        return -1;
+    }
+    *out_weight = clamped;
+    return 0;
+}
+
 int aether_match_patch_identities(
     const aether_patch_identity_sample_t* observations,
     int observation_count,
@@ -6526,9 +7525,9 @@ int aether_compute_render_snapshot(
         if (inp.has_stability && inp.base_display >= config->s4_to_s5_threshold) {
             rendered = std::max(inp.base_display, inp.confidence_display);
         } else if (!inp.has_stability) {
-            rendered = inp.confidence_display;
+            rendered = std::max(inp.base_display, inp.confidence_display);
         }
-        out_rendered_display[i] = rendered;
+        out_rendered_display[i] = std::max(0.0f, std::min(1.0f, rendered));
     }
     return 0;
 }
@@ -7149,9 +8148,9 @@ int aether_f6_process_frame(
         gaussians[i].flags = cpp_gs[i].flags;
     }
 
-    out_metrics->evaluated_count = metrics.evaluated_count;
-    out_metrics->marked_dynamic_count = metrics.marked_dynamic_count;
-    out_metrics->restored_static_count = metrics.restored_static_count;
+    out_metrics->evaluated_count = static_cast<uint32_t>(metrics.evaluated_count);
+    out_metrics->marked_dynamic_count = static_cast<uint32_t>(metrics.marked_dynamic_count);
+    out_metrics->restored_static_count = static_cast<uint32_t>(metrics.restored_static_count);
     out_metrics->mean_conflict = metrics.mean_conflict;
     return 0;
 }
@@ -7275,6 +8274,21 @@ uint64_t aether_spatial_morton_code(
     return sq.morton_code(wx, wy, wz);
 }
 
+void aether_spatial_quantize(
+    const aether_spatial_quantizer_config_t* config,
+    float wx, float wy, float wz,
+    int32_t* out_gx, int32_t* out_gy, int32_t* out_gz) {
+    if (!config || !out_gx || !out_gy || !out_gz) {
+        return;
+    }
+    aether::tsdf::SpatialQuantizer sq{};
+    sq.origin_x = config->origin_x;
+    sq.origin_y = config->origin_y;
+    sq.origin_z = config->origin_z;
+    sq.cell_size = config->cell_size;
+    sq.quantize(wx, wy, wz, *out_gx, *out_gy, *out_gz);
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Hilbert code / Spatial Quantizer
 // ═══════════════════════════════════════════════════════════════════════
@@ -7336,6 +8350,12 @@ double aether_clamp01(double x) {
     return aether::evidence::PRMath::clamp01(x);
 }
 
+double aether_clamp_range(double x, double lo, double hi) {
+    if (!std::isfinite(x)) return lo;
+    if (lo > hi) std::swap(lo, hi);
+    return std::clamp(x, lo, hi);
+}
+
 int aether_is_usable(double x) {
     return aether::evidence::PRMath::is_usable(x) ? 1 : 0;
 }
@@ -7350,6 +8370,34 @@ double aether_log_complement_sigmoid(double x) {
 
 double aether_softplus(double x) {
     return aether::evidence::PRMath::softplus(x);
+}
+
+int64_t aether_quantize_q01(double value) {
+    const double clamped = std::clamp(value, 0.0, 1.0);
+    constexpr double kScale = 1.0e12;
+    return static_cast<int64_t>(std::llround(clamped * kScale));
+}
+
+double aether_dequantize_q01(int64_t q) {
+    constexpr double kScale = 1.0e12;
+    return static_cast<double>(q) / kScale;
+}
+
+int aether_quantized_are_close(int64_t a, int64_t b, int64_t tolerance) {
+    if (tolerance < 0) return 0;
+    const int64_t diff = (a >= b) ? (a - b) : (b - a);
+    return diff <= tolerance ? 1 : 0;
+}
+
+int64_t aether_quantize_angle_deg(double degrees) {
+    if (!std::isfinite(degrees)) return 0;
+    constexpr double kScale = 1.0e9;
+    return static_cast<int64_t>(std::llround(degrees * kScale));
+}
+
+double aether_dequantize_angle_deg(int64_t q) {
+    constexpr double kScale = 1.0e9;
+    return static_cast<double>(q) / kScale;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -8175,6 +9223,1028 @@ int aether_compute_fiedler_value(
     out->fiedler_value = r.fiedler_value;
     out->computed = r.computed ? 1 : 0;
     out->iterations_used = r.iterations_used;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P0: Observation Quality
+// ═══════════════════════════════════════════════════════════════════════════
+
+float aether_observation_quality_from_area(float area_sq_m, float reference_area) {
+    const float ref = (reference_area > 0.0f) ? reference_area * 0.01f : 0.01f;
+    const float area_quality = std::min(area_sq_m / ref, 1.0f);
+    return std::max(0.1f, std::min(1.0f, 0.8f * area_quality + 0.2f));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P1b: Oklab Color
+// ═══════════════════════════════════════════════════════════════════════════
+
+int aether_oklab_color_from_display(float display, aether_srgb_color_t* out) {
+    if (out == nullptr) return -1;
+    const auto c = aether::render::oklab_color_from_display(display);
+    out->r = c.r;
+    out->g = c.g;
+    out->b = c.b;
+    return 0;
+}
+
+int aether_oklab_to_srgb(float L, float a, float b, aether_srgb_color_t* out) {
+    if (out == nullptr) return -1;
+    const auto c = aether::render::oklab_to_srgb(L, a, b);
+    out->r = c.r;
+    out->g = c.g;
+    out->b = c.b;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P1c: Environment Light Fusion Kernel
+// ═══════════════════════════════════════════════════════════════════════════
+
+int aether_light_estimator_create(
+    const aether_light_estimator_config_t* config_or_null,
+    aether_light_estimator_t** out_estimator) {
+    if (out_estimator == nullptr) return -1;
+
+    aether::quality::EnvironmentLightConfig config;
+    if (config_or_null != nullptr) {
+        std::memcpy(config.fallback_direction, config_or_null->fallback_direction, sizeof(config.fallback_direction));
+        config.fallback_intensity = config_or_null->fallback_intensity;
+        config.min_intensity = config_or_null->min_intensity;
+        config.max_intensity = config_or_null->max_intensity;
+        config.rise_alpha = config_or_null->rise_alpha;
+        config.fall_alpha = config_or_null->fall_alpha;
+        config.direction_alpha = config_or_null->direction_alpha;
+        config.sh_alpha = config_or_null->sh_alpha;
+        config.missing_decay_per_s = config_or_null->missing_decay_per_s;
+        config.max_missing_hold_s = config_or_null->max_missing_hold_s;
+    }
+
+    auto* estimator = new (std::nothrow) aether_light_estimator(config);
+    if (estimator == nullptr) return -2;
+    *out_estimator = estimator;
+    return 0;
+}
+
+int aether_light_estimator_destroy(aether_light_estimator_t* estimator) {
+    if (estimator == nullptr) return -1;
+    delete estimator;
+    return 0;
+}
+
+int aether_light_estimator_reset(aether_light_estimator_t* estimator) {
+    if (estimator == nullptr) return -1;
+    estimator->impl.reset();
+    return 0;
+}
+
+int aether_light_estimator_step(
+    aether_light_estimator_t* estimator,
+    const aether_light_observation_t* observation_or_null,
+    double timestamp_s,
+    aether_light_state_t* out_state) {
+    if (estimator == nullptr || out_state == nullptr || !std::isfinite(timestamp_s)) return -1;
+
+    aether::quality::EnvironmentLightObservation observation{};
+    const aether::quality::EnvironmentLightObservation* observation_ptr = nullptr;
+    if (observation_or_null != nullptr) {
+        observation.source_tier = observation_or_null->source_tier;
+        observation.has_direction = observation_or_null->has_direction;
+        observation.has_sh = observation_or_null->has_sh;
+        observation.direction[0] = observation_or_null->direction[0];
+        observation.direction[1] = observation_or_null->direction[1];
+        observation.direction[2] = observation_or_null->direction[2];
+        observation.intensity = observation_or_null->intensity;
+        std::memcpy(observation.sh_coeffs_rgb, observation_or_null->sh_coeffs_rgb, sizeof(observation.sh_coeffs_rgb));
+        observation_ptr = &observation;
+    }
+
+    const auto& state = estimator->impl.step(observation_ptr, timestamp_s);
+    std::memset(out_state, 0, sizeof(*out_state));
+    out_state->tier = state.tier;
+    out_state->direction[0] = state.direction[0];
+    out_state->direction[1] = state.direction[1];
+    out_state->direction[2] = state.direction[2];
+    out_state->intensity = state.intensity;
+    out_state->missing_seconds = state.missing_seconds;
+    std::memcpy(out_state->sh_coeffs_rgb, state.sh_coeffs_rgb, sizeof(out_state->sh_coeffs_rgb));
+    return 0;
+}
+
+int aether_light_state_copy_sh9_rgb(
+    const aether_light_state_t* state,
+    float* out_sh_coeffs_rgb27,
+    int out_count) {
+    if (state == nullptr || out_sh_coeffs_rgb27 == nullptr || out_count < 27) return -1;
+    std::memcpy(out_sh_coeffs_rgb27, state->sh_coeffs_rgb, sizeof(float) * 27u);
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2b+P1a: Thermal Quality Decision
+// ═══════════════════════════════════════════════════════════════════════════
+
+struct aether_thermal_quality_decision {
+    aether::quality::ThermalQualityDecision impl;
+    explicit aether_thermal_quality_decision(const aether::quality::ThermalQualityConfig& cfg)
+        : impl(cfg) {}
+};
+
+int aether_thermal_quality_create(
+    const aether_thermal_quality_config_t* config,
+    aether_thermal_quality_decision_t** out) {
+    if (out == nullptr) return -1;
+
+    aether::quality::ThermalQualityConfig cfg;
+    if (config != nullptr) {
+        cfg.hysteresis_s = config->hysteresis_s;
+        cfg.overshoot_ratio = config->overshoot_ratio;
+        cfg.window_frames = config->window_frames;
+        cfg.proactive_threshold = config->proactive_threshold;
+        cfg.cooldown_threshold = config->cooldown_threshold;
+        cfg.cooldown_multiplier = config->cooldown_multiplier;
+        for (int i = 0; i < 4; ++i) {
+            cfg.tier_max_triangles[i] = config->tier_max_triangles[i];
+            cfg.tier_target_fps[i] = config->tier_target_fps[i];
+        }
+    }
+
+    auto* dec = new (std::nothrow) aether_thermal_quality_decision(cfg);
+    if (dec == nullptr) return -2;
+    *out = dec;
+    return 0;
+}
+
+int aether_thermal_quality_destroy(aether_thermal_quality_decision_t* dec) {
+    if (dec == nullptr) return -1;
+    delete dec;
+    return 0;
+}
+
+int aether_thermal_quality_reset(aether_thermal_quality_decision_t* dec) {
+    if (dec == nullptr) return -1;
+    dec->impl.reset();
+    return 0;
+}
+
+int aether_thermal_quality_update_os(
+    aether_thermal_quality_decision_t* dec, int os_level, double timestamp_s) {
+    if (dec == nullptr) return -1;
+    dec->impl.update_os_thermal(os_level, timestamp_s);
+    return 0;
+}
+
+int aether_thermal_quality_update_frame(
+    aether_thermal_quality_decision_t* dec, float gpu_ms, double timestamp_s) {
+    if (dec == nullptr) return -1;
+    dec->impl.update_frame_timing(gpu_ms, timestamp_s);
+    return 0;
+}
+
+int aether_thermal_quality_evaluate(
+    aether_thermal_quality_decision_t* dec, double timestamp_s) {
+    if (dec == nullptr) return -1;
+    dec->impl.evaluate(timestamp_s);
+    return 0;
+}
+
+int aether_thermal_quality_state(
+    const aether_thermal_quality_decision_t* dec,
+    aether_thermal_quality_state_t* out) {
+    if (dec == nullptr || out == nullptr) return -1;
+    const auto s = dec->impl.state();
+    out->current_tier = s.current_tier;
+    out->pass_mask = s.pass_mask;
+    out->max_triangles = s.max_triangles;
+    out->target_fps = s.target_fps;
+    out->enable_flip = s.enable_flip;
+    out->enable_ripple = s.enable_ripple;
+    out->enable_metallic = s.enable_metallic;
+    out->enable_haptics = s.enable_haptics;
+    return 0;
+}
+
+int aether_thermal_quality_force_tier(
+    aether_thermal_quality_decision_t* dec, int tier, double timestamp_s) {
+    if (dec == nullptr) return -1;
+    dec->impl.force_tier(tier, timestamp_s);
+    return 0;
+}
+
+int aether_camera_format_tier_from_dimensions(
+    int32_t width,
+    int32_t height,
+    int32_t* out_tier_code) {
+    if (out_tier_code == nullptr || width <= 0 || height <= 0) {
+        return -1;
+    }
+    *out_tier_code = static_cast<int32_t>(classify_resolution_tier_code(width, height));
+    return 0;
+}
+
+int aether_camera_format_score(
+    const aether_camera_format_descriptor_t* descriptor,
+    int64_t* out_score) {
+    if (descriptor == nullptr || out_score == nullptr ||
+        descriptor->width <= 0 || descriptor->height <= 0 ||
+        !std::isfinite(descriptor->fps) || descriptor->fps <= 0.0) {
+        return -1;
+    }
+    const int max_dimension = std::max(descriptor->width, descriptor->height);
+    int64_t score = 0;
+    score += static_cast<int64_t>(descriptor->fps) * descriptor->weight_fps;
+    score += (static_cast<int64_t>(max_dimension) / 100) * descriptor->weight_resolution;
+    if (descriptor->hdr_supported != 0) {
+        score += descriptor->bonus_hdr;
+    }
+    if (descriptor->hevc_supported != 0) {
+        score += descriptor->bonus_hevc;
+    }
+    *out_score = score;
+    return 0;
+}
+
+int aether_scan_state_can_transition(
+    int32_t from_state,
+    int32_t to_state,
+    int32_t* out_allowed) {
+    if (out_allowed == nullptr) {
+        return -1;
+    }
+    *out_allowed = scan_state_transition_allowed(from_state, to_state) ? 1 : 0;
+    return 0;
+}
+
+int aether_scan_state_is_active(
+    int32_t state,
+    int32_t* out_active) {
+    if (out_active == nullptr) {
+        return -1;
+    }
+    *out_active = (state == AETHER_SCAN_STATE_CAPTURING) ? 1 : 0;
+    return 0;
+}
+
+int aether_scan_state_can_finish(
+    int32_t state,
+    int32_t* out_can_finish) {
+    if (out_can_finish == nullptr) {
+        return -1;
+    }
+    *out_can_finish = (state == AETHER_SCAN_STATE_CAPTURING ||
+                       state == AETHER_SCAN_STATE_PAUSED)
+        ? 1
+        : 0;
+    return 0;
+}
+
+int aether_haptic_policy_create(
+    const aether_haptic_policy_config_t* config_or_null,
+    aether_haptic_policy_t** out_policy) {
+    if (out_policy == nullptr) {
+        return -1;
+    }
+    double debounce_seconds = 5.0;
+    int max_per_minute = 4;
+    if (config_or_null != nullptr) {
+        if (std::isfinite(config_or_null->debounce_seconds) &&
+            config_or_null->debounce_seconds >= 0.0) {
+            debounce_seconds = config_or_null->debounce_seconds;
+        }
+        if (config_or_null->max_per_minute > 0) {
+            max_per_minute = config_or_null->max_per_minute;
+        }
+    }
+    auto* policy = new (std::nothrow) aether_haptic_policy(debounce_seconds, max_per_minute);
+    if (policy == nullptr) {
+        return -2;
+    }
+    *out_policy = policy;
+    return 0;
+}
+
+int aether_haptic_policy_destroy(aether_haptic_policy_t* policy) {
+    if (policy == nullptr) {
+        return -1;
+    }
+    delete policy;
+    return 0;
+}
+
+int aether_haptic_policy_reset(aether_haptic_policy_t* policy) {
+    if (policy == nullptr) {
+        return -1;
+    }
+    policy->last_fire_time_by_pattern.clear();
+    policy->recent_fire_times.clear();
+    return 0;
+}
+
+int aether_haptic_policy_should_fire(
+    aether_haptic_policy_t* policy,
+    int32_t pattern,
+    double timestamp_s,
+    int32_t* out_should_fire) {
+    if (policy == nullptr || out_should_fire == nullptr || !std::isfinite(timestamp_s)) {
+        return -1;
+    }
+    *out_should_fire = 0;
+
+    auto& recent = policy->recent_fire_times;
+    recent.erase(
+        std::remove_if(
+            recent.begin(),
+            recent.end(),
+            [timestamp_s](double value) { return !std::isfinite(value) || (timestamp_s - value) > 60.0; }),
+        recent.end());
+
+    const auto last_it = policy->last_fire_time_by_pattern.find(pattern);
+    if (last_it != policy->last_fire_time_by_pattern.end()) {
+        const double delta = timestamp_s - last_it->second;
+        if (std::isfinite(delta) && delta < policy->debounce_seconds) {
+            return 0;
+        }
+    }
+    if (static_cast<int>(recent.size()) >= policy->max_per_minute) {
+        return 0;
+    }
+
+    policy->last_fire_time_by_pattern[pattern] = timestamp_s;
+    recent.push_back(timestamp_s);
+    *out_should_fire = 1;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P3: SPZ Compressor
+// ═══════════════════════════════════════════════════════════════════════════
+
+int aether_spz_compress(
+    const float* positions,
+    const float* scales,
+    const float* rotations,
+    const float* opacities,
+    const float* sh_coeffs,
+    int num_splats,
+    int sh_degree,
+    uint8_t** out_data,
+    size_t* out_size) {
+    if (out_data == nullptr || out_size == nullptr) return -1;
+    *out_data = nullptr;
+    *out_size = 0;
+
+    auto result = aether::render::SpzCompressor::compress(
+        positions, scales, rotations, opacities, sh_coeffs, num_splats, sh_degree);
+
+    if (result.empty()) return -2;
+
+    auto* buf = static_cast<uint8_t*>(std::malloc(result.size()));
+    if (buf == nullptr) return -3;
+
+    std::memcpy(buf, result.data(), result.size());
+    *out_data = buf;
+    *out_size = result.size();
+    return 0;
+}
+
+int aether_spz_decompress(
+    const uint8_t* data,
+    size_t size,
+    float** out_positions,
+    float** out_scales,
+    float** out_rotations,
+    float** out_opacities,
+    float** out_sh_coeffs,
+    float** out_colors,
+    aether_spz_header_t* out_header) {
+    if (data == nullptr || out_header == nullptr) return -1;
+
+    aether::render::GaussianSplatBuffer buf;
+    if (!aether::render::SpzCompressor::decompress(data, size, &buf)) return -2;
+
+    auto copy_vec = [](const std::vector<float>& src, float** dst) {
+        if (src.empty() || dst == nullptr) { if (dst) *dst = nullptr; return; }
+        auto* p = static_cast<float*>(std::malloc(src.size() * sizeof(float)));
+        if (p) std::memcpy(p, src.data(), src.size() * sizeof(float));
+        *dst = p;
+    };
+
+    copy_vec(buf.positions, out_positions);
+    copy_vec(buf.scales, out_scales);
+    copy_vec(buf.rotations, out_rotations);
+    copy_vec(buf.opacities, out_opacities);
+    copy_vec(buf.sh_coeffs, out_sh_coeffs);
+    copy_vec(buf.colors, out_colors);
+
+    out_header->num_splats = static_cast<uint32_t>(buf.num_splats);
+    out_header->sh_degree = static_cast<uint8_t>(buf.sh_degree);
+    out_header->flags = 0;
+    // BBox would need to be parsed from the header, but decompressor already used it
+    std::memset(out_header->bbox_min, 0, sizeof(out_header->bbox_min));
+    std::memset(out_header->bbox_max, 0, sizeof(out_header->bbox_max));
+    return 0;
+}
+
+void aether_spz_free(void* ptr) {
+    std::free(ptr);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// P0: Multi-view Photometric Cross-Validation
+// ═══════════════════════════════════════════════════════════════════════
+
+struct aether_multiview_photometric {
+    aether::quality::MultiViewPhotometricValidator validator;
+    aether_multiview_photometric()
+        : validator(aether::quality::MultiViewPhotometricConfig{}) {}
+};
+
+aether_multiview_photometric_t* aether_multiview_photometric_create(void) {
+    return new (std::nothrow) aether_multiview_photometric();
+}
+
+void aether_multiview_photometric_destroy(aether_multiview_photometric_t* h) {
+    delete h;
+}
+
+int aether_multiview_photometric_add_observation(
+    aether_multiview_photometric_t* h,
+    uint64_t patch_id,
+    const aether_view_radiance_sample_t* s) {
+    if (!h || !s) return -1;
+    aether::quality::ViewRadianceSample vs;
+    vs.rgb[0] = s->rgb[0]; vs.rgb[1] = s->rgb[1]; vs.rgb[2] = s->rgb[2];
+    vs.view_dir[0] = s->view_dir[0]; vs.view_dir[1] = s->view_dir[1]; vs.view_dir[2] = s->view_dir[2];
+    vs.normal[0] = s->normal[0]; vs.normal[1] = s->normal[1]; vs.normal[2] = s->normal[2];
+    vs.luminance = s->luminance;
+    vs.lab.l = s->lab_l; vs.lab.a = s->lab_a; vs.lab.b = s->lab_b;
+    vs.timestamp_ms = s->timestamp_ms;
+    h->validator.add_observation(patch_id, vs);
+    return 0;
+}
+
+int aether_multiview_photometric_evaluate_patch(
+    const aether_multiview_photometric_t* h,
+    uint64_t patch_id,
+    aether_cross_view_result_t* out) {
+    if (!h || !out) return -1;
+    auto r = h->validator.evaluate_patch(patch_id);
+    out->mean_cross_view_delta_e = r.mean_cross_view_delta_e;
+    out->max_cross_view_delta_e = r.max_cross_view_delta_e;
+    out->lambertian_consistency = r.lambertian_consistency;
+    out->pair_count = r.pair_count;
+    out->is_consistent = r.is_consistent ? 1 : 0;
+    out->confidence = r.confidence;
+    return 0;
+}
+
+int aether_multiview_photometric_evaluate_all(
+    const aether_multiview_photometric_t* h,
+    aether_cross_view_result_t* out) {
+    if (!h || !out) return -1;
+    auto r = h->validator.evaluate_all();
+    out->mean_cross_view_delta_e = r.mean_cross_view_delta_e;
+    out->max_cross_view_delta_e = r.max_cross_view_delta_e;
+    out->lambertian_consistency = r.lambertian_consistency;
+    out->pair_count = r.pair_count;
+    out->is_consistent = r.is_consistent ? 1 : 0;
+    out->confidence = r.confidence;
+    return 0;
+}
+
+size_t aether_multiview_photometric_patch_count(
+    const aether_multiview_photometric_t* h) {
+    return h ? h->validator.patch_count() : 0;
+}
+
+void aether_multiview_photometric_reset(aether_multiview_photometric_t* h) {
+    if (h) h->validator.reset();
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// P1a: Bayesian Quality Network
+// ═══════════════════════════════════════════════════════════════════════
+
+struct aether_bayesian_quality_network {
+    aether::quality::BayesianQualityNetwork network;
+    aether_bayesian_quality_network()
+        : network(aether::quality::BayesianNetworkConfig{}) {}
+};
+
+aether_bayesian_quality_network_t* aether_bayesian_quality_network_create(void) {
+    return new (std::nothrow) aether_bayesian_quality_network();
+}
+
+void aether_bayesian_quality_network_destroy(aether_bayesian_quality_network_t* h) {
+    delete h;
+}
+
+int aether_bayesian_quality_network_initialize(
+    aether_bayesian_quality_network_t* h,
+    const double weights[6]) {
+    if (!h || !weights) return -1;
+    h->network.initialize_from_weights(weights);
+    return 0;
+}
+
+int aether_bayesian_quality_network_infer(
+    const aether_bayesian_quality_network_t* h,
+    const double component_scores[6],
+    aether_bayesian_quality_result_t* out) {
+    if (!h || !component_scores || !out) return -1;
+    auto r = h->network.infer(component_scores);
+    out->fusion_score = r.fusion_score;
+    out->fusion_variance = r.fusion_variance;
+    out->risk_score = r.risk_score;
+    out->risk_variance = r.risk_variance;
+    out->fusion_credible_low = r.fusion_posterior.credible_low;
+    out->fusion_credible_high = r.fusion_posterior.credible_high;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// P1b: Choquet Fuzzy Measure Learner
+// ═══════════════════════════════════════════════════════════════════════
+
+struct aether_choquet_learner {
+    aether::evidence::ChoquetLearner learner;
+    aether_choquet_learner()
+        : learner(aether::evidence::ChoquetLearnerConfig{}) {}
+};
+
+aether_choquet_learner_t* aether_choquet_learner_create(void) {
+    return new (std::nothrow) aether_choquet_learner();
+}
+
+void aether_choquet_learner_destroy(aether_choquet_learner_t* h) {
+    delete h;
+}
+
+int aether_choquet_learner_add_observation(
+    aether_choquet_learner_t* h,
+    const aether_choquet_observation_t* obs) {
+    if (!h || !obs) return -1;
+    aether::evidence::ChoquetObservation co;
+    for (int i = 0; i < 5; ++i) co.super_dims[i] = obs->super_dims[i];
+    co.certified = obs->certified != 0;
+    co.weight = obs->weight;
+    h->learner.add_observation(co);
+    return 0;
+}
+
+int aether_choquet_learner_step(
+    aether_choquet_learner_t* h,
+    double out_mu[32]) {
+    if (!h || !out_mu) return -1;
+    auto mu = h->learner.step();
+    for (int i = 0; i < 32; ++i) out_mu[i] = mu.mu[i];
+    return 0;
+}
+
+int aether_choquet_learner_stats(
+    const aether_choquet_learner_t* h,
+    aether_choquet_learner_stats_t* out) {
+    if (!h || !out) return -1;
+    auto s = h->learner.stats();
+    out->observation_count = s.observation_count;
+    out->steps_taken = s.has_learned ? 1 : 0;
+    out->last_loss = s.log_likelihood;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// P2a: Multi-scale Image Quality
+// ═══════════════════════════════════════════════════════════════════════
+
+int aether_multiscale_image_quality(
+    const uint8_t* bytes,
+    int width,
+    int height,
+    int row_bytes,
+    int max_levels,
+    aether_multiscale_image_result_t* out) {
+    if (!bytes || !out) return -1;
+    aether::quality::MultiscaleConfig cfg;
+    cfg.max_levels = max_levels > 0 ? max_levels : 4;
+    aether::quality::MultiscaleImageResult r{};
+    int status = aether::quality::multiscale_image_quality(
+        bytes, width, height, row_bytes, cfg, &r);
+    if (status != 0) return status;
+    out->composite_quality = r.composite_quality;
+    for (int i = 0; i < 4; ++i) out->per_level_energy[i] = r.per_level_energy[i];
+    out->noise_estimate = r.noise_estimate;
+    out->sharpness_profile = r.sharpness_profile;
+    out->levels_computed = r.levels_computed;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// P2b: Monte Carlo Uncertainty Estimation
+// ═══════════════════════════════════════════════════════════════════════
+
+int aether_mc_uncertainty_estimate(
+    const aether_mc_cell_observation_t* cells,
+    size_t count,
+    int num_iterations,
+    uint64_t seed,
+    aether_mc_uncertainty_result_t* out) {
+    if (!cells || !out) return -1;
+
+    std::vector<aether::evidence::MCCellObservation> obs(count);
+    for (size_t i = 0; i < count; ++i) {
+        obs[i].occupied = cells[i].occupied;
+        obs[i].unknown = cells[i].unknown;
+        obs[i].view_count = cells[i].view_count;
+        obs[i].area_weight = cells[i].area_weight;
+        obs[i].excluded = cells[i].excluded != 0;
+    }
+
+    aether::evidence::MCUncertaintyConfig cfg;
+    cfg.num_iterations = num_iterations > 0 ? num_iterations : 50;
+    cfg.seed = seed;
+    aether::evidence::MCUncertaintyResult r{};
+    int status = aether::evidence::mc_uncertainty_estimate(
+        obs.data(), count, cfg, &r);
+    if (status != 0) return status;
+
+    auto copy_ci = [](const aether::evidence::MCConfidenceInterval& s,
+                      aether_mc_confidence_interval_t& d) {
+        d.median = s.median; d.p5 = s.p5; d.p95 = s.p95;
+        d.mean = s.mean; d.std_dev = s.std_dev;
+    };
+    copy_ci(r.coverage_ci, out->coverage_ci);
+    copy_ci(r.belief_ci, out->belief_ci);
+    copy_ci(r.plausibility_ci, out->plausibility_ci);
+    copy_ci(r.lyapunov_rate_ci, out->lyapunov_rate_ci);
+    copy_ci(r.pac_bound_ci, out->pac_bound_ci);
+    out->iterations_run = r.iterations_run;
+    out->converged = r.converged ? 1 : 0;
+    return 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// PBR: Cook-Torrance Material
+// ═══════════════════════════════════════════════════════════════════════
+
+int aether_pbr_from_evidence(
+    float display_confidence,
+    uint8_t evidence_state,
+    aether_pbr_material_params_t* out) {
+    if (!out) return -1;
+    auto p = aether::render::compute_pbr_from_evidence(display_confidence, evidence_state);
+    out->metallic = p.metallic;
+    out->roughness = p.roughness;
+    out->f0 = p.f0;
+    out->ior = p.ior;
+    out->clearcoat = p.clearcoat;
+    out->clearcoat_roughness = p.clearcoat_roughness;
+    out->ambient_occlusion = p.ambient_occlusion;
+    return 0;
+}
+
+int aether_brdf_evaluate(
+    const aether_pbr_material_params_t* material,
+    float n_dot_l, float n_dot_v, float n_dot_h, float v_dot_h,
+    aether_brdf_eval_result_t* out) {
+    if (!material || !out) return -1;
+    aether::render::PBRMaterialParams m;
+    m.metallic = material->metallic;
+    m.roughness = material->roughness;
+    m.f0 = material->f0;
+    m.ior = material->ior;
+    m.clearcoat = material->clearcoat;
+    m.clearcoat_roughness = material->clearcoat_roughness;
+    m.ambient_occlusion = material->ambient_occlusion;
+    aether::render::BRDFEvalInput geom;
+    geom.n_dot_l = n_dot_l;
+    geom.n_dot_v = n_dot_v;
+    geom.n_dot_h = n_dot_h;
+    geom.v_dot_h = v_dot_h;
+    auto r = aether::render::evaluate_cook_torrance(m, geom);
+    out->specular = r.specular;
+    out->diffuse = r.diffuse;
+    out->fresnel = r.fresnel;
+    out->ndf = r.ndf;
+    out->geometry = r.geometry;
+    out->total = r.total;
+    out->energy_conserving = r.energy_conserving ? 1 : 0;
+    return 0;
+}
+
+int aether_pbr_check_energy_conservation(
+    const aether_pbr_material_params_t* material,
+    int num_samples) {
+    if (!material) return -1;
+    aether::render::PBRMaterialParams m;
+    m.metallic = material->metallic;
+    m.roughness = material->roughness;
+    m.f0 = material->f0;
+    m.ior = material->ior;
+    m.clearcoat = material->clearcoat;
+    m.clearcoat_roughness = material->clearcoat_roughness;
+    m.ambient_occlusion = material->ambient_occlusion;
+    return aether::render::check_energy_conservation(m, num_samples > 0 ? num_samples : 32) ? 1 : 0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Mobile/System Runtime Decision Kernels
+// ═══════════════════════════════════════════════════════════════════════
+
+struct aether_mobile_frame_pacing_runtime {
+    explicit aether_mobile_frame_pacing_runtime(double target, int history)
+        : target_frame_time_s(target > 0.0 ? target : (1.0 / 60.0)),
+          history_size(history > 0 ? history : 30) {}
+
+    double target_frame_time_s;
+    int history_size;
+    std::vector<double> frame_history;
+};
+
+int aether_mobile_estimate_overlap(
+    const uint8_t* frame1_bytes,
+    int frame1_size,
+    const uint8_t* frame2_bytes,
+    int frame2_size,
+    int motion_direction,
+    double dt_seconds,
+    aether_mobile_overlap_result_t* out) {
+    if (!frame1_bytes || !frame2_bytes || !out || frame1_size < 0 || frame2_size < 0) {
+        return -1;
+    }
+
+    const int count = std::min(frame1_size, frame2_size);
+    double photometric_delta = 0.0;
+    if (count > 0) {
+        const int sample_count = std::min(1024, count);
+        const int stride = std::max(1, count / sample_count);
+        double diff_sum = 0.0;
+        int used = 0;
+        for (int idx = 0; idx < count && used < sample_count; idx += stride) {
+            diff_sum += std::abs(static_cast<double>(frame1_bytes[idx]) - static_cast<double>(frame2_bytes[idx]));
+            ++used;
+        }
+        if (used > 0) {
+            photometric_delta = diff_sum / (static_cast<double>(used) * 255.0);
+        }
+    }
+
+    const double baseline = (motion_direction == 1) ? 0.65 : 0.80;
+    const double photometric_penalty = std::min(0.45, photometric_delta * 0.55);
+    const double temporal_penalty = std::min(0.25, std::abs(dt_seconds) / 8.0);
+    const double overlap = std::clamp(baseline - photometric_penalty - temporal_penalty, 0.0, 1.0);
+
+    out->overlap_ratio = overlap;
+    out->photometric_delta = photometric_delta;
+    out->photometric_penalty = photometric_penalty;
+    out->temporal_penalty = temporal_penalty;
+    return 0;
+}
+
+int aether_mobile_predict_sfm_success(
+    int total_frames,
+    int acceptable_frames,
+    int overall_tier_rejected,
+    int total_problem_frames,
+    aether_mobile_sfm_prediction_t* out) {
+    if (!out || total_frames <= 0) {
+        return -1;
+    }
+
+    const double acceptable_ratio =
+        static_cast<double>(std::max(0, acceptable_frames)) / static_cast<double>(total_frames);
+    const double problem_ratio =
+        static_cast<double>(std::max(0, total_problem_frames)) / static_cast<double>(total_frames);
+
+    if (overall_tier_rejected != 0) {
+        out->will_succeed = 0;
+        out->confidence = 0.9;
+        out->reason_code = 1;
+        return 0;
+    }
+    if (acceptable_ratio < 0.75) {
+        out->will_succeed = 0;
+        out->confidence = 0.8;
+        out->reason_code = 2;
+        return 0;
+    }
+    if (problem_ratio > 0.3) {
+        out->will_succeed = 0;
+        out->confidence = 0.7;
+        out->reason_code = 3;
+        return 0;
+    }
+
+    out->will_succeed = 1;
+    out->confidence = 0.85;
+    out->reason_code = 0;
+    return 0;
+}
+
+int aether_mobile_frame_pacing_create(
+    double target_frame_time_s,
+    int history_size,
+    aether_mobile_frame_pacing_runtime_t** out_runtime) {
+    if (!out_runtime) {
+        return -1;
+    }
+    auto* runtime = new (std::nothrow)
+        aether_mobile_frame_pacing_runtime_t(target_frame_time_s, history_size);
+    if (!runtime) {
+        return -2;
+    }
+    *out_runtime = runtime;
+    return 0;
+}
+
+int aether_mobile_frame_pacing_destroy(aether_mobile_frame_pacing_runtime_t* runtime) {
+    delete runtime;
+    return 0;
+}
+
+int aether_mobile_frame_pacing_reset(aether_mobile_frame_pacing_runtime_t* runtime) {
+    if (!runtime) {
+        return -1;
+    }
+    runtime->frame_history.clear();
+    return 0;
+}
+
+int aether_mobile_frame_pacing_record(
+    aether_mobile_frame_pacing_runtime_t* runtime,
+    double frame_time_s,
+    aether_mobile_frame_pacing_result_t* out) {
+    if (!runtime || !out || !std::isfinite(frame_time_s) || frame_time_s < 0.0) {
+        return -1;
+    }
+
+    runtime->frame_history.push_back(frame_time_s);
+    if (static_cast<int>(runtime->frame_history.size()) > runtime->history_size) {
+        runtime->frame_history.erase(runtime->frame_history.begin());
+    }
+
+    const std::size_t n = runtime->frame_history.size();
+    if (n == 0) {
+        out->variance = 0.0;
+        out->p95 = 0.0;
+        out->advice = 0;
+        return 0;
+    }
+
+    double mean = 0.0;
+    for (double t : runtime->frame_history) {
+        mean += t;
+    }
+    mean /= static_cast<double>(n);
+
+    double variance = 0.0;
+    for (double t : runtime->frame_history) {
+        const double d = t - mean;
+        variance += d * d;
+    }
+    variance /= static_cast<double>(n);
+
+    std::vector<double> sorted = runtime->frame_history;
+    std::sort(sorted.begin(), sorted.end());
+    std::size_t idx = static_cast<std::size_t>(static_cast<double>(sorted.size()) * 0.95);
+    if (idx >= sorted.size()) {
+        idx = sorted.size() - 1;
+    }
+    const double p95 = sorted[idx];
+
+    int advice = 0;  // maintain
+    if (p95 > runtime->target_frame_time_s * 1.2) {
+        advice = 1;  // reduceQuality
+    } else if (variance > 0.002) {
+        advice = 2;  // enableSmoothing
+    }
+
+    out->variance = variance;
+    out->p95 = p95;
+    out->advice = advice;
+    return 0;
+}
+
+int aether_mobile_analyze_frame_intervals(
+    const double* intervals_s,
+    int interval_count,
+    aether_mobile_frame_interval_analysis_t* out) {
+    if (!out || interval_count < 0) {
+        return -1;
+    }
+    if (interval_count > 0 && !intervals_s) {
+        return -1;
+    }
+    if (interval_count == 0) {
+        out->fps = 0.0;
+        out->average_interval_s = 0.0;
+        out->coefficient_of_variation = 0.0;
+        out->drop_count = 0;
+        out->drop_rate = 0.0;
+        return 0;
+    }
+
+    double sum = 0.0;
+    for (int i = 0; i < interval_count; ++i) {
+        const double interval = intervals_s[i];
+        if (!std::isfinite(interval) || interval <= 0.0) {
+            return -2;
+        }
+        sum += interval;
+    }
+
+    const double mean = sum / static_cast<double>(interval_count);
+    double variance = 0.0;
+    int drop_count = 0;
+    for (int i = 0; i < interval_count; ++i) {
+        const double d = intervals_s[i] - mean;
+        variance += d * d;
+        if (intervals_s[i] > mean * 1.5) {
+            ++drop_count;
+        }
+    }
+    variance /= static_cast<double>(interval_count);
+    const double stddev = std::sqrt(variance);
+    const double cv = (mean > 1e-9) ? (stddev / mean) : 0.0;
+
+    out->average_interval_s = mean;
+    out->fps = (mean > 1e-9) ? (1.0 / mean) : 0.0;
+    out->coefficient_of_variation = cv;
+    out->drop_count = drop_count;
+    out->drop_rate = static_cast<double>(drop_count) / static_cast<double>(interval_count);
+    return 0;
+}
+
+int aether_mobile_classify_frame_pacing(
+    const aether_mobile_frame_interval_analysis_t* input,
+    int sample_count,
+    aether_mobile_frame_pacing_classification_t* out) {
+    if (!input || !out || sample_count < 0) {
+        return -1;
+    }
+
+    const double fps = input->fps;
+    const double cv = std::max(0.0, input->coefficient_of_variation);
+    const int drop_count = std::max(0, input->drop_count);
+
+    int frame_rate_code = 0;  // unknown
+    if (std::fabs(fps - 24.0) < 2.0) {
+        frame_rate_code = 1;
+    } else if (std::fabs(fps - 30.0) < 2.0) {
+        frame_rate_code = 2;
+    } else if (std::fabs(fps - 60.0) < 2.0) {
+        frame_rate_code = 3;
+    } else if (cv > 0.10) {
+        frame_rate_code = 4;  // variable
+    }
+
+    int rhythm_code = 0;  // regular
+    const int stuttering_threshold = std::max(1, sample_count / 4);
+    if (drop_count >= stuttering_threshold) {
+        rhythm_code = 3;
+    } else if (drop_count > 0) {
+        rhythm_code = 2;
+    } else if (cv > 0.15) {
+        rhythm_code = 1;
+    }
+
+    out->frame_rate_code = frame_rate_code;
+    out->rhythm_code = rhythm_code;
+    out->fps = fps;
+    out->coefficient_of_variation = cv;
+    out->drop_count = drop_count;
+    return 0;
+}
+
+int aether_mobile_map_thermal_state(int os_thermal_state, int* out_state) {
+    if (!out_state) {
+        return -1;
+    }
+    switch (os_thermal_state) {
+        case 0: *out_state = 0; break;  // normal
+        case 1: *out_state = 1; break;  // warning
+        case 2: *out_state = 2; break;  // critical
+        case 3: *out_state = 3; break;  // shutdown
+        default: *out_state = 0; break;
+    }
+    return 0;
+}
+
+int aether_mobile_recommended_scan_quality(int low_power_mode_enabled, int* out_quality) {
+    if (!out_quality) {
+        return -1;
+    }
+    *out_quality = low_power_mode_enabled ? 2 : 1;  // efficient : balanced
+    return 0;
+}
+
+int aether_mobile_should_allow_background_processing(
+    int low_power_mode_enabled,
+    int* out_allow) {
+    if (!out_allow) {
+        return -1;
+    }
+    *out_allow = low_power_mode_enabled ? 0 : 1;
     return 0;
 }
 

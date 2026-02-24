@@ -12,6 +12,10 @@ import Foundation
 import AVFoundation
 import UIKit
 
+private enum InterruptionHandlerConstants {
+    static let reconfigureDelaySeconds: TimeInterval = 0.3
+}
+
 // CI-HARDENED: This file must not use DispatchQueue.main.asyncAfter.
 // All timer operations must use injected TimerScheduler for determinism.
 
@@ -97,11 +101,12 @@ final class InterruptionHandler {
                 // Cancel any existing delay token
                 self.delayToken?.cancel()
                 // Schedule new delay
-                self.delayToken = self.timerScheduler.schedule(after: CaptureRecordingConstants.reconfigureDelaySeconds) {
-                    DispatchQueue.main.async {
-                        self.onInterruptionEnded()
-                        self.hasReceivedInterruption = false
-                    }
+                self.delayToken = self.timerScheduler.schedule(
+                    after: InterruptionHandlerConstants.reconfigureDelaySeconds
+                ) { [weak self] in
+                    guard let self = self else { return }
+                    self.onInterruptionEnded()
+                    self.hasReceivedInterruption = false
                 }
             }
         }
@@ -137,4 +142,3 @@ final class InterruptionHandler {
         stopObserving()
     }
 }
-

@@ -49,7 +49,7 @@ enum NativeCoverageEstimatorBridge {
 
     static func update(
         _ estimator: OpaquePointer,
-        cells: UnsafePointer<aether_coverage_cell_observation_t>,
+        cells: UnsafePointer<aether_coverage_cell_observation_t>?,
         cellCount: Int32,
         monotonicTimestampMs: Int64
     ) -> aether_coverage_result_t? {

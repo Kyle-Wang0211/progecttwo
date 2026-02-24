@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// SpeedSmoothing - smooth speed transitions
 /// Max change rate: 30% per 200ms
@@ -21,14 +22,15 @@ public struct SpeedSmoothing {
         targetSpeed: Double,
         timeDeltaMs: Int64
     ) -> Double {
-        let maxChangeRate = QualityPreCheckConstants.SPEED_MAX_CHANGE_RATE
-        let windowMs = QualityPreCheckConstants.SPEED_SMOOTHING_WINDOW_MS
-        let maxChange = maxChangeRate * (Double(timeDeltaMs) / Double(windowMs))
-        
-        let delta = targetSpeed - currentSpeed
-        let clampedDelta = max(-maxChange, min(maxChange, delta))
-        
-        return currentSpeed + clampedDelta
+        var outSpeed = currentSpeed
+        let rc = aether_quality_smooth_speed(
+            currentSpeed,
+            targetSpeed,
+            timeDeltaMs,
+            QualityPreCheckConstants.SPEED_MAX_CHANGE_RATE,
+            QualityPreCheckConstants.SPEED_SMOOTHING_WINDOW_MS,
+            &outSpeed
+        )
+        return rc == 0 ? outSpeed : currentSpeed
     }
 }
-

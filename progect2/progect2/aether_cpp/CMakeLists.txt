@@ -6,6 +6,8 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+find_package(ZLIB REQUIRED)
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     add_compile_options(
         -ffp-contract=off
@@ -26,6 +28,7 @@ add_library(aether3d_core STATIC
     # core
     src/core/canonicalize.cpp
     src/core/numeric_guard.cpp
+    src/core/nan_quarantine.cpp
     # crypto
     src/crypto/sha256.cpp
     # memory
@@ -40,6 +43,7 @@ add_library(aether3d_core STATIC
     src/evidence/coverage_estimator.cpp
     src/evidence/deterministic_json.cpp
     src/evidence/ds_mass_function.cpp
+    src/evidence/patch_evidence_kernel.cpp
     src/evidence/patch_display_kernel.cpp
     src/evidence/pr1_admission_kernel.cpp
     src/evidence/pr1_information_gain.cpp
@@ -47,8 +51,11 @@ add_library(aether3d_core STATIC
     src/evidence/pr_math.cpp
     src/evidence/evidence_state_machine.cpp
     src/evidence/smart_anti_boost_smoother.cpp
+    src/evidence/choquet_learner.cpp
+    src/evidence/mc_uncertainty.cpp
     # innovation
     src/innovation/core_types.cpp
+    src/innovation/packed_gaussian.cpp
     src/innovation/f1_progressive_compression.cpp
     src/innovation/f1_time_mirror.cpp
     src/innovation/f2_scaffold_collision.cpp
@@ -61,13 +68,23 @@ add_library(aether3d_core STATIC
     src/innovation/scaffold_patch_map.cpp
     # quality
     src/quality/deterministic_triangulator.cpp
+    src/quality/environment_light_estimator.cpp
     src/quality/geometry_ml_fusion.cpp
     src/quality/image_metrics.cpp
     src/quality/motion_analyzer.cpp
+    src/quality/motion_speed.cpp
+    src/quality/speed_state.cpp
     src/quality/photometric_checker.cpp
     src/quality/pure_vision_runtime.cpp
     src/quality/spatial_hash_adjacency.cpp
+    src/quality/thermal_quality_decision.cpp
     src/quality/zero_fabrication_policy.cpp
+    src/quality/multiview_photometric.cpp
+    src/quality/bayesian_quality_network.cpp
+    src/quality/multiscale_image_quality.cpp
+    src/quality/adaptive_quality_controller.cpp
+    src/quality/realtime_quality_metrics.cpp
+    src/quality/quality_rollback.cpp
     # render
     src/render/color_correction.cpp
     src/render/confidence_decay.cpp
@@ -80,14 +97,30 @@ add_library(aether3d_core STATIC
     src/render/ripple_propagation.cpp
     src/render/screen_detail_selector.cpp
     src/render/shader_source.cpp
+    src/render/spz_compressor.cpp
     src/render/tri_tet_splat_projector.cpp
     src/render/two_pass_culler.cpp
     src/render/wedge_geometry.cpp
+    src/render/oklab_color.cpp
+    src/render/pbr_material.cpp
+    src/render/gaussian_forward_pass.cpp
+    src/render/gaussian_backward_pass.cpp
     # scheduler
     src/scheduler/gpu_scheduler.cpp
     # trainer
     src/trainer/da3_depth_fuser.cpp
     src/trainer/noise_aware_trainer.cpp
+    src/trainer/gaussian_gradient_buffer.cpp
+    src/trainer/tsdf_gaussian_bridge.cpp
+    src/trainer/apollo_mini_optimizer.cpp
+    src/trainer/gaussian_loss.cpp
+    src/trainer/evidence_gated_trainer.cpp
+    src/trainer/budget_densifier.cpp
+    src/trainer/frame_selector.cpp
+    src/trainer/second_order_accel.cpp
+    src/trainer/training_checkpoint.cpp
+    src/trainer/scene_partition.cpp
+    src/trainer/training_pipeline.cpp
     # tsdf
     src/tsdf/depth_filter.cpp
     src/tsdf/icp_registration.cpp
@@ -108,7 +141,9 @@ add_library(aether3d_core STATIC
     src/tsdf/volume_controller.cpp
     # upload
     src/upload/erasure_coding.cpp
+    src/upload/fusion_scheduler.cpp
     src/upload/kalman_bandwidth.cpp
+    src/upload/network_speed_monitor.cpp
     # geo
     src/geo/altitude_engine.cpp
     src/geo/asc_cell.cpp
@@ -133,6 +168,10 @@ target_include_directories(aether3d_core
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+target_link_libraries(aether3d_core
+    PUBLIC
+        ZLIB::ZLIB
+)
 
 # ===========================================================================
 # C API library
@@ -140,6 +179,7 @@ target_include_directories(aether3d_core
 add_library(aether3d_c STATIC
     src/c_api.cpp
     src/geo_c_api.cpp
+    src/training_c_api.cpp
 )
 target_include_directories(aether3d_c
     PUBLIC
@@ -178,6 +218,7 @@ target_compile_definitions(fixture_replay_tests PRIVATE AETHER_REPO_ROOT="${CMAK
 
 # -- Core --
 aether_test(canonicalize_test tests/core/canonicalize_test.cpp)
+aether_test(nan_quarantine_test tests/core/nan_quarantine_test.cpp)
 
 # -- Crypto --
 aether_test(sha256_test tests/crypto/sha256_test.cpp)
@@ -202,6 +243,8 @@ aether_test(pr_math_test tests/evidence/pr_math_test.cpp)
 aether_test(pr1_admission_kernel_test tests/evidence/pr1_admission_kernel_test.cpp)
 aether_test(pr1_information_gain_test tests/evidence/pr1_information_gain_test.cpp)
 aether_test(evidence_state_machine_test tests/evidence/evidence_state_machine_test.cpp)
+aether_test(choquet_learner_test tests/evidence/choquet_learner_test.cpp)
+aether_test(mc_uncertainty_test tests/evidence/mc_uncertainty_test.cpp)
 aether_test(replay_engine_test tests/evidence/replay_engine_test.cpp)
 target_compile_definitions(replay_engine_test PRIVATE AETHER_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
 
@@ -219,11 +262,20 @@ aether_test(scaffold_patch_map_test tests/innovation/scaffold_patch_map_test.cpp
 
 # -- Quality --
 aether_test(deterministic_triangulator_test tests/quality/deterministic_triangulator_test.cpp)
+aether_test(environment_light_estimator_test tests/quality/environment_light_estimator_test.cpp)
 aether_test(image_metrics_test tests/quality/image_metrics_test.cpp)
 aether_test(motion_analyzer_test tests/quality/motion_analyzer_test.cpp)
+aether_test(motion_speed_test tests/quality/motion_speed_test.cpp)
+aether_test(speed_state_test tests/quality/speed_state_test.cpp)
 aether_test(photometric_checker_test tests/quality/photometric_checker_test.cpp)
 aether_test(pure_vision_runtime_test tests/quality/pure_vision_runtime_test.cpp)
 aether_test(spatial_hash_adjacency_test tests/quality/spatial_hash_adjacency_test.cpp)
+aether_test(multiview_photometric_test tests/quality/multiview_photometric_test.cpp)
+aether_test(bayesian_quality_network_test tests/quality/bayesian_quality_network_test.cpp)
+aether_test(multiscale_image_quality_test tests/quality/multiscale_image_quality_test.cpp)
+aether_test(adaptive_controller_test tests/quality/adaptive_controller_test.cpp)
+aether_test(realtime_quality_metrics_test tests/quality/realtime_quality_metrics_test.cpp)
+aether_test(quality_rollback_test tests/quality/quality_rollback_test.cpp)
 
 # -- Render --
 aether_test(dgrut_renderer_test tests/render/dgrut_renderer_test.cpp)
@@ -238,7 +290,9 @@ aether_test(test_screen_detail tests/render/test_screen_detail.cpp)
 aether_test(test_shader_source tests/render/test_shader_source.cpp)
 aether_test(tri_tet_splat_projector_test tests/render/tri_tet_splat_projector_test.cpp)
 aether_test(two_pass_culler_test tests/render/two_pass_culler_test.cpp)
+aether_test(pbr_material_test tests/render/pbr_material_test.cpp)
 aether_c_test(gpu_resource_test tests/render/gpu_resource_test.cpp)
+aether_test(gaussian_forward_pass_test tests/render/gaussian_forward_pass_test.cpp)
 
 # -- Scheduler --
 aether_test(gpu_scheduler_test tests/scheduler/gpu_scheduler_test.cpp)
@@ -246,6 +300,17 @@ aether_test(gpu_scheduler_test tests/scheduler/gpu_scheduler_test.cpp)
 # -- Trainer --
 aether_test(da3_depth_fuser_test tests/trainer/da3_depth_fuser_test.cpp)
 aether_test(noise_aware_trainer_test tests/trainer/noise_aware_trainer_test.cpp)
+aether_test(gradient_buffer_test tests/trainer/gradient_buffer_test.cpp)
+aether_test(tsdf_gaussian_bridge_test tests/trainer/tsdf_gaussian_bridge_test.cpp)
+aether_test(apollo_mini_optimizer_test tests/trainer/apollo_mini_optimizer_test.cpp)
+aether_test(gaussian_loss_test tests/trainer/gaussian_loss_test.cpp)
+aether_test(evidence_gated_trainer_test tests/trainer/evidence_gated_trainer_test.cpp)
+aether_test(budget_densifier_test tests/trainer/budget_densifier_test.cpp)
+aether_test(frame_selector_test tests/trainer/frame_selector_test.cpp)
+aether_test(second_order_accel_test tests/trainer/second_order_accel_test.cpp)
+aether_test(training_checkpoint_test tests/trainer/training_checkpoint_test.cpp)
+aether_test(scene_partition_test tests/trainer/scene_partition_test.cpp)
+aether_test(training_pipeline_test tests/trainer/training_pipeline_test.cpp)
 
 # -- TSDF --
 aether_test(marching_cubes_test tests/tsdf/marching_cubes_test.cpp)
@@ -267,7 +332,9 @@ aether_test(ab_config_tuner_test tests/tuning/ab_config_tuner_test.cpp)
 
 # -- Upload --
 aether_test(erasure_coding_test tests/upload/erasure_coding_test.cpp)
+aether_test(fusion_scheduler_test tests/upload/fusion_scheduler_test.cpp)
 aether_test(kalman_bandwidth_test tests/upload/kalman_bandwidth_test.cpp)
+aether_test(network_speed_monitor_test tests/upload/network_speed_monitor_test.cpp)
 
 # -- Geo --
 aether_test(altitude_engine_test tests/geo/altitude_engine_test.cpp)

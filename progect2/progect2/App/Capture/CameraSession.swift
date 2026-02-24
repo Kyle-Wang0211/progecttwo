@@ -14,13 +14,28 @@
 // ============================================================================
 
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import os.log
+import Aether3DCore
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 // CI-HARDENED: CMTime conversion helper (AVFoundation stays in App/Capture, not Core)
 // Single source of truth: uses CaptureRecordingConstants.cmTimePreferredTimescale
 private func cmTime(seconds: TimeInterval) -> CMTime {
     CMTime(seconds: seconds, preferredTimescale: CaptureRecordingConstants.cmTimePreferredTimescale)
+}
+
+private enum CameraFormatConstants {
+    static let candidateFps: [Double] = [60.0, 30.0, 24.0]
+    static let fpsMatchTolerance: Double = 0.5
+    static let maxFormatAttempts: Int = 8
+    static let sessionRunningCheckMaxSeconds: TimeInterval = 2.0
+    static let scoreWeightFps: Int64 = 10
+    static let scoreWeightResolution: Int64 = 1
+    static let scoreWeightHDR: Int64 = 500
+    static let scoreWeightHEVC: Int64 = 200
 }
 
 protocol CameraSessionProtocol: AnyObject {
@@ -121,8 +136,9 @@ final class CameraSession: CameraSessionProtocol {
         }
         
         // Determine tier
-        let tier = determineTier(width: selectedFormat.format.formatDescription.dimensions.width,
-                                  height: selectedFormat.format.formatDescription.dimensions.height)
+        let selectedDimensions = selectedFormat.format.formatDescription.dimensions
+        let tier = determineTier(width: Int(selectedDimensions.width),
+                                  height: Int(selectedDimensions.height))
         
         // Create selected config
         selectedConfig = SelectedCaptureConfig(
@@ -222,7 +238,7 @@ final class CameraSession: CameraSessionProtocol {
         }
         
         // Select highest tier
-        let sortedTiers: [ResolutionTier] = [.t8K, .t4K, .t1080p, .t720p, .lower, .t2K, .t480p]
+        let sortedTiers: [ResolutionTier] = [.t8K, .t4K, .t2K, .t1080p, .t720p, .t480p, .lower]
         guard let selectedTier = sortedTiers.first(where: { tierGroups[$0] != nil }) else {
             throw RecordingError.configurationFailed(.formatSelectionFailed)
         }
@@ -236,8 +252,8 @@ final class CameraSession: CameraSessionProtocol {
         
         for format in formatsInTier {
             for fpsRange in format.videoSupportedFrameRateRanges {
-                for candidateFps in CaptureRecordingConstants.candidateFps {
-                    if abs(candidateFps - fpsRange.maxFrameRate) < CaptureRecordingConstants.fpsMatchTolerance ||
+                for candidateFps in CameraFormatConstants.candidateFps {
+                    if abs(candidateFps - fpsRange.maxFrameRate) < CameraFormatConstants.fpsMatchTolerance ||
                        (candidateFps <= fpsRange.maxFrameRate && candidateFps >= fpsRange.minFrameRate) {
                         let score = calculateFormatScore(format: format, fps: candidateFps)
                         
@@ -258,7 +274,7 @@ final class CameraSession: CameraSessionProtocol {
         candidates.sort { $0.score > $1.score }
         
         // Try candidates with validation
-        for attempt in 0..<CaptureRecordingConstants.maxFormatAttempts {
+        for attempt in 0..<CameraFormatConstants.maxFormatAttempts {
             guard attempt < candidates.count else { break }
             
             let candidate = candidates[attempt]
@@ -289,7 +305,7 @@ final class CameraSession: CameraSessionProtocol {
                 
                 // Wait for session to start (CI-HARDENED: use clock provider)
                 let startTime = clock.now()
-                while !captureSession.isRunning && clock.now().timeIntervalSince(startTime) < CaptureRecordingConstants.sessionRunningCheckMaxSeconds {
+                while !captureSession.isRunning && clock.now().timeIntervalSince(startTime) < CameraFormatConstants.sessionRunningCheckMaxSeconds {
                     Thread.sleep(forTimeInterval: 0.1)
                 }
             }
@@ -311,64 +327,48 @@ final class CameraSession: CameraSessionProtocol {
     }
     
     private func calculateFormatScore(format: AVCaptureDevice.Format, fps: Double) -> Int64 {
-        var score: Int64 = 0
-        
-        // FPS contribution
-        score += Int64(fps) * CaptureRecordingConstants.scoreWeightFps
-        
-        // Resolution contribution
         let dimensions = format.formatDescription.dimensions
-        let maxDimension = max(dimensions.width, dimensions.height)
-        score += Int64(maxDimension) / 100 * CaptureRecordingConstants.scoreWeightResolution
-        
-        // HDR contribution (safe check)
-        if format.isVideoHDRSupported {
-            score += CaptureRecordingConstants.scoreWeightHDR
-        }
-        
-        // HEVC contribution
-        if format.isVideoCodecSupported(.hevc) {
-            score += CaptureRecordingConstants.scoreWeightHEVC
-        }
-        
-        // ProRes contribution (iOS 15+ only, safe check)
-        if #available(iOS 15.0, *) {
-            // Check if format supports ProRes codec types
-            if format.supportedVideoCodecTypes.contains(.hevc) {
-                // Additional ProRes check would go here if AVFoundation API provides it
-                // For now, we rely on device capability detection via constants
-            }
-        }
-        
-        // Apple Log contribution (iOS 17.2+ only)
-        if #available(iOS 17.2, *) {
-            // Apple Log support detection would go here
-            // This is a placeholder for future implementation
-        }
-        
-        // Dolby Vision and HDR10+ detection would require additional AVFoundation APIs
-        // These are format-specific and may not be directly queryable
-        
-        return score
+        #if canImport(CAetherNativeBridge)
+        var descriptor = aether_camera_format_descriptor_t(
+            width: Int32(dimensions.width),
+            height: Int32(dimensions.height),
+            fps: fps,
+            hdr_supported: format.isVideoHDRSupported ? 1 : 0,
+            hevc_supported: format.isVideoCodecSupported(.hevc) ? 1 : 0,
+            weight_fps: CameraFormatConstants.scoreWeightFps,
+            weight_resolution: CameraFormatConstants.scoreWeightResolution,
+            bonus_hdr: CameraFormatConstants.scoreWeightHDR,
+            bonus_hevc: CameraFormatConstants.scoreWeightHEVC
+        )
+        var score: Int64 = 0
+        let rc = aether_camera_format_score(&descriptor, &score)
+        return rc == 0 ? score : 0
+        #else
+        return 0
+        #endif
     }
     
     private func determineTier(width: Int, height: Int) -> ResolutionTier {
-        let maxDim = max(width, height)
-        if maxDim >= 7680 {
-            return .t8K
-        } else if maxDim >= 3840 {
-            return .t4K
-        } else if maxDim >= 2560 {
-            return .t2K      // NEW: Support t2K
-        } else if maxDim >= 1920 {
-            return .t1080p
-        } else if maxDim >= 1280 {
-            return .t720p
-        } else if maxDim >= 640 {
-            return .t480p   // NEW: Support t480p
-        } else {
-            return .lower
+        #if canImport(CAetherNativeBridge)
+        var nativeTier: Int32 = Int32(AETHER_RESOLUTION_TIER_LOWER)
+        let rc = aether_camera_format_tier_from_dimensions(
+            Int32(width),
+            Int32(height),
+            &nativeTier
+        )
+        if rc == 0 {
+            switch nativeTier {
+            case Int32(AETHER_RESOLUTION_TIER_8K): return .t8K
+            case Int32(AETHER_RESOLUTION_TIER_4K): return .t4K
+            case Int32(AETHER_RESOLUTION_TIER_2K): return .t2K
+            case Int32(AETHER_RESOLUTION_TIER_1080P): return .t1080p
+            case Int32(AETHER_RESOLUTION_TIER_720P): return .t720p
+            case Int32(AETHER_RESOLUTION_TIER_480P): return .t480p
+            default: return .lower
+            }
         }
+        #endif
+        return .lower
     }
     
     func startRunning() {
@@ -469,9 +469,7 @@ extension String {
 extension AVCaptureDevice.Format {
     var isVideoCodecSupported: (AVVideoCodecType) -> Bool {
         return { codecType in
-            self.formatDescription.mediaSubType == codecType.rawValue.fourCharCode ||
-            self.supportedVideoCodecTypes.contains(codecType)
+            CMFormatDescriptionGetMediaSubType(self.formatDescription) == codecType.rawValue.fourCharCode
         }
     }
 }
-

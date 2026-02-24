@@ -102,24 +102,39 @@ public actor IMUDataCollector {
         }
         
         // Start accelerometer updates
-        motionManager.startAccelerometerUpdates(to: .main) { [weak self] (data, error) in
-            Task { @MainActor in
-                await self?.handleAccelerometerData(data, error: error)
+        motionManager.startAccelerometerUpdates(to: .main) { [weak self] data, _ in
+            guard let sample = data else { return }
+            let x = sample.acceleration.x
+            let y = sample.acceleration.y
+            let z = sample.acceleration.z
+            let timestamp = sample.timestamp
+            Task { [weak self] in
+                await self?.ingestAccelerometerSample(x: x, y: y, z: z, timestamp: timestamp)
             }
         }
         
         // Start gyro updates
-        motionManager.startGyroUpdates(to: .main) { [weak self] (data, error) in
-            Task { @MainActor in
-                await self?.handleGyroData(data, error: error)
+        motionManager.startGyroUpdates(to: .main) { [weak self] data, _ in
+            guard let sample = data else { return }
+            let x = sample.rotationRate.x
+            let y = sample.rotationRate.y
+            let z = sample.rotationRate.z
+            let timestamp = sample.timestamp
+            Task { [weak self] in
+                await self?.ingestGyroSample(x: x, y: y, z: z, timestamp: timestamp)
             }
         }
         
         // Start magnetometer updates (if available)
         if motionManager.isMagnetometerAvailable {
-            motionManager.startMagnetometerUpdates(to: .main) { [weak self] (data, error) in
-                Task { @MainActor in
-                    await self?.handleMagnetometerData(data, error: error)
+            motionManager.startMagnetometerUpdates(to: .main) { [weak self] data, _ in
+                guard let sample = data else { return }
+                let x = sample.magneticField.x
+                let y = sample.magneticField.y
+                let z = sample.magneticField.z
+                let timestamp = sample.timestamp
+                Task { [weak self] in
+                    await self?.ingestMagnetometerSample(x: x, y: y, z: z, timestamp: timestamp)
                 }
             }
         }
@@ -165,25 +180,22 @@ public actor IMUDataCollector {
     private var lastMagneticField: SIMD3<Double>?
     
     #if canImport(CoreMotion)
-    private func handleAccelerometerData(_ data: CMAccelerometerData?, error: Error?) {
-        guard let data = data else { return }
-        let acceleration = SIMD3<Double>(data.acceleration.x, data.acceleration.y, data.acceleration.z)
+    private func ingestAccelerometerSample(x: Double, y: Double, z: Double, timestamp: TimeInterval) {
+        let acceleration = SIMD3<Double>(x, y, z)
         lastAcceleration = acceleration
-        createDataPointIfReady(timestamp: data.timestamp)
+        createDataPointIfReady(timestamp: timestamp)
     }
     
-    private func handleGyroData(_ data: CMGyroData?, error: Error?) {
-        guard let data = data else { return }
-        let rotationRate = SIMD3<Double>(data.rotationRate.x, data.rotationRate.y, data.rotationRate.z)
+    private func ingestGyroSample(x: Double, y: Double, z: Double, timestamp: TimeInterval) {
+        let rotationRate = SIMD3<Double>(x, y, z)
         lastRotationRate = rotationRate
-        createDataPointIfReady(timestamp: data.timestamp)
+        createDataPointIfReady(timestamp: timestamp)
     }
     
-    private func handleMagnetometerData(_ data: CMMagnetometerData?, error: Error?) {
-        guard let data = data else { return }
-        let magneticField = SIMD3<Double>(data.magneticField.x, data.magneticField.y, data.magneticField.z)
+    private func ingestMagnetometerSample(x: Double, y: Double, z: Double, timestamp: TimeInterval) {
+        let magneticField = SIMD3<Double>(x, y, z)
         lastMagneticField = magneticField
-        createDataPointIfReady(timestamp: data.timestamp)
+        createDataPointIfReady(timestamp: timestamp)
     }
     #endif
     

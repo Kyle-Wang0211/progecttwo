@@ -30,9 +30,9 @@ enum NativeICPRefiner {
             return nil
         }
 
-        var source = sourcePoints.map { aether_icp_point_t(x: $0.x, y: $0.y, z: $0.z) }
-        var target = targetPoints.map { aether_icp_point_t(x: $0.x, y: $0.y, z: $0.z) }
-        var normals = targetNormals.map { aether_icp_point_t(x: $0.x, y: $0.y, z: $0.z) }
+        let source = sourcePoints.map { aether_icp_point_t(x: $0.x, y: $0.y, z: $0.z) }
+        let target = targetPoints.map { aether_icp_point_t(x: $0.x, y: $0.y, z: $0.z) }
+        let normals = targetNormals.map { aether_icp_point_t(x: $0.x, y: $0.y, z: $0.z) }
 
         var poseArray = [Float](repeating: 0, count: 16)
         for c in 0..<4 {

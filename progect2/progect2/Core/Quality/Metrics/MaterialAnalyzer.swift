@@ -11,6 +11,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Material analysis result
 public struct MaterialResult: Codable, Equatable {
@@ -84,6 +87,11 @@ public class MaterialAnalyzer {
     /// - Parameter qualityLevel: Current FPS tier
     /// - Returns: MaterialResult
     public func analyze(qualityLevel: QualityLevel) -> MaterialResult {
+        #if canImport(CAetherNativeBridge)
+        if let native = analyzeNative(qualityLevel: qualityLevel) {
+            return native
+        }
+        #endif
         switch qualityLevel {
         case .full:
             return analyzeFull()
@@ -172,4 +180,30 @@ public class MaterialAnalyzer {
             largestSpecularRegion: 0
         )
     }
+
+    #if canImport(CAetherNativeBridge)
+    private func analyzeNative(qualityLevel: QualityLevel) -> MaterialResult? {
+        let nativeLevel: Int32
+        switch qualityLevel {
+        case .full:
+            nativeLevel = 0
+        case .degraded:
+            nativeLevel = 1
+        case .emergency:
+            nativeLevel = 2
+        }
+        var native = aether_material_analysis_t()
+        guard aether_material_analyze_quality(nativeLevel, &native) == 0 else {
+            return nil
+        }
+        return MaterialResult(
+            specularPercent: native.specular_percent,
+            transparentPercent: native.transparent_percent,
+            texturelessPercent: native.textureless_percent,
+            isNonLambertian: native.is_non_lambertian != 0,
+            confidence: native.confidence,
+            largestSpecularRegion: Int(native.largest_specular_region)
+        )
+    }
+    #endif
 }

@@ -12,6 +12,7 @@ import Foundation
 #if canImport(ARKit)
 import ARKit
 import simd
+import Aether3DCore
 #if canImport(CAetherNativeBridge)
 import CAetherNativeBridge
 #endif
@@ -27,12 +28,10 @@ import CAetherNativeBridge
 /// Safety:
 ///   - Bounds checking on ALL buffer accesses
 ///   - Degenerate triangle rejection (area < 1e-8)
-///   - Performance cap: maxTrianglesPerExtraction = 10000
+///   - Triangle budget controlled by C++ ThermalQualityDecision per-tier limits
 ///   - Stable patchId via core spatial quantization (prevents flicker)
 public struct MeshExtractor {
 
-    /// Maximum triangles to extract per frame (performance guard)
-    private static let maxTrianglesPerExtraction: Int = 10000
     /// Patch identity quantization cell size (meters).
     private static let patchIdentityCellSizeM: Double = 0.02
 
@@ -82,9 +81,6 @@ public struct MeshExtractor {
             let combinedTransform = worldTransform * anchorTransform
 
             for faceIndex in 0..<faceCount {
-                // Performance guard
-                if triangles.count >= Self.maxTrianglesPerExtraction { break }
-
                 // Read face indices
                 let faceOffset = faceIndex * indicesPerFace * faceStride
                 let i0 = Int(faceData.load(fromByteOffset: faceOffset, as: UInt32.self))
@@ -138,8 +134,8 @@ public struct MeshExtractor {
 
     /// Generate stable patch identity from centroid position.
     ///
-    /// Preferred path: C++ core quantizer (`aether_spatial_quantize_world_position`).
-    /// Fallback path: deterministic 2cm rounding if native bridge is unavailable.
+    /// Core-only path: C++ quantizer (`aether_spatial_quantize_world_position`).
+    /// Fail-closed when native bridge is unavailable or returns error.
     private static func stablePatchIdentity(
         centroid: SIMD3<Float>
     ) -> (patchId: String, blockIndex: (Int32, Int32, Int32)) {
@@ -159,14 +155,10 @@ public struct MeshExtractor {
             let patchId = "\(q.x)_\(q.y)_\(q.z)"
             return (patchId, (q.x, q.y, q.z))
         }
+        return ("0_0_0", (0, 0, 0))
+        #else
+        return ("0_0_0", (0, 0, 0))
         #endif
-
-        let scale = 1.0 / patchIdentityCellSizeM
-        let qx = Int32((Double(centroid.x) * scale).rounded())
-        let qy = Int32((Double(centroid.y) * scale).rounded())
-        let qz = Int32((Double(centroid.z) * scale).rounded())
-        let patchId = "\(qx)_\(qy)_\(qz)"
-        return (patchId, (qx, qy, qz))
     }
 }
 

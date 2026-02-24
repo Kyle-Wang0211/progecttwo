@@ -72,7 +72,9 @@ enum NativeReplayEngineBridge {
                 var hex = [CChar](repeating: 0, count: 65)
                 let rc = aether_evidence_state_canonical_sha256_hex(&input, &hex)
                 guard rc == 0 else { return nil }
-                return String(cString: hex)
+                return hex.withUnsafeBufferPointer { buf in
+                    buf.baseAddress.map { String(cString: $0) }
+                }
             }
         }
         #else

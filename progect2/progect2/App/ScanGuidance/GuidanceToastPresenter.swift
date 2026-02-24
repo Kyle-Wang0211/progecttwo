@@ -18,7 +18,7 @@ import UIKit
 #endif
 
 /// Toast message presenter for scan guidance
-public final class GuidanceToastPresenter {
+public final class GuidanceToastPresenter: ObservableObject {
     
     /// Current toast message
     @Published private(set) var currentMessage: String?
@@ -35,6 +35,7 @@ public final class GuidanceToastPresenter {
     /// Show toast message
     ///
     /// - Parameter message: Message to display
+    @MainActor
     public func show(message: String) {
         currentMessage = message
         isVisible = true
@@ -50,6 +51,7 @@ public final class GuidanceToastPresenter {
     }
     
     /// Check if VoiceOver is active
+    @MainActor
     private func isVoiceOverActive() -> Bool {
         #if os(iOS)
         return UIAccessibility.isVoiceOverRunning

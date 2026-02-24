@@ -12,6 +12,7 @@
 
 import Foundation
 import CAetherNativeBridge
+import os.log
 
 /// Maps display [0, 1] → continuous grayscale RGB
 ///
@@ -41,9 +42,27 @@ public struct GrayscaleMapper {
             &params
         )
         guard rc == 0, params.fill_gray.isFinite else {
+            #if DEBUG
+            os_log(.error, "GrayscaleMapper: C++ bridge returned rc=%d, fill_gray=%f", rc, params.fill_gray)
+            #endif
             return (clampedDisplay, clampedDisplay, clampedDisplay)
         }
         let gray = min(max(params.fill_gray, 0.0), 1.0)
         return (gray, gray, gray)
+    }
+
+    // MARK: - Oklab Perceptual Color Mapping (C++ backend)
+
+    /// Convert display value to perceptually uniform Oklab color → sRGB.
+    /// Algorithm (Weber-Fechner + Oklab→LMS→sRGB) now lives in
+    /// aether_cpp/src/render/oklab_color.cpp.
+    public func oklabColor(for display: Double) -> (r: Float, g: Float, b: Float) {
+        var color = aether_srgb_color_t()
+        let rc = aether_oklab_color_from_display(Float(min(max(display, 0.0), 1.0)), &color)
+        guard rc == 0 else {
+            let t = Float(min(max(display, 0.0), 1.0))
+            return (t, t, t)
+        }
+        return (color.r, color.g, color.b)
     }
 }

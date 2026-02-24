@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Frame pacing classifier
 ///
@@ -79,86 +82,89 @@ public actor FramePacingClassifier {
     
     /// Classify frame rate
     private func classifyFrameRate() {
-        guard frameTimestamps.count >= 2 else {
-            classifiedFrameRate = .unknown
-            return
-        }
-        
-        // Compute average frame interval
-        var intervals: [TimeInterval] = []
-        for i in 1..<frameTimestamps.count {
-            let interval = frameTimestamps[i].timeIntervalSince(frameTimestamps[i-1])
-            intervals.append(interval)
-        }
-        
-        let avgInterval = intervals.reduce(0.0, +) / Double(intervals.count)
-        let fps = 1.0 / avgInterval
-        
-        // Classify based on FPS
-        if abs(fps - 24.0) < 2.0 {
-            classifiedFrameRate = .fps24
-        } else if abs(fps - 30.0) < 2.0 {
-            classifiedFrameRate = .fps30
-        } else if abs(fps - 60.0) < 2.0 {
-            classifiedFrameRate = .fps60
-        } else {
-            // Check variance to determine if variable
-            let variance = intervals.map { pow($0 - avgInterval, 2) }.reduce(0.0, +) / Double(intervals.count)
-            let stdDev = sqrt(variance)
-            
-            if stdDev / avgInterval > 0.1 {  // >10% variance
-                classifiedFrameRate = .variable
-            } else {
-                classifiedFrameRate = .unknown
-            }
+        let native = nativeClassify()
+        switch native?.frameRateCode {
+        case 1: classifiedFrameRate = .fps24
+        case 2: classifiedFrameRate = .fps30
+        case 3: classifiedFrameRate = .fps60
+        case 4: classifiedFrameRate = .variable
+        default: classifiedFrameRate = .unknown
         }
     }
     
     /// Classify pacing rhythm
     private func classifyPacingRhythm() {
-        guard frameTimestamps.count >= 3 else {
-            classifiedRhythm = .regular
-            return
+        let native = nativeClassify()
+        switch native?.rhythmCode {
+        case 1: classifiedRhythm = .irregular
+        case 2: classifiedRhythm = .dropped
+        case 3: classifiedRhythm = .stuttering
+        default: classifiedRhythm = .regular
         }
-        
-        // Compute frame intervals
-        var intervals: [TimeInterval] = []
+    }
+
+    private func nativeClassify() -> (frameRateCode: Int, rhythmCode: Int)? {
+        guard frameTimestamps.count >= 2 else {
+            return nil
+        }
+        var intervals = [Double]()
+        intervals.reserveCapacity(frameTimestamps.count - 1)
         for i in 1..<frameTimestamps.count {
-            let interval = frameTimestamps[i].timeIntervalSince(frameTimestamps[i-1])
-            intervals.append(interval)
+            intervals.append(max(1e-6, frameTimestamps[i].timeIntervalSince(frameTimestamps[i - 1])))
         }
-        
+        #if canImport(CAetherNativeBridge)
+        var analysis = aether_mobile_frame_interval_analysis_t()
+        let analysisRC = intervals.withUnsafeBufferPointer { ptr in
+            aether_mobile_analyze_frame_intervals(
+                ptr.baseAddress,
+                Int32(intervals.count),
+                &analysis
+            )
+        }
+        guard analysisRC == 0 else {
+            return nil
+        }
+        var classification = aether_mobile_frame_pacing_classification_t()
+        let classifyRC = aether_mobile_classify_frame_pacing(
+            &analysis,
+            Int32(intervals.count),
+            &classification
+        )
+        guard classifyRC == 0 else { return nil }
+        return (Int(classification.frame_rate_code), Int(classification.rhythm_code))
+        #else
         let avgInterval = intervals.reduce(0.0, +) / Double(intervals.count)
-        let expectedInterval = avgInterval
-        
-        // Count frame drops (intervals significantly longer than expected)
-        var dropCount = 0
-        var variance = 0.0
-        
-        for interval in intervals {
-            // Check for drops (interval > 1.5x expected)
-            if interval > expectedInterval * 1.5 {
-                dropCount += 1
-            }
-            
-            // Accumulate variance
-            variance += pow(interval - avgInterval, 2)
-        }
-        
-        variance /= Double(intervals.count)
+        let fps = avgInterval > 0 ? (1.0 / avgInterval) : 0.0
+        let variance = intervals.map { pow($0 - avgInterval, 2) }.reduce(0.0, +) / Double(intervals.count)
         let stdDev = sqrt(variance)
-        let coefficientOfVariation = stdDev / avgInterval
-        
-        // Classify rhythm
-        if dropCount >= intervals.count / 4 {  // >25% drops
-            classifiedRhythm = .stuttering
-        } else if dropCount > 0 {
-            classifiedRhythm = .dropped
-        } else if coefficientOfVariation > 0.15 {  // >15% CV
-            classifiedRhythm = .irregular
+        let cv = avgInterval > 0 ? (stdDev / avgInterval) : 0.0
+        let dropCount = intervals.filter { $0 > avgInterval * 1.5 }.count
+
+        let frameRateCode: Int
+        if abs(fps - 24.0) < 2.0 {
+            frameRateCode = 1
+        } else if abs(fps - 30.0) < 2.0 {
+            frameRateCode = 2
+        } else if abs(fps - 60.0) < 2.0 {
+            frameRateCode = 3
+        } else if cv > 0.10 {
+            frameRateCode = 4
         } else {
-            classifiedRhythm = .regular
+            frameRateCode = 0
         }
+
+        let rhythmCode: Int
+        if dropCount >= intervals.count / 4 {
+            rhythmCode = 3
+        } else if dropCount > 0 {
+            rhythmCode = 2
+        } else if cv > 0.15 {
+            rhythmCode = 1
+        } else {
+            rhythmCode = 0
+        }
+        return (frameRateCode, rhythmCode)
+        #endif
     }
     
     // MARK: - Queries

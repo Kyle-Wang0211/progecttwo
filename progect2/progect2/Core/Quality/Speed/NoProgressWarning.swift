@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// NoProgressWarningStateMachine - small state machine for no progress warning
 /// States: armed → fired → cooldown
@@ -29,27 +30,27 @@ public class NoProgressWarning {
     /// Update state based on no progress duration
     /// 2s no white progress → speed must drop
     public func update(noProgressDurationMs: Int64) {
-        switch state {
-        case .armed:
-            if noProgressDurationMs >= QualityPreCheckConstants.NO_PROGRESS_WARNING_MS {
-                state = .fired
-                // Trigger speed drop
-            }
-            
-        case .fired:
-            // Enter cooldown after firing
-            state = .cooldown
-            armedTime = MonotonicClock.nowMs()
-            
-        case .cooldown:
-            // Check if cooldown expired
-            if let armed = armedTime {
-                let cooldownMs = Int64(1000)  // 1 second cooldown
-                if MonotonicClock.nowMs() - armed >= cooldownMs {
-                    state = .armed
-                    armedTime = nil
-                }
-            }
+        var nativeState = aether_no_progress_warning_state_t(
+            state: state.nativeCode,
+            armed_time_ms: armedTime ?? -1
+        )
+        var warningActive: Int32 = 0
+        let rc = aether_quality_no_progress_warning_step(
+            &nativeState,
+            noProgressDurationMs,
+            MonotonicClock.nowMs(),
+            QualityPreCheckConstants.NO_PROGRESS_WARNING_MS,
+            1000,
+            &warningActive
+        )
+        guard rc == 0 else {
+            return
+        }
+
+        state = NoProgressWarningState(nativeCode: nativeState.state) ?? .armed
+        armedTime = nativeState.armed_time_ms >= 0 ? nativeState.armed_time_ms : nil
+        if warningActive != 0 {
+            state = .fired
         }
     }
     
@@ -58,4 +59,3 @@ public class NoProgressWarning {
         return state == .fired
     }
 }
-

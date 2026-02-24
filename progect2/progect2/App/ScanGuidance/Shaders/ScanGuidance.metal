@@ -46,24 +46,31 @@ struct PerTriangleData {
 
 // ─── PBR Helper Functions ───
 
-// GGX/Trowbridge-Reitz Normal Distribution Function
-inline half NDF_GGX(half NdotH, half roughness) {
+// fp16-safe GGX NDF (Filament approach: cross product avoids catastrophic cancellation)
+// Reference: Google Filament v1.69 (2025), Romain Guy fp16 GGX gist
+inline half NDF_GGX_Safe(half3 N, half3 H, half roughness) {
     half a = roughness * roughness;
     half a2 = a * a;
-    half NdotH2 = NdotH * NdotH;
-    half denom = NdotH2 * (a2 - 1.0h) + 1.0h;
-    denom = M_PI_H * denom * denom;
-    return a2 / max(denom, 1e-7h);
+    // Use cross product: |N×H|² = 1 - (N·H)² without cancellation error in fp16
+    float3 NxH = cross(float3(N), float3(H));
+    half OneMinusNdotHSqr = half(dot(NxH, NxH));
+    half d = OneMinusNdotHSqr * (a2 - 1.0h) + 1.00001h;  // +epsilon prevents d=0
+    return a2 / (M_PI_H * d * d);
 }
 
-// Schlick-GGX Geometry sub-function
+// Kelemen-Szirmay-Kalos Visibility (saves ~4 ALU vs full Smith-GGX)
+// Reference: Filament PBR, optimized for mobile
+inline half VisibilityKelemen(half LdotH, half roughness) {
+    return 1.0h / (4.0h * max(0.1h, LdotH * LdotH) * (roughness + 0.5h));
+}
+
+// Legacy Smith-GGX kept for reference/fallback
 inline half GeometrySchlickGGX(half NdotV, half roughness) {
     half r = roughness + 1.0h;
     half k = (r * r) / 8.0h;
     return NdotV / (NdotV * (1.0h - k) + k);
 }
 
-// Smith's Geometry Function
 inline half GeometrySmith(half NdotV, half NdotL, half roughness) {
     return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
 }
@@ -187,85 +194,117 @@ fragment half4 wedgeFillFragment(
 ) {
     // ── Material Properties ──
     half metallic = half(in.metallic);
-    half roughness = half(in.roughness);
-    
-    // Base color: grayscale mapped by coverage
+    // fp16-safe roughness floor (Filament: prevents fp16 underflow at 6.1e-5)
+    half roughness = max(half(in.roughness), 0.089h);
+
+    // Base color: grayscale/Oklab mapped by coverage
     half3 baseColor = half3(in.grayscaleColor);
-    
-    // For metallic surfaces, F0 = base color
-    // For dielectric, F0 = 0.04
-    half3 F0 = mix(half3(0.04h), baseColor, metallic);
-    
+    // Ensure base color is never pure black (prevents zero ambient floor)
+    baseColor = max(baseColor, half3(0.02h));
+
     // ── Vectors ──
     float3 N = normalize(in.worldNormal);
     float3 V = normalize(uniforms.cameraPosition - in.worldPosition);
     float3 L = normalize(-uniforms.primaryLightDirection);
     float3 H = normalize(V + L);
-    
+
     half NdotL = half(max(dot(N, L), 0.0));
-    half NdotV = half(max(dot(N, V), 0.001));
     half NdotH = half(max(dot(N, H), 0.0));
     half HdotV = half(max(dot(H, V), 0.0));
-    
-    // ── Cook-Torrance Specular BRDF ──
-    half D = NDF_GGX(NdotH, roughness);
-    half G = GeometrySmith(NdotV, NdotL, roughness);
-    half3 F = FresnelSchlick(HdotV, F0);
-    
-    half3 numerator = D * G * F;
-    half denominator = 4.0h * NdotV * NdotL + 0.0001h;
-    half3 specular = numerator / denominator;
-    
-    // ── Energy Conservation ──
-    half3 kS = F;
-    half3 kD = (1.0h - kS) * (1.0h - metallic);
-    
-    // ── Diffuse: Lambertian ──
-    half3 diffuse = kD * baseColor / M_PI_H;
-    
-    // ── Direct Lighting ──
-    half lightIntensity = half(uniforms.primaryLightIntensity);
-    half normalizedIntensity = clamp(lightIntensity / 1000.0h, 0.1h, 3.0h);
-    half3 directLight = (diffuse + specular) * NdotL * normalizedIntensity;
-    
-    // ── Indirect Lighting (SH-based IBL) ──
-    half3 irradiance = evaluateSH(N, uniforms.shCoeffs);
-    irradiance = irradiance / max(half3(uniforms.shCoeffs[0]) * 0.282095h, 0.01h) * 0.3h;
-    half3 indirectDiffuse = kD * baseColor * irradiance;
-    
-    // Indirect specular: approximate with SH evaluated at reflection direction
-    float3 R = reflect(-V, N);
-    half3 reflectedIrradiance = evaluateSH(R, uniforms.shCoeffs);
-    reflectedIrradiance = reflectedIrradiance / max(half3(uniforms.shCoeffs[0]) * 0.282095h, 0.01h) * 0.5h;
-    half3 indirectSpecular = F0 * reflectedIrradiance * (1.0h - roughness * 0.7h);
-    
-    half3 indirect = indirectDiffuse + indirectSpecular;
-    
-    // ── Combine ──
-    half3 color = directLight + indirect;
-    
-    // ── Ambient minimum ──
+    half LdotH = half(max(dot(L, H), 0.0));
+
+    half3 color;
+
+    // ── Thermal Fragment LOD ──
+    if (uniforms.qualityTier >= 3) {
+        // CRITICAL thermal: flat Lambertian, no specular, no SH — saves ~60% fragment ALU
+        color = baseColor * max(NdotL, 0.15h);
+    } else if (uniforms.qualityTier >= 2) {
+        // SERIOUS thermal: simplified Blinn-Phong, no SH — saves ~35% fragment ALU
+        half spec = pow(max(NdotH, 0.0h), 32.0h) * 0.3h;
+        half lightIntensity = half(uniforms.primaryLightIntensity);
+        half normalizedIntensity = clamp(lightIntensity / 1000.0h, 0.1h, 3.0h);
+        color = baseColor * NdotL * normalizedIntensity + half3(spec);
+    } else {
+        // NOMINAL/FAIR: Full Cook-Torrance PBR with fp16-safe GGX
+
+        // F0: metallic uses base color, dielectric uses 0.04
+        half3 F0 = mix(half3(0.04h), baseColor, metallic);
+
+        // ── Cook-Torrance Specular BRDF (fp16-safe) ──
+        half3 N_h = half3(N);
+        half3 H_h = half3(H);
+        half D = NDF_GGX_Safe(N_h, H_h, roughness);
+        half Vis = VisibilityKelemen(LdotH, roughness);
+        half3 F = FresnelSchlick(HdotV, F0);
+
+        half3 specular = D * Vis * F;
+        // Clamp to MEDIUMP_FLT_MAX to prevent fp16 overflow
+        specular = min(specular, half3(65504.0h));
+
+        // ── Energy Conservation ──
+        half3 kS = F;
+        half3 kD = (1.0h - kS) * (1.0h - metallic);
+
+        // ── Diffuse: Lambertian ──
+        half3 diffuse = kD * baseColor / M_PI_H;
+
+        // ── Direct Lighting ──
+        half lightIntensity = half(uniforms.primaryLightIntensity);
+        half normalizedIntensity = clamp(lightIntensity / 1000.0h, 0.1h, 3.0h);
+        half3 directLight = (diffuse + specular) * NdotL * normalizedIntensity;
+
+        // ── Indirect Lighting (SH-based IBL) ──
+        half3 irradiance = evaluateSH(N, uniforms.shCoeffs);
+        // Safe SH normalization: guard against zero/NaN/Inf coefficients
+        half3 shDenom = max(half3(uniforms.shCoeffs[0]) * 0.282095h, half3(0.05h));
+        irradiance = irradiance / shDenom * 0.3h;
+        // NaN/Inf guard
+        irradiance = select(irradiance, half3(0.15h), isnan(irradiance) || isinf(irradiance));
+        half3 indirectDiffuse = kD * baseColor * irradiance;
+
+        // Indirect specular: SH at reflection direction
+        float3 R = reflect(-V, N);
+        half3 reflectedIrradiance = evaluateSH(R, uniforms.shCoeffs);
+        reflectedIrradiance = reflectedIrradiance / shDenom * 0.5h;
+        reflectedIrradiance = select(reflectedIrradiance, half3(0.1h), isnan(reflectedIrradiance) || isinf(reflectedIrradiance));
+        half3 indirectSpecular = F0 * reflectedIrradiance * (1.0h - roughness * 0.7h);
+
+        half3 indirect = indirectDiffuse + indirectSpecular;
+
+        color = directLight + indirect;
+    }
+
+    // ── Ambient minimum (all tiers) ──
     color = max(color, baseColor * 0.02h);
-    
+
     // ── Ripple highlight ──
     if (in.rippleAmplitude > 0.001) {
         half rippleBoost = half(in.rippleAmplitude) * 0.15h;
         color += rippleBoost;
     }
-    
-    // ── Tone mapping (simple Reinhard) ──
-    color = color / (color + 1.0h);
-    
-    // ── Alpha: opaque for visible triangles, fade at S5 ──
+
+    // ── Tone mapping (Reinhard in float for precision) ──
+    float3 colorF = float3(color);
+    colorF = colorF / (colorF + 1.0);
+    color = half3(colorF);
+
+    // ── Alpha: S5 fade with stochastic blue-noise dithering ──
     half alpha = 1.0h;
-    if (in.display > 0.88h) {  // s4ToS5Threshold
-        alpha = 1.0h - (half(in.display) - 0.88h) / (1.0h - 0.88h);
-        alpha = clamp(alpha, 0.0h, 1.0h);
+    if (in.display > 0.75h) {
+        // Progressive fade from S4 (0.75) to S5+ (1.0)
+        half fade = (half(in.display) - 0.75h) / (1.0h - 0.75h);
+        // Position-based hash for blue-noise-like dithering (TAA-friendly)
+        // Will upgrade to STBN 128×128×64 texture in future pass
+        float2 screenPos = in.position.xy;
+        half noise = half(fract(sin(dot(screenPos, float2(12.9898, 78.233))) * 43758.5453));
+        // Stochastic transparency: converges under temporal accumulation
+        alpha = (fade < noise) ? 1.0h : 0.0h;
     }
-    
+
     // Pre-multiplied alpha for AR compositing
     color *= alpha;
-    
+
     return half4(color, alpha);
 }
 
@@ -277,9 +316,10 @@ inline float sdTriangle2D(float2 p, float2 a, float2 b, float2 c) {
     float2 pa = p - a, pb = p - b, pc = p - c;
     float2 nor = float2(ba.y, -ba.x);
     float s = sign(dot(nor, pa));
-    float2 d1 = pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
-    float2 d2 = pb - cb * clamp(dot(pb, cb) / dot(cb, cb), 0.0, 1.0);
-    float2 d3 = pc - ac * clamp(dot(pc, ac) / dot(ac, ac), 0.0, 1.0);
+    // NaN guard: degenerate triangles (coincident vertices) produce dot(ba,ba)=0
+    float2 d1 = pa - ba * clamp(dot(pa, ba) / max(dot(ba, ba), 1e-10), 0.0, 1.0);
+    float2 d2 = pb - cb * clamp(dot(pb, cb) / max(dot(cb, cb), 1e-10), 0.0, 1.0);
+    float2 d3 = pc - ac * clamp(dot(pc, ac) / max(dot(ac, ac), 1e-10), 0.0, 1.0);
     float md = min(min(dot(d1,d1), dot(d2,d2)), dot(d3,d3));
     return sqrt(md) * s;
 }
@@ -322,5 +362,87 @@ fragment half4 borderStrokeFragment(
     return half4(borderColor, alpha);
 }
 
-// ─── Phase 3: Metallic Lighting Pass (not implemented in Phase 2) ───
-// Will be added in Phase 3
+// ─── Pass 3: Metallic Lighting Enhancement ───
+// Adds screen-space metallic sheen for high-evidence patches (display > 0.5).
+// Fresnel-based rim light emphasizes surface curvature and scanning completion.
+
+fragment half4 metallicLightingFragment(
+    VertexOut in [[stage_in]],
+    constant ScanGuidanceUniforms &uniforms [[buffer(1)]]
+) {
+    half display = half(in.display);
+    if (display < 0.5h) discard_fragment();
+
+    float3 N = normalize(in.worldNormal);
+    float3 V = normalize(uniforms.cameraPosition - in.worldPosition);
+
+    half NdotV = half(max(dot(N, V), 0.0));
+    half fresnel = pow(1.0h - NdotV, 3.0h);
+    half metallicBoost = (display - 0.5h) * 2.0h;  // [0,1] for display [0.5, 1.0]
+    half3 sheen = half3(fresnel * metallicBoost * 0.15h);
+
+    half alpha = fresnel * metallicBoost * 0.3h;
+    // Pre-multiplied alpha
+    return half4(sheen * alpha, alpha);
+}
+
+// ─── Pass 4: Color Correction ───
+// Subtle color temperature shift: warm for high evidence, cool for low.
+// Reinforces the Oklab cold→warm mapping with an additional composited layer.
+
+fragment half4 colorCorrectionFragment(
+    VertexOut in [[stage_in]],
+    constant ScanGuidanceUniforms &uniforms [[buffer(1)]]
+) {
+    half display = half(in.display);
+    half3 baseColor = half3(in.grayscaleColor);
+
+    // Warm shift for high evidence, cool for low
+    half warmth = display * 0.05h;
+    half3 correction = half3(warmth, 0.0h, -warmth);
+    half3 corrected = baseColor + correction;
+
+    half alpha = 0.15h * display;
+    return half4(corrected * alpha, alpha);
+}
+
+// ─── Pass 5: Screen-Space Ambient Occlusion (SSAO approximation) ───
+// Per-fragment cavity detection using normal vs view angle.
+// Darkens edges and crevices for depth perception without a separate depth pass.
+
+fragment half4 ambientOcclusionFragment(
+    VertexOut in [[stage_in]],
+    constant ScanGuidanceUniforms &uniforms [[buffer(1)]]
+) {
+    float3 N = normalize(in.worldNormal);
+    float3 V = normalize(uniforms.cameraPosition - in.worldPosition);
+
+    half NdotV = half(max(dot(N, V), 0.0));
+    // AO: faces pointing away from camera get darkened
+    half ao = 0.3h + 0.7h * NdotV;  // AO factor [0.3, 1.0]
+
+    // Apply only as darkening (multiply blend in the pipeline)
+    half darken = 1.0h - ao;
+    half alpha = darken * 0.4h;
+    return half4(0.0h, 0.0h, 0.0h, alpha);
+}
+
+// ─── Pass 6: Post-Processing (Film Grain) ───
+// Subtle film grain for tactile quality feedback.
+// Skipped at serious/critical thermal tiers to save fragment ALU.
+
+fragment half4 postProcessFragment(
+    VertexOut in [[stage_in]],
+    constant ScanGuidanceUniforms &uniforms [[buffer(1)]]
+) {
+    if (uniforms.qualityTier >= 2) discard_fragment();
+
+    float2 screenPos = in.position.xy;
+    // Time-varying hash for per-frame grain variation
+    float timeSeed = uniforms.time * 60.0;
+    half grain = half(fract(sin(dot(screenPos * 0.01 + timeSeed, float2(12.9898, 78.233))) * 43758.5453));
+    grain = (grain - 0.5h) * 0.02h;  // ±1% noise
+
+    half alpha = 0.05h;
+    return half4(half3(grain), alpha);
+}

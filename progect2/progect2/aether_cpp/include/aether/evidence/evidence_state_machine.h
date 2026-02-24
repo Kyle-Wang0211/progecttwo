@@ -121,6 +121,11 @@ struct EvidenceStateMachineInput {
     //        6=provenanceContribution, 7=coverageTrackerScore,
     //        8=resolutionQuality, 9=viewDiversity
     double dim_scores[10]{};
+
+    // ── Multi-view photometric cross-consistency (P0 extension) ──
+    // [0,1] where 1.0 = fully consistent across views.
+    // Penalizes Choquet integral when < 1.0.
+    double cross_view_consistency{1.0};
 };
 
 /// Result of a single evaluate() call.

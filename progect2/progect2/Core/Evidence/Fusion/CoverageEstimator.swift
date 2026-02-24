@@ -10,33 +10,27 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// **Rule ID:** PR6_GRID_COVERAGE_001
 /// Coverage Estimator: computes coverage from EvidenceGrid cells
 public final class CoverageEstimator: @unchecked Sendable {
-    
-    /// Level weights (SSOT constants)
-    private let levelWeights: [Double] = [0.00, 0.20, 0.50, 0.80, 0.90, 0.95, 1.00]  // L0..L6
-    
-    /// EMA smoothing alpha
-    private let emaAlpha: Double = 0.15
-    
-    /// Maximum coverage delta per second (anti-jitter limiter)
-    private let maxCoverageDeltaPerSec: Double = 0.10
-    
-    /// Last coverage value (for EMA)
+    private var nativeEstimator: OpaquePointer?
     private var lastCoverage: Double = 0.0
-    
-    /// Last update timestamp (monotonic milliseconds)
-    private var lastUpdateMonotonicMs: Int64 = 0
-    
-    /// Non-monotonic time count (diagnostic)
-    private var nonMonotonicTimeCount: Int = 0
-    
+
     public init() {
-        self.lastUpdateMonotonicMs = MonotonicClock.nowMs()
+        var config = NativeCoverageEstimatorBridge.defaultConfig()
+        // Keep capture-mode monotonic behavior.
+        config.monotonic_mode = 1
+        nativeEstimator = NativeCoverageEstimatorBridge.create(config: config)
     }
-    
+
+    deinit {
+        if let nativeEstimator {
+            NativeCoverageEstimatorBridge.destroy(nativeEstimator)
+        }
+    }
+
     /// **Rule ID:** PR6_GRID_COVERAGE_002
     /// Update coverage from EvidenceGrid cells
     ///
@@ -44,94 +38,99 @@ public final class CoverageEstimator: @unchecked Sendable {
     /// - Returns: CoverageResult with breakdown and explainability
     public func update(grid: EvidenceGrid) async -> CoverageResult {
         let cells = await grid.allActiveCells()
-        
-        // Compute coverage from cells
-        var breakdownCounts = Array(repeating: 0, count: 7)  // L0..L6
-        var weightedSumComponents = Array(repeating: 0.0, count: 7)
-        var totalWeightedSum = 0.0
-        let excludedAreaSqM = 0.0
-        
-        // Iterate cells in deterministic order (stable key list)
-        for cell in cells {
-            let levelIndex = Int(cell.level.rawValue)
-            guard levelIndex >= 0 && levelIndex < 7 else {
-                continue
-            }
-            
-            // Count cells per level
-            breakdownCounts[levelIndex] += 1
-            
-            // Compute weighted contribution
-            let weight = levelWeights[levelIndex]
-            let dsBelief = cell.dsMass.occupied  // Use occupied mass as belief
-            let contribution = weight * dsBelief
-            
-            weightedSumComponents[levelIndex] += contribution
-            totalWeightedSum += contribution
-            
-            // Excluded occlusion area is integrated by the PIZ filter pipeline.
-            // When no exclusion payload is attached, keep zero contribution.
+
+        guard let nativeEstimator else {
+            return CoverageResult(
+                coveragePercentage: 0.0,
+                breakdownCounts: Array(repeating: 0, count: 7),
+                weightedSumComponents: Array(repeating: 0.0, count: 7),
+                excludedAreaSqM: 0.0
+            )
         }
-        
-        // Compute raw coverage percentage
-        let totalCells = cells.count
-        let rawCoverage = totalCells > 0 ? totalWeightedSum / Double(totalCells) : 0.0
-        
-        // Apply EMA smoothing (MUST-FIX S)
-        let currentMonotonicMs = MonotonicClock.nowMs()
-        let deltaTimeMs = currentMonotonicMs - lastUpdateMonotonicMs
-        
-        // **Rule ID:** PR6_GRID_COVERAGE_003
-        // Handle non-monotonic time
-        let deltaTimeSeconds: Double
-        if deltaTimeMs <= 0 {
-            deltaTimeSeconds = 0.0
-            nonMonotonicTimeCount += 1
-        } else {
-            deltaTimeSeconds = Double(deltaTimeMs) / 1000.0
+
+        var observations = [aether_coverage_cell_observation_t](
+            repeating: aether_coverage_cell_observation_t(),
+            count: cells.count
+        )
+        for (index, cell) in cells.enumerated() {
+            observations[index].level = cell.level.rawValue
+            observations[index].occupied = cell.dsMass.occupied
+            observations[index].free_mass = cell.dsMass.free
+            observations[index].unknown = cell.dsMass.unknown
+            observations[index].area_weight = 1.0
+            observations[index].excluded = 0
+            // Leave view_count unspecified; native core infers minimum count by level.
+            observations[index].view_count = 0
         }
-        
-        // EMA smoothing: newValue = alpha * rawValue + (1 - alpha) * oldValue
-        let smoothedCoverage = emaAlpha * rawCoverage + (1.0 - emaAlpha) * lastCoverage
-        
-        // **Rule ID:** PR6_GRID_COVERAGE_004
-        // Anti-jitter limiter (MUST-FIX R + S)
-        let coverageDelta = smoothedCoverage - lastCoverage
-        let deltaRate = deltaTimeSeconds > 0 ? abs(coverageDelta) / deltaTimeSeconds : 0.0
-        
-        let finalCoverage: Double
-        if deltaRate > maxCoverageDeltaPerSec {
-            // Limit change rate
-            let maxDelta = maxCoverageDeltaPerSec * deltaTimeSeconds
-            finalCoverage = lastCoverage + (coverageDelta > 0 ? maxDelta : -maxDelta)
-        } else {
-            finalCoverage = smoothedCoverage
+
+        let timestampMs = MonotonicClock.nowMs()
+        let nativeResult = observations.withUnsafeBufferPointer { buffer in
+            NativeCoverageEstimatorBridge.update(
+                nativeEstimator,
+                cells: buffer.baseAddress,
+                cellCount: Int32(cells.count),
+                monotonicTimestampMs: timestampMs
+            )
         }
-        
-        // Clamp to [0, 1]
-        let clampedCoverage = max(0.0, min(1.0, finalCoverage))
-        
-        // Update state
-        lastCoverage = clampedCoverage
-        lastUpdateMonotonicMs = currentMonotonicMs
-        
+
+        guard let nativeResult else {
+            return CoverageResult(
+                coveragePercentage: lastCoverage,
+                breakdownCounts: Array(repeating: 0, count: 7),
+                weightedSumComponents: Array(repeating: 0.0, count: 7),
+                excludedAreaSqM: 0.0
+            )
+        }
+
+        let breakdownTuple = nativeResult.breakdown_counts
+        let breakdownCounts: [Int] = [
+            Int(breakdownTuple.0),
+            Int(breakdownTuple.1),
+            Int(breakdownTuple.2),
+            Int(breakdownTuple.3),
+            Int(breakdownTuple.4),
+            Int(breakdownTuple.5),
+            Int(breakdownTuple.6)
+        ]
+        let weightedTuple = nativeResult.weighted_sum_components
+        let weightedSumComponents: [Double] = [
+            weightedTuple.0,
+            weightedTuple.1,
+            weightedTuple.2,
+            weightedTuple.3,
+            weightedTuple.4,
+            weightedTuple.5,
+            weightedTuple.6
+        ]
+        lastCoverage = nativeResult.coverage
+
         return CoverageResult(
-            coveragePercentage: clampedCoverage,
+            coveragePercentage: nativeResult.coverage,
             breakdownCounts: breakdownCounts,
             weightedSumComponents: weightedSumComponents,
-            excludedAreaSqM: excludedAreaSqM
+            excludedAreaSqM: nativeResult.excluded_area_weight,
+            beliefCoverage: nativeResult.belief_coverage,
+            plausibilityCoverage: nativeResult.plausibility_coverage,
+            uncertaintyWidth: nativeResult.uncertainty_width,
+            highObservationRatio: nativeResult.high_observation_ratio,
+            lyapunovRate: nativeResult.lyapunov_rate,
+            meanFisherInfo: nativeResult.mean_fisher_info
         )
     }
-    
+
     /// Get last coverage value
     public func getLastCoverage() -> Double {
+        if let nativeEstimator, let last = NativeCoverageEstimatorBridge.lastCoverage(nativeEstimator) {
+            lastCoverage = last
+        }
         return lastCoverage
     }
-    
+
     /// Reset estimator
     public func reset() {
         lastCoverage = 0.0
-        lastUpdateMonotonicMs = MonotonicClock.nowMs()
-        nonMonotonicTimeCount = 0
+        if let nativeEstimator {
+            NativeCoverageEstimatorBridge.reset(nativeEstimator)
+        }
     }
 }

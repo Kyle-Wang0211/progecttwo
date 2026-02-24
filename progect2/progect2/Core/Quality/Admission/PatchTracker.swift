@@ -122,21 +122,18 @@ public actor PatchTracker {
     
     /// Check if SOFT limit should trigger
     public func shouldTriggerSoftLimit() -> Bool {
-        if let state = evaluateCapacityStateNative() {
-            return state.shouldTriggerSoftLimit
+        guard let state = evaluateCapacityStateNative() else {
+            return true
         }
-        return patchCountShadow >= CapacityLimitConstants.SOFT_LIMIT_PATCH_COUNT ||
-            eebRemaining <= CapacityLimitConstants.SOFT_BUDGET_THRESHOLD
+        return state.shouldTriggerSoftLimit
     }
     
     /// Check if HARD limit should trigger
     public func shouldTriggerHardLimit() -> HardFuseTrigger? {
-        if let state = evaluateCapacityStateNative() {
-            return state.hardTrigger
+        guard let state = evaluateCapacityStateNative() else {
+            return .EEB_HARD
         }
-        if patchCountShadow >= CapacityLimitConstants.HARD_LIMIT_PATCH_COUNT { return .PATCHCOUNT_HARD }
-        if eebRemaining <= CapacityLimitConstants.HARD_BUDGET_THRESHOLD { return .EEB_HARD }
-        return nil
+        return state.hardTrigger
     }
     
     // MARK: - EEB Validation
@@ -327,27 +324,13 @@ public actor PatchTracker {
             }
             return
         }
-
-        // Check HARD limit first (highest priority)
-        if let hardTrigger = shouldTriggerHardLimit() {
-            buildMode = .SATURATED
-            // Latch SATURATED if not already latched
-            if !saturatedLatched {
-                saturatedLatched = true
-                saturatedLatchedAtPatchCount = patchCountShadow
-                saturatedLatchedAtTimestamp = Date()
-                saturatedLatchedTrigger = hardTrigger
-            }
-            return
-        }
-        
-        // Check SOFT limit
-        if shouldTriggerSoftLimit() {
-            if buildMode == .NORMAL {
-                buildMode = .DAMPING
-            }
-            // If already DAMPING, stay DAMPING
-            // If already SATURATED, stay SATURATED (latched)
+        // Fail-closed: native decision unavailable -> latch saturated immediately.
+        buildMode = .SATURATED
+        if !saturatedLatched {
+            saturatedLatched = true
+            saturatedLatchedAtPatchCount = patchCountShadow
+            saturatedLatchedAtTimestamp = Date()
+            saturatedLatchedTrigger = .EEB_HARD
         }
     }
     

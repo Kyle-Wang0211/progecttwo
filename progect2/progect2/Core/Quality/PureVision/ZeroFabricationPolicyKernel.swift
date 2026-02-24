@@ -84,47 +84,12 @@ public struct ZeroFabricationPolicyKernel: Sendable {
         ) {
             return native
         }
-        return evaluateSwift(action: action, context: context)
-    }
-
-    private func evaluateSwift(action: MLActionType, context: ZeroFabricationContext) -> ZeroFabricationDecision {
-        switch action {
-        case .textureInpaint, .holeFilling, .geometryCompletion:
-            return .init(
-                allowed: false,
-                reasonCode: "ZERO_FAB_BLOCK_GENERATIVE_ACTION",
-                severity: .block
-            )
-        case .unknownRegionGrowth:
-            if context.confidenceClass == .unknown || !context.hasDirectObservation {
-                return .init(
-                    allowed: false,
-                    reasonCode: "ZERO_FAB_BLOCK_UNKNOWN_GROWTH",
-                    severity: .block
-                )
-            }
-            return .init(allowed: true, reasonCode: "ALLOW_OBSERVED_GROWTH", severity: .info)
-        case .multiViewDenoise:
-            if mode == .forensicStrict && context.requestedPointDisplacementMeters > 0 {
-                return .init(
-                    allowed: false,
-                    reasonCode: "ZERO_FAB_BLOCK_COORDINATE_REWRITE",
-                    severity: .block
-                )
-            }
-            if context.requestedPointDisplacementMeters > maxDenoiseDisplacementMeters {
-                return .init(
-                    allowed: false,
-                    reasonCode: "ZERO_FAB_DENOISE_DISPLACEMENT_EXCEEDS_POLICY",
-                    severity: .block
-                )
-            }
-            return .init(allowed: true, reasonCode: "ALLOW_DENOISE", severity: .info)
-        case .outlierRejection:
-            return .init(allowed: true, reasonCode: "ALLOW_OUTLIER_REJECTION", severity: .info)
-        case .calibrationCorrection, .confidenceEstimation, .uncertaintyEstimation:
-            return .init(allowed: true, reasonCode: "ALLOW_NON_GENERATIVE_CALIBRATION", severity: .info)
-        }
+        _ = action
+        _ = context
+        return .init(
+            allowed: false,
+            reasonCode: "ZERO_FAB_NATIVE_RUNTIME_UNAVAILABLE",
+            severity: .block
+        )
     }
 }
-

@@ -56,53 +56,22 @@ public final class AdaptiveBorderCalculator {
 
         let minWidth = Float(ScanGuidanceConstants.borderMinWidthPx)
         let maxWidth = Float(ScanGuidanceConstants.borderMaxWidthPx)
-
-        guard let nativeStyleRuntime else {
-            return triangles.map { triangle in
-                calculate(
-                    display: displayValues[triangle.patchId] ?? 0.0,
-                    areaSqM: triangle.areaSqM,
-                    medianArea: medianArea
-                )
+        if let styleOutputs = resolveStyles(
+            displayValues: displayValues,
+            triangles: triangles,
+            medianArea: medianArea
+        ) {
+            return styleOutputs.map { output in
+                min(max(output.border_width, minWidth), maxWidth)
             }
         }
 
-        var styleInputs = [aether_capture_style_input_t](
-            repeating: aether_capture_style_input_t(),
-            count: triangles.count
-        )
-        for (index, triangle) in triangles.enumerated() {
-            styleInputs[index].patch_key = stablePatchKey(triangle.patchId)
-            styleInputs[index].display = Float(min(max(displayValues[triangle.patchId] ?? 0.0, 0.0), 1.0))
-            styleInputs[index].area_sq_m = max(triangle.areaSqM, 1e-8)
-        }
-
-        var styleOutputs = [aether_capture_style_output_t](
-            repeating: aether_capture_style_output_t(),
-            count: triangles.count
-        )
-        let rc = styleInputs.withUnsafeBufferPointer { inputBuffer in
-            styleOutputs.withUnsafeMutableBufferPointer { outputBuffer in
-                aether_capture_style_runtime_resolve(
-                    nativeStyleRuntime,
-                    inputBuffer.baseAddress,
-                    Int32(styleInputs.count),
-                    outputBuffer.baseAddress
-                )
-            }
-        }
-        guard rc == 0 else {
-            return triangles.map { triangle in
-                calculate(
-                    display: displayValues[triangle.patchId] ?? 0.0,
-                    areaSqM: triangle.areaSqM,
-                    medianArea: medianArea
-                )
-            }
-        }
-
-        return styleOutputs.map { output in
-            min(max(output.border_width, minWidth), maxWidth)
+        return triangles.map { triangle in
+            calculate(
+                display: displayValues[triangle.patchId] ?? 0.0,
+                areaSqM: triangle.areaSqM,
+                medianArea: medianArea
+            )
         }
     }
 
@@ -155,14 +124,64 @@ public final class AdaptiveBorderCalculator {
                 &hash
             )
         }
-        if rc == 0 {
-            return hash
+        return rc == 0 ? hash : 0
+    }
+
+    private func resolveStyles(
+        displayValues: [String: Double],
+        triangles: [ScanTriangle],
+        medianArea: Float
+    ) -> [aether_capture_style_output_t]? {
+        var styleInputs = [aether_capture_style_input_t](
+            repeating: aether_capture_style_input_t(),
+            count: triangles.count
+        )
+        for (index, triangle) in triangles.enumerated() {
+            styleInputs[index].patch_key = stablePatchKey(triangle.patchId)
+            styleInputs[index].display = Float(min(max(displayValues[triangle.patchId] ?? 0.0, 0.0), 1.0))
+            styleInputs[index].area_sq_m = max(triangle.areaSqM, 1e-8)
         }
-        var fallback: UInt64 = BridgeInteropConstants.fnv1a64OffsetBasis
-        for byte in bytes {
-            fallback ^= UInt64(byte)
-            fallback &*= BridgeInteropConstants.fnv1a64Prime
+
+        var styleOutputs = [aether_capture_style_output_t](
+            repeating: aether_capture_style_output_t(),
+            count: triangles.count
+        )
+        if let nativeStyleRuntime {
+            let rc = styleInputs.withUnsafeBufferPointer { inputBuffer in
+                styleOutputs.withUnsafeMutableBufferPointer { outputBuffer in
+                    aether_capture_style_runtime_resolve(
+                        nativeStyleRuntime,
+                        inputBuffer.baseAddress,
+                        Int32(styleInputs.count),
+                        outputBuffer.baseAddress
+                    )
+                }
+            }
+            return rc == 0 ? styleOutputs : nil
         }
-        return fallback
+
+        var config = aether_capture_style_runtime_config_t()
+        if aether_capture_style_runtime_default_config(&config) != 0 {
+            return nil
+        }
+        config.smoothing_alpha = 0.2
+        config.freeze_threshold = Float(ScanGuidanceConstants.s3ToS4Threshold)
+        config.min_thickness = Float(ScanGuidanceConstants.wedgeMinThicknessM)
+        config.max_thickness = Float(ScanGuidanceConstants.wedgeBaseThicknessM)
+        config.min_border_width = Float(ScanGuidanceConstants.borderMinWidthPx)
+        config.max_border_width = Float(ScanGuidanceConstants.borderMaxWidthPx)
+
+        let rc = styleInputs.withUnsafeBufferPointer { inputBuffer in
+            styleOutputs.withUnsafeMutableBufferPointer { outputBuffer in
+                aether_capture_style_resolve_stateless(
+                    &config,
+                    inputBuffer.baseAddress,
+                    Int32(styleInputs.count),
+                    max(medianArea, 1e-6),
+                    outputBuffer.baseAddress
+                )
+            }
+        }
+        return rc == 0 ? styleOutputs : nil
     }
 }

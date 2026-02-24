@@ -2,6 +2,7 @@
 // Copyright (c) 2024-2026 Aether3D. All rights reserved.
 
 #include "aether/render/fracture_display_mesh.h"
+#include "aether/render/pbr_material.h"
 
 #include "aether/core/numeric_guard.h"
 #include "aether/innovation/core_types.h"
@@ -108,9 +109,13 @@ FragmentVisualParams compute_visual_params(
     const float display_fade = 1.0f - d * 0.5f;
     p.border_alpha = std::pow(std::max(0.0f, display_fade), 1.0f / border_gamma);
 
-    const float s3 = tsdf::smoothstep(0.45f, 0.55f, d);
-    p.metallic = 0.3f + 0.4f * s3;
-    p.roughness = 0.6f - 0.3f * s3;
+    // PBR material from evidence state (replaces hardcoded metallic/roughness)
+    const PBRMaterialParams pbr = compute_pbr_from_evidence(d, 0);
+    p.metallic = pbr.metallic;
+    p.roughness = pbr.roughness;
+    p.f0 = pbr.f0;
+    p.clearcoat = pbr.clearcoat;
+    p.ambient_occlusion = pbr.ambient_occlusion;
 
     // C01 NumericGuard: guard visual params derived from pow/sqrt/division
     core::guard_finite_vector(reinterpret_cast<float*>(&p), sizeof(p) / sizeof(float));

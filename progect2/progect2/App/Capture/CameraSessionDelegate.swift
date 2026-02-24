@@ -14,7 +14,7 @@ import AVFoundation
 /// Camera Session Delegate
 ///
 /// Delegate protocol for camera session events.
-public protocol CameraSessionDelegate: AnyObject {
+protocol CameraSessionDelegate: AnyObject {
     /// Called when recording starts
     /// 
     /// - Parameter session: Camera session
@@ -50,7 +50,7 @@ public protocol CameraSessionDelegate: AnyObject {
 }
 
 /// Default implementation (optional methods)
-public extension CameraSessionDelegate {
+extension CameraSessionDelegate {
     func cameraSessionDidStartRecording(_ session: CameraSessionProtocol) {}
     func cameraSession(_ session: CameraSessionProtocol, didStopRecording result: RecordingResult) {}
     func cameraSession(_ session: CameraSessionProtocol, didFailWithError error: CameraSessionError) {}

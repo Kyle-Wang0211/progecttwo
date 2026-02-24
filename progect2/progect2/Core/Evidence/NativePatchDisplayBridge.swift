@@ -21,9 +21,8 @@ enum NativePatchDisplayBridge {
     ) -> aether_patch_display_step_result_t? {
         #if canImport(CAetherNativeBridge)
         var result = aether_patch_display_step_result_t()
-        var cfg = config
         let rc: Int32
-        if var cfgVal = cfg {
+        if var cfgVal = config {
             rc = aether_patch_display_step(
                 previousDisplay, previousEMA, Int32(observationCount),
                 target, isLocked ? 1 : 0, &cfgVal, &result)
@@ -46,9 +45,8 @@ enum NativePatchDisplayBridge {
     ) -> Double? {
         #if canImport(CAetherNativeBridge)
         var evidence: Double = 0
-        var cfg = config
         let rc: Int32
-        if var cfgVal = cfg {
+        if var cfgVal = config {
             rc = aether_patch_color_evidence(localDisplay, globalDisplay, &cfgVal, &evidence)
         } else {
             rc = aether_patch_color_evidence(localDisplay, globalDisplay, nil, &evidence)
@@ -66,9 +64,8 @@ enum NativePatchDisplayBridge {
     ) -> OpaquePointer? {
         #if canImport(CAetherNativeBridge)
         var smoother: OpaquePointer?
-        var cfg = config
         let rc: Int32
-        if var cfgVal = cfg {
+        if var cfgVal = config {
             rc = aether_smart_smoother_create(&cfgVal, &smoother)
         } else {
             rc = aether_smart_smoother_create(nil, &smoother)

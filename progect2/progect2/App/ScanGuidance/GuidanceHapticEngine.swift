@@ -8,6 +8,10 @@
 //
 
 import Foundation
+import Aether3DCore
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 #if canImport(CoreHaptics)
 import CoreHaptics
@@ -27,11 +31,7 @@ public final class GuidanceHapticEngine {
         case scanComplete
     }
     
-    /// Last fire time per pattern (for debounce)
-    private var lastFireTimes: [HapticPattern: TimeInterval] = [:]
-    
-    /// Recent fire timestamps (for rate limiting)
-    private var recentFireTimestamps: [TimeInterval] = []
+    private let policyHandle: OpaquePointer?
     
     #if canImport(CoreHaptics)
     /// CoreHaptics engine
@@ -39,8 +39,31 @@ public final class GuidanceHapticEngine {
     #endif
     
     public init() {
+        #if canImport(CAetherNativeBridge)
+        var config = aether_haptic_policy_config_t(
+            debounce_seconds: ScanGuidanceConstants.hapticDebounceS,
+            max_per_minute: Int32(ScanGuidanceConstants.hapticMaxPerMinute)
+        )
+        var handle: OpaquePointer?
+        if aether_haptic_policy_create(&config, &handle) == 0 {
+            policyHandle = handle
+        } else {
+            policyHandle = nil
+        }
+        #else
+        policyHandle = nil
+        #endif
+
         #if canImport(CoreHaptics)
         initializeHapticEngine()
+        #endif
+    }
+
+    deinit {
+        #if canImport(CAetherNativeBridge)
+        if let policyHandle {
+            _ = aether_haptic_policy_destroy(policyHandle)
+        }
         #endif
     }
     
@@ -49,11 +72,9 @@ public final class GuidanceHapticEngine {
     private func initializeHapticEngine() {
         do {
             hapticEngine = try CHHapticEngine()
-            hapticEngine?.stoppedHandler = { [weak self] reason in
-                // Engine stopped, try to restart
-                if reason == .engineStopped {
-                    self?.initializeHapticEngine()
-                }
+            hapticEngine?.stoppedHandler = { [weak self] _ in
+                // Engine stopped, try to restart.
+                self?.initializeHapticEngine()
             }
             try hapticEngine?.start()
         } catch {
@@ -70,6 +91,7 @@ public final class GuidanceHapticEngine {
     ///   - timestamp: Current timestamp
     ///   - toastPresenter: Optional toast presenter for message display
     /// - Returns: true if haptic was fired, false if suppressed
+    @MainActor
     public func fire(
         pattern: HapticPattern,
         timestamp: TimeInterval,
@@ -78,12 +100,7 @@ public final class GuidanceHapticEngine {
         guard shouldFire(pattern: pattern, at: timestamp) else {
             return false
         }
-        
-        // Update tracking
-        lastFireTimes[pattern] = timestamp
-        recentFireTimestamps.append(timestamp)
-        recentFireTimestamps.removeAll { timestamp - $0 > 60.0 }
-        
+
         // Fire haptic
         fireHapticPattern(pattern)
         
@@ -94,6 +111,7 @@ public final class GuidanceHapticEngine {
     }
     
     /// Fire completion haptic (scan complete)
+    @MainActor
     public func fireCompletion() {
         fireHapticPattern(.scanComplete)
     }
@@ -104,20 +122,23 @@ public final class GuidanceHapticEngine {
     ///   - pattern: Pattern to check
     ///   - time: Current timestamp
     /// - Returns: true if haptic should fire
+    @MainActor
     internal func shouldFire(pattern: HapticPattern, at time: TimeInterval) -> Bool {
-        // Check debounce (5 seconds per pattern)
-        if let lastTime = lastFireTimes[pattern],
-           time - lastTime < ScanGuidanceConstants.hapticDebounceS {
+        #if canImport(CAetherNativeBridge)
+        guard let policyHandle else {
             return false
         }
-        
-        // Check rate limit (max 4 per minute)
-        let recentCount = recentFireTimestamps.filter { time - $0 < 60.0 }.count
-        if recentCount >= ScanGuidanceConstants.hapticMaxPerMinute {
-            return false
-        }
-        
-        return true
+        var shouldFire: Int32 = 0
+        let rc = aether_haptic_policy_should_fire(
+            policyHandle,
+            pattern.nativeCode,
+            time,
+            &shouldFire
+        )
+        return rc == 0 && shouldFire != 0
+        #else
+        return false
+        #endif
     }
     
     /// Get toast message for pattern
@@ -195,4 +216,19 @@ public final class GuidanceHapticEngine {
         }
     }
     #endif
+}
+
+private extension GuidanceHapticEngine.HapticPattern {
+    var nativeCode: Int32 {
+        switch self {
+        case .motionTooFast:
+            return Int32(AETHER_HAPTIC_PATTERN_MOTION_TOO_FAST)
+        case .blurDetected:
+            return Int32(AETHER_HAPTIC_PATTERN_BLUR_DETECTED)
+        case .exposureAbnormal:
+            return Int32(AETHER_HAPTIC_PATTERN_EXPOSURE_ABNORMAL)
+        case .scanComplete:
+            return Int32(AETHER_HAPTIC_PATTERN_SCAN_COMPLETE)
+        }
+    }
 }

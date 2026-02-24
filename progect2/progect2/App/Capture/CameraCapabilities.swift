@@ -48,9 +48,10 @@ public actor CameraCapabilities {
             return false
         }
         
-        // Check for ProRes RAW support (iOS 14.3+)
+        // Heuristic: ProRes RAW codec subtype is "aprn".
+        let proResRawSubType = "aprn".fourCharCode
         for format in device.formats {
-            if format.videoCodecType == .proResRAW {
+            if CMFormatDescriptionGetMediaSubType(format.formatDescription) == proResRawSubType {
                 return true
             }
         }

@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// TrendConfirmation - O(1) stability check using RingBuffer
 /// P6/H2: Uses MonotonicClock for time windows
@@ -34,29 +35,31 @@ public class TrendConfirmation {
     /// Returns stability value (variance) or nil if insufficient data
     public func checkStability() -> Double? {
         let now = MonotonicClock.nowMs()
-        let windowStart = now - windowMs
-        
-        // Get values within window
         let allValues = metricHistory.getAll()
         let allTimestamps = timestamps.getAll()
-        
+
         guard allValues.count == allTimestamps.count else {
             return nil
         }
-        
-        let windowValues = zip(allValues, allTimestamps)
-            .filter { $0.1 >= windowStart }
-            .map { $0.0 }
-        
-        guard windowValues.count >= 2 else {
+
+        var variance = 0.0
+        var hasValue: Int32 = 0
+        let rc = allValues.withUnsafeBufferPointer { valuesPtr in
+            allTimestamps.withUnsafeBufferPointer { timePtr in
+                aether_quality_trend_variance(
+                    valuesPtr.baseAddress,
+                    timePtr.baseAddress,
+                    Int32(allValues.count),
+                    now,
+                    windowMs,
+                    &variance,
+                    &hasValue
+                )
+            }
+        }
+        guard rc == 0, hasValue != 0 else {
             return nil
         }
-        
-        // Calculate variance
-        let mean = windowValues.reduce(0, +) / Double(windowValues.count)
-        let variance = windowValues.map { pow($0 - mean, 2) }.reduce(0, +) / Double(windowValues.count)
-        
         return variance
     }
 }
-

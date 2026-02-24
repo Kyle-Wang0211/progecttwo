@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Battery-aware scheduler
 ///
@@ -46,8 +49,20 @@ public actor BatteryAwareScheduler {
     
     /// Schedule task based on battery state
     public func scheduleTask(_ task: ScheduledTask) -> SchedulingResult {
+        #if canImport(CAetherNativeBridge)
+        let lowPower = (currentState == .low || currentState == .critical) ? 1 : 0
+        var quality: Int32 = 1
+        if aether_mobile_recommended_scan_quality(lowPower, &quality) != 0 {
+            quality = 1
+        }
         let priority: TaskPriority
-        
+        switch quality {
+        case 0: priority = .normal
+        case 1: priority = .reduced
+        default: priority = .minimal
+        }
+        #else
+        let priority: TaskPriority
         switch currentState {
         case .charging, .high:
             priority = .normal
@@ -56,6 +71,7 @@ public actor BatteryAwareScheduler {
         case .low, .critical:
             priority = .minimal
         }
+        #endif
         
         return SchedulingResult(
             task: task,

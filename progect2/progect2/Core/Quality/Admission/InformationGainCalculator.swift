@@ -79,13 +79,11 @@ public struct DeterministicInformationGainCalculator: InformationGainCalculator 
         }
 
         var value: Double = 0.0
-        var config = nativeIGConfig()
         let rc = states.withUnsafeBufferPointer { ptr in
-            aether_pr1_compute_info_gain_with_config(
+            aether_pr1_compute_info_gain(
                 &nativePatch,
                 ptr.baseAddress,
                 Int32(gridSize),
-                &config,
                 &value
             )
         }
@@ -101,15 +99,13 @@ public struct DeterministicInformationGainCalculator: InformationGainCalculator 
     ) -> Double? {
         var nativePatch = toNativePatchDescriptor(patch)
         let nativeExisting = existingPatches.map(toNativePatchDescriptor)
-        var config = nativeIGConfig()
-        config.pose_eps = CapacityLimitConstants.POSE_EPS
         var value: Double = 0.0
         let rc = nativeExisting.withUnsafeBufferPointer { ptr in
-            aether_pr1_compute_novelty_with_config(
+            aether_pr1_compute_novelty(
                 &nativePatch,
                 ptr.baseAddress,
                 Int32(ptr.count),
-                &config,
+                CapacityLimitConstants.POSE_EPS,
                 &value
             )
         }
@@ -130,22 +126,6 @@ public struct DeterministicInformationGainCalculator: InformationGainCalculator 
         native.radiance_y = patch.radiance.y
         native.radiance_z = patch.radiance.z
         return native
-    }
-
-    private func nativeIGConfig() -> aether_pr1_info_gain_config_t {
-        var config = aether_pr1_info_gain_config_t()
-        let rc = aether_pr1_info_gain_default_config(&config)
-        precondition(rc == 0, "aether_pr1_info_gain_default_config failed: rc=\(rc)")
-        config.info_gain_strategy = Int32(AETHER_PR1_INFO_GAIN_STRATEGY_HYBRID_CROSSCHECK)
-        config.novelty_strategy = Int32(AETHER_PR1_NOVELTY_STRATEGY_HYBRID_CROSSCHECK)
-        // Tuned for mobile online stability: prioritize deterministic base, add bounded frontier entropy.
-        config.entropy_weight = 0.12
-        config.rarity_weight = 0.08
-        config.robust_quantile = 0.25
-        config.robustness_scale = 0.35
-        config.hybrid_agreement_tolerance = 0.20
-        config.hybrid_high_weight = 0.50
-        return config
     }
 
     private func clamp01(_ value: Double) -> Double {

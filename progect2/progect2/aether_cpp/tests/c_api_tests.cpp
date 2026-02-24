@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -455,6 +456,36 @@ int test_p6_confidence_decay_c_api() {
         failed++;
     }
 
+    double w = 0.0;
+    if (aether_confidence_aggregation_weight(1000, 1000, 60.0, &w) != 0 ||
+        !approx(static_cast<float>(w), 1.0f, 1e-6f)) {
+        std::fprintf(stderr, "confidence aggregation weight t=0 mismatch %.9f\n", w);
+        failed++;
+    }
+    if (aether_confidence_aggregation_weight(1000, 61000, 60.0, &w) != 0 ||
+        !approx(static_cast<float>(w), 0.5f, 1e-5f)) {
+        std::fprintf(stderr, "confidence aggregation weight 1 half-life mismatch %.9f\n", w);
+        failed++;
+    }
+    if (aether_confidence_aggregation_weight(1000, 121000, 60.0, &w) != 0 ||
+        !approx(static_cast<float>(w), 0.25f, 1e-5f)) {
+        std::fprintf(stderr, "confidence aggregation weight 2 half-life mismatch %.9f\n", w);
+        failed++;
+    }
+    if (aether_confidence_aggregation_weight(2000, 1000, 60.0, &w) != 0 ||
+        !approx(static_cast<float>(w), 1.0f, 1e-6f)) {
+        std::fprintf(stderr, "confidence aggregation weight non-monotonic time mismatch %.9f\n", w);
+        failed++;
+    }
+    if (aether_confidence_aggregation_weight(1000, 2000, 0.0, &w) == 0) {
+        std::fprintf(stderr, "confidence aggregation weight invalid half-life expected failure\n");
+        failed++;
+    }
+    if (aether_confidence_aggregation_weight(1000, 2000, 60.0, nullptr) == 0) {
+        std::fprintf(stderr, "confidence aggregation weight null out expected failure\n");
+        failed++;
+    }
+
     return failed;
 }
 
@@ -593,7 +624,7 @@ int test_scan_interaction_kernels_c_api() {
     }
 
     // Render snapshot should remain monotonic with respect to base display.
-    aether_render_snapshot_input_t snapshot_inputs[3]{};
+    aether_render_snapshot_input_t snapshot_inputs[4]{};
     snapshot_inputs[0].base_display = 0.90f;
     snapshot_inputs[0].confidence_display = 0.95f;
     snapshot_inputs[0].has_stability = 1;
@@ -612,11 +643,18 @@ int test_scan_interaction_kernels_c_api() {
     snapshot_inputs[2].fade_in_alpha = 0.0f;
     snapshot_inputs[2].eviction_weight = 0.0f;
 
-    float rendered[3]{0.0f, 0.0f, 0.0f};
+    // No stability + lower confidence must not rollback rendered display.
+    snapshot_inputs[3].base_display = 0.70f;
+    snapshot_inputs[3].confidence_display = 0.30f;
+    snapshot_inputs[3].has_stability = 0;
+    snapshot_inputs[3].fade_in_alpha = 0.0f;
+    snapshot_inputs[3].eviction_weight = 0.0f;
+
+    float rendered[4]{0.0f, 0.0f, 0.0f, 0.0f};
     aether_render_snapshot_config_t snapshot_cfg{};
     snapshot_cfg.s3_to_s4_threshold = 0.75f;
     snapshot_cfg.s4_to_s5_threshold = 0.88f;
-    rc = aether_compute_render_snapshot(snapshot_inputs, 3, &snapshot_cfg, rendered);
+    rc = aether_compute_render_snapshot(snapshot_inputs, 4, &snapshot_cfg, rendered);
     if (rc != 0) {
         std::fprintf(stderr, "render snapshot failed rc=%d\n", rc);
         failed++;
@@ -628,11 +666,457 @@ int test_scan_interaction_kernels_c_api() {
                 rendered[0], rendered[1], rendered[2]);
             failed++;
         }
+        if (!approx(rendered[3], 0.70f, 1e-6f)) {
+            std::fprintf(stderr, "render snapshot rollback guard mismatch %.6f\n", rendered[3]);
+            failed++;
+        }
     }
 
     if (aether_compute_render_snapshot(snapshot_inputs, 1, &snapshot_cfg, nullptr) == 0) {
         std::fprintf(stderr, "render snapshot null output expected failure\n");
         failed++;
+    }
+
+    return failed;
+}
+
+int test_environment_light_estimator_c_api() {
+    int failed = 0;
+
+    aether_light_estimator_config_t cfg{};
+    cfg.fallback_direction[0] = 0.0f;
+    cfg.fallback_direction[1] = 1.0f;
+    cfg.fallback_direction[2] = 0.0f;
+    cfg.fallback_intensity = 1.0f;
+    cfg.min_intensity = 0.05f;
+    cfg.max_intensity = 4.0f;
+    cfg.rise_alpha = 0.5f;
+    cfg.fall_alpha = 0.2f;
+    cfg.direction_alpha = 0.25f;
+    cfg.sh_alpha = 0.25f;
+    cfg.missing_decay_per_s = 3.0f;
+    cfg.max_missing_hold_s = 0.2f;
+
+    aether_light_estimator_t* estimator = nullptr;
+    int rc = aether_light_estimator_create(&cfg, &estimator);
+    if (rc != 0 || estimator == nullptr) {
+        std::fprintf(stderr, "light estimator create failed rc=%d\n", rc);
+        return failed + 1;
+    }
+
+    aether_light_observation_t obs{};
+    obs.source_tier = 0;
+    obs.has_direction = 1;
+    obs.has_sh = 1;
+    obs.direction[0] = 0.0f;
+    obs.direction[1] = 1.0f;
+    obs.direction[2] = 0.0f;
+    obs.intensity = 2.4f;
+    for (int i = 0; i < 27; ++i) {
+        obs.sh_coeffs_rgb[i] = 0.001f * static_cast<float>(i + 1);
+    }
+
+    aether_light_state_t state{};
+    rc = aether_light_estimator_step(estimator, &obs, 1.0, &state);
+    if (rc != 0) {
+        std::fprintf(stderr, "light estimator step(obs) failed rc=%d\n", rc);
+        failed++;
+    } else {
+        if (state.tier != 0) {
+            std::fprintf(stderr, "light estimator tier mismatch %d\n", state.tier);
+            failed++;
+        }
+        if (!approx(state.intensity, 2.4f, 1e-4f)) {
+            std::fprintf(stderr, "light estimator intensity mismatch %.6f\n", state.intensity);
+            failed++;
+        }
+    }
+
+    float sh_rgb[27]{};
+    rc = aether_light_state_copy_sh9_rgb(&state, sh_rgb, 27);
+    if (rc != 0) {
+        std::fprintf(stderr, "light estimator copy_sh failed rc=%d\n", rc);
+        failed++;
+    } else if (!approx(sh_rgb[0], obs.sh_coeffs_rgb[0], 1e-6f) ||
+               !approx(sh_rgb[26], obs.sh_coeffs_rgb[26], 1e-6f)) {
+        std::fprintf(stderr, "light estimator SH copy mismatch %.6f %.6f\n", sh_rgb[0], sh_rgb[26]);
+        failed++;
+    }
+
+    const float previous_intensity = state.intensity;
+    rc = aether_light_estimator_step(estimator, nullptr, 1.0 + 1.0 / 60.0, &state);
+    if (rc != 0) {
+        std::fprintf(stderr, "light estimator step(missing) failed rc=%d\n", rc);
+        failed++;
+    } else {
+        if (!(state.intensity < previous_intensity)) {
+            std::fprintf(stderr, "light estimator expected decay: prev=%.6f cur=%.6f\n",
+                previous_intensity, state.intensity);
+            failed++;
+        }
+    }
+
+    rc = aether_light_estimator_step(estimator, nullptr, 2.0, &state);
+    if (rc != 0) {
+        std::fprintf(stderr, "light estimator step(missing long) failed rc=%d\n", rc);
+        failed++;
+    } else if (state.tier != 2) {
+        std::fprintf(stderr, "light estimator expected fallback tier=2 got %d\n", state.tier);
+        failed++;
+    }
+
+    if (aether_light_estimator_step(nullptr, &obs, 3.0, &state) == 0) {
+        std::fprintf(stderr, "light estimator null handle expected failure\n");
+        failed++;
+    }
+    if (aether_light_estimator_step(estimator, &obs, NAN, &state) == 0) {
+        std::fprintf(stderr, "light estimator NaN timestamp expected failure\n");
+        failed++;
+    }
+    if (aether_light_state_copy_sh9_rgb(&state, nullptr, 27) == 0) {
+        std::fprintf(stderr, "light estimator copy_sh null output expected failure\n");
+        failed++;
+    }
+
+    rc = aether_light_estimator_destroy(estimator);
+    if (rc != 0) {
+        std::fprintf(stderr, "light estimator destroy failed rc=%d\n", rc);
+        failed++;
+    }
+
+    return failed;
+}
+
+int test_quality_speed_state_c_api() {
+    int failed = 0;
+
+    int visual_state = -1;
+    int rc = aether_quality_visual_state_update(
+        AETHER_QUALITY_VISUAL_STATE_BLACK,
+        AETHER_QUALITY_VISUAL_STATE_GRAY,
+        &visual_state);
+    if (rc != 0 || visual_state != AETHER_QUALITY_VISUAL_STATE_GRAY) {
+        std::fprintf(stderr, "quality visual state update #1 mismatch rc=%d state=%d\n", rc, visual_state);
+        failed++;
+    }
+
+    rc = aether_quality_visual_state_update(
+        AETHER_QUALITY_VISUAL_STATE_WHITE,
+        AETHER_QUALITY_VISUAL_STATE_BLACK,
+        &visual_state);
+    if (rc != 0 || visual_state != AETHER_QUALITY_VISUAL_STATE_WHITE) {
+        std::fprintf(stderr, "quality visual state monotonic mismatch rc=%d state=%d\n", rc, visual_state);
+        failed++;
+    }
+
+    aether_quality_transition_result_t decision{};
+    rc = aether_quality_can_transition(
+        AETHER_QUALITY_VISUAL_STATE_GRAY,
+        AETHER_QUALITY_VISUAL_STATE_WHITE,
+        AETHER_QUALITY_FPS_TIER_DEGRADED,
+        1,
+        0.95,
+        0.95,
+        1,
+        0.10,
+        0.80,
+        0.15,
+        &decision);
+    if (rc != 0 || decision.allowed != 0 ||
+        decision.reason != AETHER_QUALITY_TRANSITION_REASON_ONLY_FULL_TIER) {
+        std::fprintf(stderr, "quality transition degraded block mismatch rc=%d allowed=%d reason=%d\n",
+            rc, decision.allowed, decision.reason);
+        failed++;
+    }
+
+    rc = aether_quality_can_transition(
+        AETHER_QUALITY_VISUAL_STATE_GRAY,
+        AETHER_QUALITY_VISUAL_STATE_WHITE,
+        AETHER_QUALITY_FPS_TIER_FULL,
+        1,
+        0.85,
+        0.85,
+        1,
+        0.10,
+        0.80,
+        0.15,
+        &decision);
+    if (rc != 0 || decision.allowed != 1 ||
+        decision.reason != AETHER_QUALITY_TRANSITION_REASON_NONE) {
+        std::fprintf(stderr, "quality transition full allow mismatch rc=%d allowed=%d reason=%d\n",
+            rc, decision.allowed, decision.reason);
+        failed++;
+    }
+
+    int pass = 0;
+    rc = aether_quality_check_black_to_gray(1, 0.71, 0, 0.0, 0.70, &pass);
+    if (rc != 0 || pass != 1) {
+        std::fprintf(stderr, "quality black->gray expected pass rc=%d pass=%d\n", rc, pass);
+        failed++;
+    }
+    rc = aether_quality_check_black_to_gray(1, 0.20, 1, 0.20, 0.70, &pass);
+    if (rc != 0 || pass != 0) {
+        std::fprintf(stderr, "quality black->gray expected fail rc=%d pass=%d\n", rc, pass);
+        failed++;
+    }
+
+    double smoothed = 0.0;
+    rc = aether_quality_smooth_speed(0.0, 1.0, 200, 0.30, 200, &smoothed);
+    if (rc != 0 || std::fabs(smoothed - 0.30) > 1e-9) {
+        std::fprintf(stderr, "quality smooth speed mismatch rc=%d smoothed=%.12f\n", rc, smoothed);
+        failed++;
+    }
+
+    aether_speed_feedback_result_t feedback{};
+    rc = aether_quality_speed_feedback(
+        1000,
+        0,
+        5.0,
+        200,
+        1.0,
+        200,
+        2000,
+        &feedback);
+    if (rc != 0 || feedback.tier != AETHER_QUALITY_SPEED_TIER_EXCELLENT ||
+        std::fabs(feedback.progress_speed - 100.0) > 1e-9 ||
+        feedback.animation_speed < 5.0) {
+        std::fprintf(stderr,
+            "quality speed feedback mismatch rc=%d tier=%d progress=%.6f anim=%.6f\n",
+            rc, feedback.tier, feedback.progress_speed, feedback.animation_speed);
+        failed++;
+    }
+
+    rc = aether_quality_speed_feedback(
+        500,
+        3000,
+        60.0,
+        200,
+        1.0,
+        200,
+        2000,
+        &feedback);
+    if (rc != 0 || feedback.tier != AETHER_QUALITY_SPEED_TIER_STOPPED ||
+        std::fabs(feedback.target_animation_speed - 5.0) > 1e-9) {
+        std::fprintf(stderr,
+            "quality speed no-progress mismatch rc=%d tier=%d target=%.6f\n",
+            rc, feedback.tier, feedback.target_animation_speed);
+        failed++;
+    }
+
+    aether_no_progress_warning_state_t warning_state{};
+    warning_state.state = AETHER_NO_PROGRESS_WARNING_STATE_ARMED;
+    warning_state.armed_time_ms = -1;
+    int warning_active = 0;
+    rc = aether_quality_no_progress_warning_step(
+        &warning_state,
+        2500,
+        1000,
+        2000,
+        1000,
+        &warning_active);
+    if (rc != 0 || warning_state.state != AETHER_NO_PROGRESS_WARNING_STATE_FIRED || warning_active != 1) {
+        std::fprintf(stderr, "quality warning fire mismatch rc=%d state=%d active=%d\n",
+            rc, warning_state.state, warning_active);
+        failed++;
+    }
+
+    rc = aether_quality_no_progress_warning_step(
+        &warning_state,
+        2500,
+        1001,
+        2000,
+        1000,
+        &warning_active);
+    if (rc != 0 || warning_state.state != AETHER_NO_PROGRESS_WARNING_STATE_COOLDOWN || warning_active != 0) {
+        std::fprintf(stderr, "quality warning cooldown mismatch rc=%d state=%d active=%d\n",
+            rc, warning_state.state, warning_active);
+        failed++;
+    }
+
+    rc = aether_quality_no_progress_warning_step(
+        &warning_state,
+        0,
+        2505,
+        2000,
+        1000,
+        &warning_active);
+    if (rc != 0 || warning_state.state != AETHER_NO_PROGRESS_WARNING_STATE_ARMED || warning_active != 0) {
+        std::fprintf(stderr, "quality warning rearm mismatch rc=%d state=%d active=%d\n",
+            rc, warning_state.state, warning_active);
+        failed++;
+    }
+
+    double alpha = -1.0;
+    rc = aether_quality_stopped_animation_alpha(1000, 0.5, &alpha);
+    if (rc != 0 || alpha < 0.0 || alpha > 1.0) {
+        std::fprintf(stderr, "quality stopped alpha mismatch rc=%d alpha=%.6f\n", rc, alpha);
+        failed++;
+    }
+
+    const double values[4] = {0.1, 0.2, 0.3, 0.4};
+    const int64_t timestamps[4] = {1000, 1100, 1200, 1300};
+    double variance = 0.0;
+    int has_value = 0;
+    rc = aether_quality_trend_variance(values, timestamps, 4, 1300, 500, &variance, &has_value);
+    if (rc != 0 || has_value != 1 || variance < 0.0) {
+        std::fprintf(stderr, "quality trend variance mismatch rc=%d has=%d variance=%.12f\n",
+            rc, has_value, variance);
+        failed++;
+    }
+
+    rc = aether_quality_trend_variance(values, timestamps, 1, 1300, 500, &variance, &has_value);
+    if (rc != 0 || has_value != 0) {
+        std::fprintf(stderr, "quality trend insufficient mismatch rc=%d has=%d\n", rc, has_value);
+        failed++;
+    }
+
+    if (aether_quality_trend_variance(values, timestamps, -1, 1300, 500, &variance, &has_value) == 0) {
+        std::fprintf(stderr, "quality trend negative count expected failure\n");
+        failed++;
+    }
+
+    return failed;
+}
+
+int test_motion_speed_c_api() {
+    int failed = 0;
+
+    const aether_float3_t prev{0.0f, 0.0f, 0.0f};
+    const aether_float3_t cur{1.0f, 0.0f, 0.0f};
+    const double speed = aether_camera_translation_speed(&cur, &prev, 1.0, 0.0, 1.0 / 240.0);
+    if (std::fabs(speed - 1.0) > 1e-9) {
+        std::fprintf(stderr, "camera translation speed mismatch: %.12f\n", speed);
+        failed++;
+    }
+
+    const double floored = aether_camera_translation_speed(&cur, &prev, 1.0, 1.0, 1.0 / 240.0);
+    if (!(floored > speed)) {
+        std::fprintf(stderr, "camera translation speed dt floor not applied: %.12f\n", floored);
+        failed++;
+    }
+
+    const double invalid = aether_camera_translation_speed(nullptr, &prev, 1.0, 0.0, 1.0 / 240.0);
+    if (invalid != 0.0) {
+        std::fprintf(stderr, "camera translation speed null pointer should fail-closed\n");
+        failed++;
+    }
+
+    return failed;
+}
+
+int test_image_metric_sink_c_api() {
+    int failed = 0;
+
+    {
+        const int width = 32;
+        const int height = 32;
+        std::vector<uint8_t> image(static_cast<std::size_t>(width * height), 120u);
+        for (int y = 0; y < 8; ++y) {
+            for (int x = 0; x < 8; ++x) {
+                image[static_cast<std::size_t>(y * width + x)] = 255u;
+            }
+        }
+        for (int y = 20; y < 24; ++y) {
+            for (int x = 20; x < 24; ++x) {
+                image[static_cast<std::size_t>(y * width + x)] = 0u;
+            }
+        }
+
+        aether_exposure_analysis_t result{};
+        const int rc = aether_exposure_analyze_image(
+            image.data(),
+            width,
+            height,
+            width,
+            &result);
+        if (rc != 0) {
+            std::fprintf(stderr, "aether_exposure_analyze_image failed rc=%d\n", rc);
+            failed++;
+        } else {
+            if (result.overexpose_ratio <= 0.0) {
+                std::fprintf(stderr, "expected non-zero overexpose ratio, got %.6f\n", result.overexpose_ratio);
+                failed++;
+            }
+            if (result.underexpose_ratio <= 0.0) {
+                std::fprintf(stderr, "expected non-zero underexpose ratio, got %.6f\n", result.underexpose_ratio);
+                failed++;
+            }
+            if (result.has_large_blown_region != 1) {
+                std::fprintf(stderr, "expected large blown region detection\n");
+                failed++;
+            }
+        }
+    }
+
+    {
+        const int width = 64;
+        const int height = 64;
+        std::vector<uint8_t> image(static_cast<std::size_t>(width * height), 0u);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const int value = (x * 13 + y * 17 + ((x / 4) % 2) * 80) % 256;
+                image[static_cast<std::size_t>(y * width + x)] = static_cast<uint8_t>(value);
+            }
+        }
+
+        aether_texture_analysis_t result{};
+        const int rc = aether_texture_analyze_image(
+            image.data(),
+            width,
+            height,
+            width,
+            &result);
+        if (rc != 0) {
+            std::fprintf(stderr, "aether_texture_analyze_image failed rc=%d\n", rc);
+            failed++;
+        } else {
+            if (result.feature_count < 0) {
+                std::fprintf(stderr, "texture feature_count should be non-negative\n");
+                failed++;
+            }
+            if (result.fused_score < 0.0 || result.fused_score > 1.0) {
+                std::fprintf(stderr, "texture fused_score out of range: %.6f\n", result.fused_score);
+                failed++;
+            }
+            if (result.confidence < 0.0 || result.confidence > 1.0) {
+                std::fprintf(stderr, "texture confidence out of range: %.6f\n", result.confidence);
+                failed++;
+            }
+        }
+    }
+
+    {
+        double value = 0.0;
+        double confidence = 0.0;
+        if (aether_brightness_metric_for_quality(0, &value, &confidence) != 0 ||
+            std::fabs(value - 0.52) > 1e-9 || std::fabs(confidence - 0.88) > 1e-9) {
+            std::fprintf(stderr, "brightness metric full mismatch value=%.6f confidence=%.6f\n", value, confidence);
+            failed++;
+        }
+        if (aether_brightness_metric_for_quality(2, &value, &confidence) != 0 ||
+            std::fabs(value - 0.48) > 1e-9 || std::fabs(confidence - 0.60) > 1e-9) {
+            std::fprintf(stderr, "brightness metric emergency mismatch value=%.6f confidence=%.6f\n", value, confidence);
+            failed++;
+        }
+    }
+
+    {
+        aether_material_analysis_t material{};
+        const int rc = aether_material_analyze_quality(0, &material);
+        if (rc != 0) {
+            std::fprintf(stderr, "aether_material_analyze_quality failed rc=%d\n", rc);
+            failed++;
+        } else {
+            if (std::fabs(material.specular_percent - 2.0) > 1e-9 ||
+                std::fabs(material.transparent_percent - 5.0) > 1e-9 ||
+                std::fabs(material.textureless_percent - 10.0) > 1e-9 ||
+                material.is_non_lambertian != 0 ||
+                std::fabs(material.confidence - 0.95) > 1e-9 ||
+                material.largest_specular_region != 200) {
+                std::fprintf(stderr, "material analysis full mismatch\n");
+                failed++;
+            }
+        }
     }
 
     return failed;
@@ -1152,6 +1636,97 @@ int test_patch_display_kernel_c_api() {
     return failed;
 }
 
+int test_patch_evidence_kernel_c_api() {
+    int failed = 0;
+
+    aether_patch_evidence_step_input_t in{};
+    in.previous_evidence = 0.86;
+    in.last_update_ms = 1000;
+    in.observation_count = 20;
+    in.error_count = 0;
+    in.error_streak = 0;
+    in.last_good_update_ms = 1000;
+    in.suspect_count = 0;
+    in.ledger_quality = 0.20;
+    in.verdict = 2;  // bad
+    in.timestamp_ms = 1400;
+    in.lock_threshold = 0.85;
+    in.min_observations_for_lock = 20;
+    in.cooldown_seconds = 0.5;
+    in.corpse_protection_seconds = 10.0;
+    in.base_penalty_per_observation = 0.01;
+    in.max_penalty_per_second = 0.30;
+    in.current_frame_rate = 30.0;
+
+    aether_patch_evidence_step_result_t out{};
+    int rc = aether_patch_evidence_step(&in, &out);
+    if (rc != 0) {
+        std::fprintf(stderr, "patch evidence step #1 failed rc=%d\n", rc);
+        failed++;
+    } else {
+        if (out.evidence + 1e-12 < 0.84) {
+            std::fprintf(stderr, "patch evidence locked regression %.6f -> %.6f\n",
+                in.previous_evidence, out.evidence);
+            failed++;
+        }
+        if (out.is_locked == 0) {
+            std::fprintf(stderr, "patch evidence expected locked output\n");
+            failed++;
+        }
+    }
+
+    // Stale corpse protection: bad observation far from last good should not penalize.
+    in.previous_evidence = 0.7;
+    in.observation_count = 10;
+    in.error_count = 0;
+    in.error_streak = 0;
+    in.last_good_update_ms = 1000;
+    in.timestamp_ms = 50000;  // 49s later > corpse protection threshold
+    in.verdict = 2;           // bad
+    rc = aether_patch_evidence_step(&in, &out);
+    if (rc != 0) {
+        std::fprintf(stderr, "patch evidence step #2 failed rc=%d\n", rc);
+        failed++;
+    } else if (std::fabs(out.evidence - in.previous_evidence) > 1e-9) {
+        std::fprintf(stderr, "patch evidence corpse protection mismatch prev=%.6f out=%.6f\n",
+            in.previous_evidence, out.evidence);
+        failed++;
+    }
+
+    // Unknown verdict should be normalized to suspect and flagged.
+    in.previous_evidence = 0.2;
+    in.observation_count = 1;
+    in.error_count = 0;
+    in.error_streak = 0;
+    in.last_good_update_ms = -1;
+    in.suspect_count = 0;
+    in.ledger_quality = 0.9;
+    in.verdict = 3;  // unknown
+    in.timestamp_ms = 60000;
+    rc = aether_patch_evidence_step(&in, &out);
+    if (rc != 0) {
+        std::fprintf(stderr, "patch evidence step #3 failed rc=%d\n", rc);
+        failed++;
+    } else {
+        if (out.verdict_was_unknown == 0) {
+            std::fprintf(stderr, "patch evidence unknown verdict flag missing\n");
+            failed++;
+        }
+        if (out.suspect_count < 1) {
+            std::fprintf(stderr, "patch evidence unknown verdict should increment suspect count\n");
+            failed++;
+        }
+    }
+
+    if (aether_patch_evidence_step(nullptr, &out) == 0 ||
+        aether_patch_evidence_step(&in, nullptr) == 0) {
+        std::fprintf(stderr, "patch evidence null input expected failure\n");
+        failed++;
+    }
+
+    return failed;
+}
+
 int test_visual_style_state_c_api() {
     int failed = 0;
 
@@ -1510,6 +2085,86 @@ int test_capture_style_runtime_c_api() {
     rc = aether_capture_style_runtime_destroy(runtime);
     if (rc != 0) {
         std::fprintf(stderr, "capture style runtime destroy failed rc=%d\n", rc);
+        failed++;
+    }
+
+    return failed;
+}
+
+int test_capture_style_stateless_c_api() {
+    int failed = 0;
+
+    aether_capture_style_runtime_config_t config{};
+    int rc = aether_capture_style_runtime_default_config(&config);
+    if (rc != 0) {
+        std::fprintf(stderr, "capture style stateless default config failed rc=%d\n", rc);
+        return failed + 1;
+    }
+
+    config.freeze_threshold = 0.8f;
+    config.min_thickness = 0.001f;
+    config.max_thickness = 0.01f;
+    config.min_border_width = 1.5f;
+    config.max_border_width = 9.0f;
+
+    aether_capture_style_input_t inputs[2]{};
+    inputs[0].patch_key = 0xAAULL;
+    inputs[0].display = 0.35f;
+    inputs[0].area_sq_m = 0.002f;
+    inputs[1].patch_key = 0xBBULL;
+    inputs[1].display = 0.95f;
+    inputs[1].area_sq_m = 0.006f;
+
+    aether_capture_style_output_t outputs[2]{};
+    rc = aether_capture_style_resolve_stateless(&config, inputs, 2, 0.004f, outputs);
+    if (rc != 0) {
+        std::fprintf(stderr, "capture style stateless resolve failed rc=%d\n", rc);
+        return failed + 1;
+    }
+
+    for (int i = 0; i < 2; ++i) {
+        if (!approx(outputs[i].resolved_display, inputs[i].display, 1e-6f)) {
+            std::fprintf(stderr, "stateless display mismatch idx=%d in=%.6f out=%.6f\n",
+                i, inputs[i].display, outputs[i].resolved_display);
+            failed++;
+        }
+        if (outputs[i].thickness < config.min_thickness - 1e-6f ||
+            outputs[i].thickness > config.max_thickness + 1e-6f) {
+            std::fprintf(stderr, "stateless thickness out of bounds idx=%d value=%.6f\n",
+                i, outputs[i].thickness);
+            failed++;
+        }
+        if (outputs[i].border_width < config.min_border_width - 1e-6f ||
+            outputs[i].border_width > config.max_border_width + 1e-6f) {
+            std::fprintf(stderr, "stateless border out of bounds idx=%d value=%.6f\n",
+                i, outputs[i].border_width);
+            failed++;
+        }
+        if (outputs[i].grayscale < -1e-6f || outputs[i].grayscale > 1.0f + 1e-6f) {
+            std::fprintf(stderr, "stateless grayscale out of range idx=%d value=%.6f\n",
+                i, outputs[i].grayscale);
+            failed++;
+        }
+        if (outputs[i].visual_should_freeze != outputs[i].border_should_freeze) {
+            std::fprintf(stderr, "stateless freeze mismatch idx=%d visual=%d border=%d\n",
+                i, outputs[i].visual_should_freeze, outputs[i].border_should_freeze);
+            failed++;
+        }
+    }
+
+    if (outputs[0].visual_should_freeze != 0 || outputs[1].visual_should_freeze != 1) {
+        std::fprintf(stderr, "stateless freeze threshold mismatch low=%d high=%d\n",
+            outputs[0].visual_should_freeze, outputs[1].visual_should_freeze);
+        failed++;
+    }
+
+    if (aether_capture_style_resolve_stateless(nullptr, inputs, 2, 0.004f, outputs) != 0) {
+        std::fprintf(stderr, "stateless resolve with null config should succeed\n");
+        failed++;
+    }
+    if (aether_capture_style_resolve_stateless(&config, nullptr, 2, 0.004f, outputs) == 0 ||
+        aether_capture_style_resolve_stateless(&config, inputs, 2, 0.004f, nullptr) == 0) {
+        std::fprintf(stderr, "stateless resolve null input expected failure\n");
         failed++;
     }
 
@@ -2309,6 +2964,208 @@ int test_pose_stabilizer_c_api() {
     return failed;
 }
 
+int test_upload_fusion_scheduler_c_api() {
+    int failed = 0;
+
+    aether_upload_fusion_scheduler_input_t input{};
+    input.queue_length_bytes = 2 * 1024 * 1024;
+    input.last_chunk_size_bytes = 2 * 1024 * 1024;
+    input.kalman_predicted_bps = 16'000'000.0;
+    input.kalman_trend = 1;
+    input.ml_predicted_bps = 12'000'000.0;
+    input.has_ml_prediction = 1;
+    input.controller_accuracy_mpc = 1.0;
+    input.controller_accuracy_abr = 1.0;
+    input.controller_accuracy_ewma = 1.0;
+    input.controller_accuracy_kalman = 1.0;
+    input.controller_accuracy_ml = 1.0;
+    input.chunk_size_min_bytes = 256 * 1024;
+    input.chunk_size_default_bytes = 2 * 1024 * 1024;
+    input.chunk_size_max_bytes = 5'242'880;
+    input.chunk_size_step_bytes = 512 * 1024;
+    input.ewma_alpha = 0.3;
+    input.ewma_target_seconds = 3.0;
+    input.ml_norm_bps = 10'000'000.0;
+    input.alignment_bytes = 16 * 1024;
+
+    aether_upload_fusion_scheduler_output_t output{};
+    int rc = aether_upload_fusion_decide_chunk_size(&input, &output);
+    if (rc != 0) {
+        std::fprintf(stderr, "upload fusion scheduler basic call failed rc=%d\n", rc);
+        failed++;
+    } else {
+        if (output.final_chunk_size_bytes < input.chunk_size_min_bytes ||
+            output.final_chunk_size_bytes > input.chunk_size_max_bytes) {
+            std::fprintf(stderr, "upload fusion scheduler output out of range: %d\n", output.final_chunk_size_bytes);
+            failed++;
+        }
+        if ((output.final_chunk_size_bytes % input.alignment_bytes) != 0) {
+            std::fprintf(stderr, "upload fusion scheduler output not aligned: %d\n", output.final_chunk_size_bytes);
+            failed++;
+        }
+    }
+
+    input.queue_length_bytes = 512 * 1024;
+    rc = aether_upload_fusion_decide_chunk_size(&input, &output);
+    if (rc != 0 || output.abr_size_bytes != input.chunk_size_max_bytes) {
+        std::fprintf(stderr, "upload fusion scheduler low-queue ABR mismatch rc=%d abr=%d\n",
+            rc, output.abr_size_bytes);
+        failed++;
+    }
+
+    input.queue_length_bytes = 50 * 1024 * 1024;
+    rc = aether_upload_fusion_decide_chunk_size(&input, &output);
+    if (rc != 0 || output.abr_size_bytes != input.chunk_size_min_bytes) {
+        std::fprintf(stderr, "upload fusion scheduler high-queue ABR mismatch rc=%d abr=%d\n",
+            rc, output.abr_size_bytes);
+        failed++;
+    }
+
+    input.kalman_trend = 0;
+    input.last_chunk_size_bytes = input.chunk_size_default_bytes;
+    rc = aether_upload_fusion_decide_chunk_size(&input, &output);
+    if (rc != 0 ||
+        output.kalman_size_bytes != input.chunk_size_default_bytes + input.chunk_size_step_bytes) {
+        std::fprintf(stderr, "upload fusion scheduler rising trend mismatch rc=%d kalman=%d\n",
+            rc, output.kalman_size_bytes);
+        failed++;
+    }
+
+    input.kalman_trend = 2;
+    rc = aether_upload_fusion_decide_chunk_size(&input, &output);
+    if (rc != 0 ||
+        output.kalman_size_bytes != input.chunk_size_default_bytes - input.chunk_size_step_bytes) {
+        std::fprintf(stderr, "upload fusion scheduler falling trend mismatch rc=%d kalman=%d\n",
+            rc, output.kalman_size_bytes);
+        failed++;
+    }
+
+    if (aether_upload_fusion_decide_chunk_size(nullptr, &output) == 0 ||
+        aether_upload_fusion_decide_chunk_size(&input, nullptr) == 0) {
+        std::fprintf(stderr, "upload fusion scheduler null input expected failure\n");
+        failed++;
+    }
+    return failed;
+}
+
+int test_network_speed_c_api() {
+    int failed = 0;
+
+    aether_network_speed_state_t state{};
+    int rc = aether_network_speed_reset(&state, 30, 60.0);
+    if (rc != 0) {
+        std::fprintf(stderr, "network speed reset failed rc=%d\n", rc);
+        return 1;
+    }
+
+    for (int i = 0; i < 5; ++i) {
+        rc = aether_network_speed_record_sample(
+            &state,
+            250'000,
+            1.0,
+            100.0 + static_cast<double>(i));
+        if (rc != 0) {
+            std::fprintf(stderr, "network speed record failed rc=%d i=%d\n", rc, i);
+            failed++;
+            break;
+        }
+    }
+
+    int speed_class = -1;
+    double speed_mbps = -1.0;
+    int sample_count = -1;
+    int reliable = -1;
+    rc = aether_network_speed_snapshot(
+        &state,
+        105.0,
+        &speed_class,
+        &speed_mbps,
+        &sample_count,
+        &reliable);
+    if (rc != 0) {
+        std::fprintf(stderr, "network speed snapshot failed rc=%d\n", rc);
+        failed++;
+    } else {
+        if (speed_class != AETHER_NETWORK_SPEED_CLASS_SLOW) {
+            std::fprintf(stderr, "network speed class mismatch got=%d\n", speed_class);
+            failed++;
+        }
+        if (reliable != 1 || sample_count != 5 || !(speed_mbps > 0.0)) {
+            std::fprintf(stderr, "network speed snapshot mismatch reliable=%d count=%d mbps=%.6f\n",
+                reliable, sample_count, speed_mbps);
+            failed++;
+        }
+    }
+
+    int chunk_size = 0;
+    rc = aether_network_speed_recommended_chunk_size(
+        speed_class,
+        256 * 1024,
+        2 * 1024 * 1024,
+        5'242'880,
+        &chunk_size);
+    if (rc != 0 || chunk_size != 256 * 1024) {
+        std::fprintf(stderr, "network speed recommended chunk mismatch rc=%d size=%d\n", rc, chunk_size);
+        failed++;
+    }
+
+    int parallel = 0;
+    rc = aether_network_speed_recommended_parallel_count(speed_class, 6, &parallel);
+    if (rc != 0 || parallel != 2) {
+        std::fprintf(stderr, "network speed recommended parallel mismatch rc=%d parallel=%d\n", rc, parallel);
+        failed++;
+    }
+
+    int adaptiveChunk = 0;
+    rc = aether_upload_calculate_chunk_size(
+        AETHER_UPLOAD_CHUNK_STRATEGY_ADAPTIVE,
+        speed_class,
+        chunk_size,
+        2 * 1024 * 1024,
+        5'242'880,
+        &adaptiveChunk);
+    if (rc != 0 || adaptiveChunk != chunk_size) {
+        std::fprintf(stderr, "upload calculate chunk adaptive mismatch rc=%d chunk=%d\n", rc, adaptiveChunk);
+        failed++;
+    }
+
+    int fileChunk = 0;
+    rc = aether_upload_calculate_chunk_size_for_file(
+        adaptiveChunk,
+        256 * 1024,
+        3LL * 1024LL * 1024LL,
+        &fileChunk);
+    if (rc != 0 || fileChunk <= 0 || fileChunk > adaptiveChunk) {
+        std::fprintf(stderr, "upload calculate chunk file mismatch rc=%d chunk=%d\n", rc, fileChunk);
+        failed++;
+    }
+
+    aether_network_speed_statistics_t stats{};
+    rc = aether_network_speed_statistics(&state, 105.0, &stats);
+    if (rc != 0 || stats.sample_count < 2 || !(stats.max_mbps >= stats.min_mbps)) {
+        std::fprintf(stderr, "network speed statistics mismatch rc=%d samples=%d\n", rc, stats.sample_count);
+        failed++;
+    }
+
+    if (aether_network_speed_reset(nullptr, 30, 60.0) == 0 ||
+        aether_network_speed_record_sample(nullptr, 1000, 1.0, 1.0) == 0 ||
+        aether_network_speed_snapshot(nullptr, 1.0, &speed_class, &speed_mbps, &sample_count, &reliable) == 0 ||
+        aether_network_speed_recommended_chunk_size(speed_class, 1, 1, 1, nullptr) == 0 ||
+        aether_network_speed_recommended_parallel_count(speed_class, 6, nullptr) == 0 ||
+        aether_upload_calculate_chunk_size(
+            AETHER_UPLOAD_CHUNK_STRATEGY_ADAPTIVE,
+            speed_class,
+            1,
+            1,
+            1,
+            nullptr) == 0 ||
+        aether_upload_calculate_chunk_size_for_file(1, 1, 1, nullptr) == 0) {
+        std::fprintf(stderr, "network speed null input expected failure\n");
+        failed++;
+    }
+    return failed;
+}
+
 int test_erasure_c_api() {
     int failed = 0;
 
@@ -2884,6 +3741,53 @@ int test_coverage_estimator_c_api() {
         }
     }
 
+    // Fisher path should infer minimum view_count from level when caller leaves
+    // view_count as 0 (bridge-only input on Swift side).
+    aether_coverage_estimator_config_t fisher_cfg{};
+    if (aether_coverage_estimator_default_config(&fisher_cfg) != 0) {
+        std::fprintf(stderr, "coverage fisher default config failed\n");
+        failed++;
+    } else {
+        fisher_cfg.ema_alpha = 1.0;
+        fisher_cfg.max_coverage_delta_per_sec = 100.0;
+        fisher_cfg.view_diversity_boost = 0.0;
+
+        aether_coverage_estimator_t* fisher_estimator = nullptr;
+        if (aether_coverage_estimator_create(&fisher_cfg, &fisher_estimator) != 0 ||
+            fisher_estimator == nullptr) {
+            std::fprintf(stderr, "coverage fisher estimator create failed\n");
+            failed++;
+        } else {
+            aether_coverage_cell_observation_t fisher_cell{};
+            fisher_cell.level = 5u;
+            fisher_cell.occupied = 0.95;
+            fisher_cell.free_mass = 0.0;
+            fisher_cell.unknown = 0.05;
+            fisher_cell.area_weight = 1.0;
+            fisher_cell.excluded = 0;
+            fisher_cell.view_count = 0u;  // Unspecified: infer from level.
+
+            aether_coverage_result_t fisher_result{};
+            const int fisher_rc = aether_coverage_estimator_update(
+                fisher_estimator, &fisher_cell, 1, 1000, &fisher_result);
+            if (fisher_rc != 0) {
+                std::fprintf(stderr, "coverage fisher update failed: rc=%d\n", fisher_rc);
+                failed++;
+            } else if (fisher_result.raw_coverage < 0.80) {
+                std::fprintf(
+                    stderr,
+                    "coverage fisher inferred-view raw mismatch: %.6f\n",
+                    fisher_result.raw_coverage);
+                failed++;
+            }
+
+            if (aether_coverage_estimator_destroy(fisher_estimator) != 0) {
+                std::fprintf(stderr, "coverage fisher destroy failed\n");
+                failed++;
+            }
+        }
+    }
+
     rc = aether_coverage_estimator_update(estimator, nullptr, 1, 1001, &result);
     if (rc == 0) {
         std::fprintf(stderr, "coverage expected invalid argument for null cells\n");
@@ -2920,6 +3824,100 @@ int test_coverage_estimator_c_api() {
         std::fprintf(stderr, "coverage destroy failed\n");
         failed++;
     }
+    return failed;
+}
+
+int test_quantizer_c_api() {
+    int failed = 0;
+
+    const int64_t q1 = aether_quantize_q01(0.123456789012);
+    const double d1 = aether_dequantize_q01(q1);
+    if (std::fabs(d1 - 0.123456789012) > 1e-12) {
+        std::fprintf(stderr, "q01 dequantize mismatch: %.15f\n", d1);
+        failed++;
+    }
+    if (aether_quantized_are_close(q1, q1 + 1, 1) != 1) {
+        std::fprintf(stderr, "q01 are_close should pass\n");
+        failed++;
+    }
+    if (aether_quantized_are_close(q1, q1 + 3, 1) != 0) {
+        std::fprintf(stderr, "q01 are_close should fail\n");
+        failed++;
+    }
+
+    const int64_t qa = aether_quantize_angle_deg(45.125);
+    const double da = aether_dequantize_angle_deg(qa);
+    if (std::fabs(da - 45.125) > 1e-9) {
+        std::fprintf(stderr, "angle dequantize mismatch: %.12f\n", da);
+        failed++;
+    }
+    if (aether_quantize_angle_deg(std::numeric_limits<double>::quiet_NaN()) != 0) {
+        std::fprintf(stderr, "angle quantize NaN should return 0\n");
+        failed++;
+    }
+    return failed;
+}
+
+int test_mobile_frame_pacing_analysis_c_api() {
+    int failed = 0;
+
+    const double regular_intervals[] = {
+        1.0 / 60.0, 1.0 / 60.0, 1.0 / 60.0, 1.0 / 60.0, 1.0 / 60.0
+    };
+    aether_mobile_frame_interval_analysis_t analysis{};
+    int rc = aether_mobile_analyze_frame_intervals(
+        regular_intervals, 5, &analysis);
+    if (rc != 0) {
+        std::fprintf(stderr, "mobile analyze intervals failed: rc=%d\n", rc);
+        failed++;
+    } else {
+        if (analysis.fps < 58.0 || analysis.fps > 62.0) {
+            std::fprintf(stderr, "mobile fps mismatch: %.4f\n", analysis.fps);
+            failed++;
+        }
+        if (analysis.drop_count != 0) {
+            std::fprintf(stderr, "mobile drop_count expected 0, got %d\n", analysis.drop_count);
+            failed++;
+        }
+    }
+
+    aether_mobile_frame_pacing_classification_t classification{};
+    rc = aether_mobile_classify_frame_pacing(&analysis, 5, &classification);
+    if (rc != 0) {
+        std::fprintf(stderr, "mobile classify failed: rc=%d\n", rc);
+        failed++;
+    } else {
+        if (classification.frame_rate_code != 3) {
+            std::fprintf(stderr, "mobile frame_rate_code expected 3 (60fps), got %d\n",
+                classification.frame_rate_code);
+            failed++;
+        }
+        if (classification.rhythm_code != 0) {
+            std::fprintf(stderr, "mobile rhythm_code expected 0 (regular), got %d\n",
+                classification.rhythm_code);
+            failed++;
+        }
+    }
+
+    const double stutter_intervals[] = {
+        1.0 / 60.0, 1.0 / 60.0, 0.050, 1.0 / 60.0, 0.060, 1.0 / 60.0
+    };
+    rc = aether_mobile_analyze_frame_intervals(stutter_intervals, 6, &analysis);
+    if (rc != 0) {
+        std::fprintf(stderr, "mobile analyze stutter failed: rc=%d\n", rc);
+        failed++;
+    } else {
+        rc = aether_mobile_classify_frame_pacing(&analysis, 6, &classification);
+        if (rc != 0) {
+            std::fprintf(stderr, "mobile classify stutter failed: rc=%d\n", rc);
+            failed++;
+        } else if (classification.rhythm_code != 3 && classification.rhythm_code != 2) {
+            std::fprintf(stderr, "mobile rhythm expected dropped/stuttering, got %d\n",
+                classification.rhythm_code);
+            failed++;
+        }
+    }
+
     return failed;
 }
 
@@ -3617,6 +4615,161 @@ int test_scheduler_c_api() {
     return failed;
 }
 
+int test_camera_format_policy_c_api() {
+    int failed = 0;
+
+    int32_t tier = -1;
+    if (aether_camera_format_tier_from_dimensions(3840, 2160, &tier) != 0 ||
+        tier != AETHER_RESOLUTION_TIER_4K) {
+        std::fprintf(stderr, "camera format tier 4K classification mismatch\n");
+        failed++;
+    }
+    if (aether_camera_format_tier_from_dimensions(100, 100, &tier) != 0 ||
+        tier != AETHER_RESOLUTION_TIER_LOWER) {
+        std::fprintf(stderr, "camera format tier lower classification mismatch\n");
+        failed++;
+    }
+
+    aether_camera_format_descriptor_t base{};
+    base.width = 1920;
+    base.height = 1080;
+    base.fps = 30.0;
+    base.hdr_supported = 0;
+    base.hevc_supported = 0;
+    base.weight_fps = 10;
+    base.weight_resolution = 1;
+    base.bonus_hdr = 500;
+    base.bonus_hevc = 200;
+
+    int64_t score_base = 0;
+    if (aether_camera_format_score(&base, &score_base) != 0) {
+        std::fprintf(stderr, "camera format base score failed\n");
+        failed++;
+    }
+
+    aether_camera_format_descriptor_t boosted = base;
+    boosted.hdr_supported = 1;
+    boosted.hevc_supported = 1;
+    boosted.fps = 60.0;
+    int64_t score_boosted = 0;
+    if (aether_camera_format_score(&boosted, &score_boosted) != 0 ||
+        score_boosted <= score_base) {
+        std::fprintf(stderr, "camera format boosted score mismatch\n");
+        failed++;
+    }
+
+    return failed;
+}
+
+int test_scan_state_c_api() {
+    int failed = 0;
+
+    int32_t allowed = 0;
+    if (aether_scan_state_can_transition(
+            AETHER_SCAN_STATE_READY,
+            AETHER_SCAN_STATE_CAPTURING,
+            &allowed) != 0 || allowed != 1) {
+        std::fprintf(stderr, "scan state READY->CAPTURING should be allowed\n");
+        failed++;
+    }
+    if (aether_scan_state_can_transition(
+            AETHER_SCAN_STATE_COMPLETED,
+            AETHER_SCAN_STATE_READY,
+            &allowed) != 0 || allowed != 0) {
+        std::fprintf(stderr, "scan state COMPLETED->READY should be disallowed\n");
+        failed++;
+    }
+
+    int32_t active = 0;
+    if (aether_scan_state_is_active(AETHER_SCAN_STATE_CAPTURING, &active) != 0 || active != 1) {
+        std::fprintf(stderr, "scan state CAPTURING should be active\n");
+        failed++;
+    }
+
+    int32_t can_finish = 0;
+    if (aether_scan_state_can_finish(AETHER_SCAN_STATE_PAUSED, &can_finish) != 0 ||
+        can_finish != 1) {
+        std::fprintf(stderr, "scan state PAUSED should be finishable\n");
+        failed++;
+    }
+    if (aether_scan_state_can_finish(AETHER_SCAN_STATE_READY, &can_finish) != 0 ||
+        can_finish != 0) {
+        std::fprintf(stderr, "scan state READY should not be finishable\n");
+        failed++;
+    }
+
+    return failed;
+}
+
+int test_haptic_policy_c_api() {
+    int failed = 0;
+
+    aether_haptic_policy_t* policy = nullptr;
+    aether_haptic_policy_config_t config{};
+    config.debounce_seconds = 5.0;
+    config.max_per_minute = 4;
+    if (aether_haptic_policy_create(&config, &policy) != 0 || policy == nullptr) {
+        std::fprintf(stderr, "haptic policy create failed\n");
+        return 1;
+    }
+
+    int32_t should_fire = 0;
+    if (aether_haptic_policy_should_fire(
+            policy,
+            AETHER_HAPTIC_PATTERN_MOTION_TOO_FAST,
+            100.0,
+            &should_fire) != 0 || should_fire != 1) {
+        std::fprintf(stderr, "haptic policy first fire should pass\n");
+        failed++;
+    }
+    if (aether_haptic_policy_should_fire(
+            policy,
+            AETHER_HAPTIC_PATTERN_MOTION_TOO_FAST,
+            102.0,
+            &should_fire) != 0 || should_fire != 0) {
+        std::fprintf(stderr, "haptic policy debounce should suppress\n");
+        failed++;
+    }
+    if (aether_haptic_policy_should_fire(
+            policy,
+            AETHER_HAPTIC_PATTERN_MOTION_TOO_FAST,
+            106.0,
+            &should_fire) != 0 || should_fire != 1) {
+        std::fprintf(stderr, "haptic policy post-debounce should pass\n");
+        failed++;
+    }
+
+    (void) aether_haptic_policy_reset(policy);
+    const int patterns[4] = {
+        AETHER_HAPTIC_PATTERN_MOTION_TOO_FAST,
+        AETHER_HAPTIC_PATTERN_BLUR_DETECTED,
+        AETHER_HAPTIC_PATTERN_EXPOSURE_ABNORMAL,
+        AETHER_HAPTIC_PATTERN_SCAN_COMPLETE
+    };
+    for (int i = 0; i < 4; ++i) {
+        if (aether_haptic_policy_should_fire(policy, patterns[i], 200.0 + i, &should_fire) != 0 ||
+            should_fire != 1) {
+            std::fprintf(stderr, "haptic policy rate limit setup failed at i=%d\n", i);
+            failed++;
+        }
+    }
+    if (aether_haptic_policy_should_fire(
+            policy,
+            AETHER_HAPTIC_PATTERN_BLUR_DETECTED,
+            205.0,
+            &should_fire) != 0 || should_fire != 0) {
+        std::fprintf(stderr, "haptic policy rate limit should suppress 5th fire\n");
+        failed++;
+    }
+
+    if (aether_haptic_policy_destroy(policy) != 0) {
+        std::fprintf(stderr, "haptic policy destroy failed\n");
+        failed++;
+    }
+
+    return failed;
+}
+
 }  // namespace
 
 int main() {
@@ -3625,14 +4778,20 @@ int main() {
     failed += test_p6_mesh_stability_c_api();
     failed += test_p6_confidence_decay_c_api();
     failed += test_scan_interaction_kernels_c_api();
+    failed += test_environment_light_estimator_c_api();
+    failed += test_quality_speed_state_c_api();
+    failed += test_motion_speed_c_api();
+    failed += test_image_metric_sink_c_api();
     failed += test_da3_depth_c_api();
     failed += test_pure_vision_runtime_c_api();
     failed += test_zero_fabrication_c_api();
     failed += test_geometry_ml_c_api();
     failed += test_patch_display_kernel_c_api();
+    failed += test_patch_evidence_kernel_c_api();
     failed += test_visual_style_state_c_api();
     failed += test_style_state_batch_c_api();
     failed += test_capture_style_runtime_c_api();
+    failed += test_capture_style_stateless_c_api();
     failed += test_geometry_utils_c_api();
     failed += test_wedge_geometry_c_api();
     failed += test_smart_smoother_c_api();
@@ -3641,6 +4800,8 @@ int main() {
     failed += test_ripple_c_api();
     failed += test_ripple_runtime_c_api();
     failed += test_pose_stabilizer_c_api();
+    failed += test_upload_fusion_scheduler_c_api();
+    failed += test_network_speed_c_api();
     failed += test_erasure_c_api();
     failed += test_volume_controller_hysteresis_c_api();
     failed += test_pr1_admission_kernel_c_api();
@@ -3650,10 +4811,15 @@ int main() {
     failed += test_admission_primitives_c_api();
     failed += test_sha_merkle_evidence_c_api();
     failed += test_coverage_estimator_c_api();
+    failed += test_quantizer_c_api();
+    failed += test_mobile_frame_pacing_analysis_c_api();
     failed += test_f1_c_api();
     failed += test_f3_c_api();
     failed += test_f5_c_api();
     failed += test_f6_c_api();
     failed += test_scheduler_c_api();
+    failed += test_camera_format_policy_c_api();
+    failed += test_scan_state_c_api();
+    failed += test_haptic_policy_c_api();
     return failed;
 }

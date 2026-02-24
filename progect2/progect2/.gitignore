@@ -1,53 +1,21 @@
 .DS_Store
-
-# Xcode
+.build/
+.swiftpm/
 DerivedData/
-*.xcodeproj.broken
-*.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
-
-# Build
+*.xcworkspace/xcuserdata/
 build/
 *.ipa
 *.dSYM.zip
 *.dSYM
-
-# Archive
 *.xcarchive
-
-# TestFlight
-*.app.dSYM
-*.app.zip
-
-# Forbidden: deprecated directory must never exist
-/deprecated/
-
-# SwiftPM
-.build/
-.swiftpm/
-
- fix/pr1-system-adjust
-# python venv
-server/.venv/
-.venv/
-venv/
-
-# Python venv
-server/.venv/
-
-# macOS Finder duplicate file suffix: " 2"
-*\ 2.*
- main
-
-# generated
-artifacts/
-
-# local verification artifacts
-ZSH_RPROMPT_FIX.md
-scripts/verify_zsh_fix.sh
-
-# Compiler/module caches
+*\ 2*
+*\ 3*
 .cache/
 *.pcm
 *.swiftmodule
+aether3d.db
+artifacts/
+Aether3DApp.xcodeproj/
+.deps/

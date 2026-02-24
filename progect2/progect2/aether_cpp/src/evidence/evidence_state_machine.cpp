@@ -172,14 +172,16 @@ ColorState EvidenceStateMachine::compute_raw_state(
     }
 
     // Gate 2: Choquet integral (non-additive multi-dimensional quality)
+    // Apply cross-view consistency penalty from P0 multi-view photometric
     const auto choquet = choquet_aggregate_5(input.dim_scores, choquet_mu_);
-    diag.choquet_value = choquet.aggregated;
+    const double cv_penalty = safe01(input.cross_view_consistency);
+    diag.choquet_value = choquet.aggregated * cv_penalty;
     diag.min_super_dim = 1.0;
     for (int i = 0; i < 5; ++i) {
         diag.min_super_dim = std::min(diag.min_super_dim, choquet.super_dims[i]);
     }
 
-    if (choquet.aggregated >= config_.s5_min_choquet) {
+    if (diag.choquet_value >= config_.s5_min_choquet) {
         diag.choquet_cert = CertifiedState::kCertified;
     } else {
         diag.choquet_cert = CertifiedState::kUncertain;
@@ -201,7 +203,7 @@ ColorState EvidenceStateMachine::compute_raw_state(
     // Positive = all gates passed.  Negative = furthest gate from passing.
     double margins[6] = {
         bel_cov - config_.s4_to_s5_threshold,
-        choquet.aggregated - config_.s5_min_choquet,
+        diag.choquet_value - config_.s5_min_choquet,
         diag.min_super_dim - config_.s5_min_dimension_score,
         config_.s5_max_uncertainty_width - unc_width,
         high_obs - config_.s5_min_high_obs_ratio,

@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// TextureResult - result of texture analysis
 public struct TextureResult: Codable, Sendable {
@@ -45,6 +48,12 @@ public final class TextureAnalyzer: @unchecked Sendable {
     /// - Parameter frame: Frame data
     /// - Returns: Texture result
     public func analyze(frame: FrameData) async -> TextureResult {
+        #if canImport(CAetherNativeBridge)
+        if let native = analyzeNative(frame: frame) {
+            return native
+        }
+        #endif
+
         // Analyze feature count, distribution quality, and repetition penalty.
         let featureStats = calculateFeatureStatistics(frame: frame)
         let featureCount = featureStats.count
@@ -69,6 +78,43 @@ public final class TextureAnalyzer: @unchecked Sendable {
             skipped: false
         )
     }
+
+    #if canImport(CAetherNativeBridge)
+    private func analyzeNative(frame: FrameData) -> TextureResult? {
+        guard
+            let width = frame.width,
+            let height = frame.height,
+            width >= 5,
+            height >= 5,
+            frame.imageData.count >= width * height
+        else {
+            return nil
+        }
+
+        var native = aether_texture_analysis_t()
+        let rc: Int32 = frame.imageData.withUnsafeBytes { raw in
+            let base = raw.bindMemory(to: UInt8.self).baseAddress
+            return aether_texture_analyze_image(
+                base,
+                Int32(width),
+                Int32(height),
+                Int32(width),
+                &native
+            )
+        }
+        guard rc == 0 else {
+            return nil
+        }
+        return TextureResult(
+            rawCount: Int(native.feature_count),
+            spatialSpread: native.spatial_spread,
+            repetitivePenalty: native.repetitive_penalty,
+            score: native.fused_score,
+            confidence: native.confidence,
+            skipped: false
+        )
+    }
+    #endif
     
     /// Calculate feature count
     /// 

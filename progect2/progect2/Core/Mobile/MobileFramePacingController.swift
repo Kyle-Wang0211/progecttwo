@@ -10,16 +10,34 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// Mobile Frame Pacing Controller
 ///
 /// Manages consistent frame delivery for smooth rendering.
 /// 符合 Phase 4: Mobile Optimization - Frame Pacing & Smoothness
 public actor MobileFramePacingController {
-    
-    private var targetFrameTime: TimeInterval = 1.0 / 60.0 // 60 FPS
-    private var frameTimeHistory: [TimeInterval] = []
-    private let historySize = 30
+    private struct NativeRuntimeHandle: @unchecked Sendable {
+        let pointer: OpaquePointer
+    }
+
+    private let nativeRuntime: NativeRuntimeHandle?
+
+    public init() {
+        var runtime: OpaquePointer?
+        let rc = aether_mobile_frame_pacing_create(1.0 / 60.0, 30, &runtime)
+        if rc == 0, let runtime {
+            self.nativeRuntime = NativeRuntimeHandle(pointer: runtime)
+        } else {
+            self.nativeRuntime = nil
+        }
+    }
+
+    deinit {
+        if let nativeRuntime {
+            _ = aether_mobile_frame_pacing_destroy(nativeRuntime.pointer)
+        }
+    }
     
     /// Record frame time and get pacing advice
     /// 
@@ -27,41 +45,24 @@ public actor MobileFramePacingController {
     /// 符合 INV-MOBILE-009: Frame drops < 1% in steady state
     /// 符合 INV-MOBILE-010: Adaptive frame rate (60→30→24) based on load
     public func recordFrameTime(_ frameTime: TimeInterval) async -> FramePacingAdvice {
-        frameTimeHistory.append(frameTime)
-        if frameTimeHistory.count > historySize {
-            frameTimeHistory.removeFirst()
+        guard let nativeRuntime else {
+            return .maintain
         }
-        
-        let variance = calculateVariance()
-        let p95 = calculateP95()
-        
-        // If consistently missing target, reduce quality
-        if p95 > targetFrameTime * 1.2 {
+        var native = aether_mobile_frame_pacing_result_t()
+        let rc = aether_mobile_frame_pacing_record(nativeRuntime.pointer, frameTime, &native)
+        guard rc == 0 else {
+            return .maintain
+        }
+        switch native.advice {
+        case 1:
             return .reduceQuality
-        }
-        
-        // If variance too high, enable frame smoothing
-        if variance > 0.002 { // 2ms
+        case 2:
             return .enableSmoothing
+        case 3:
+            return .increaseQuality
+        default:
+            return .maintain
         }
-        
-        return .maintain
-    }
-    
-    /// Calculate variance
-    private func calculateVariance() -> TimeInterval {
-        guard !frameTimeHistory.isEmpty else { return 0 }
-        let mean = frameTimeHistory.reduce(0, +) / Double(frameTimeHistory.count)
-        let squaredDiffs = frameTimeHistory.map { pow($0 - mean, 2) }
-        return squaredDiffs.reduce(0, +) / Double(frameTimeHistory.count)
-    }
-    
-    /// Calculate 95th percentile
-    private func calculateP95() -> TimeInterval {
-        guard !frameTimeHistory.isEmpty else { return 0 }
-        let sorted = frameTimeHistory.sorted()
-        let index = Int(Double(sorted.count) * 0.95)
-        return sorted[min(index, sorted.count - 1)]
     }
     
     /// Frame pacing advice

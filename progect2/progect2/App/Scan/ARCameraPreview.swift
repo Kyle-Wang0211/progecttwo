@@ -109,7 +109,7 @@ struct ARCameraPreview: UIViewRepresentable {
     // MARK: - Coordinator
 
     /// Bridges ARKit delegate callbacks to ScanViewModel
-    class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate {
+    class Coordinator: NSObject, ARSCNViewDelegate, ARSessionDelegate, @unchecked Sendable {
         let viewModel: ScanViewModel
         #if canImport(MetalKit)
         private weak var overlayView: MTKView?
@@ -159,6 +159,14 @@ struct ARCameraPreview: UIViewRepresentable {
                 overlayPipeline = viewModel.currentRenderPipelineForOverlay()
                 #endif
             }
+        }
+
+        // Suppress ARSCNView default mesh rendering — we render via custom Metal overlay
+        func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+            if anchor is ARMeshAnchor {
+                return SCNNode()  // Empty node suppresses SceneKit's default mesh visualization
+            }
+            return nil
         }
 
         // ARSession error handling

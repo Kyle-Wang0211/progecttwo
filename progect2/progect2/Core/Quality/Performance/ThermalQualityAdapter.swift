@@ -3,17 +3,18 @@
 // Aether3D
 //
 // PR#7 Scan Guidance UI — Thermal Quality Adapter
-// Pure algorithm — Foundation only, NO QuartzCore/Metal
-// v7.0.1: Renamed QualityTier→RenderTier to avoid clash with existing QualityTier
-// v7.0.1: Uses ProcessInfo.processInfo.systemUptime instead of CACurrentMediaTime()
-// v7.0.2: ProcessInfo.ThermalState wrapped in #if os(iOS) || os(macOS)
+// v8.0: Thin bridge over C++ ThermalQualityDecision engine.
+// All algorithm logic (proactive escalation, cool-down, percentile analysis,
+// hysteresis, pass mask) now lives in aether_cpp/src/quality/thermal_quality_decision.cpp.
+// Swift layer: OS thermal state mapping + C API delegation only.
 //
 
 import Foundation
+import CAetherNativeBridge
 
 public final class ThermalQualityAdapter {
 
-    /// Render quality tiers (v7.0.1: renamed from QualityTier to avoid clash)
+    /// Render quality tiers — Swift enum for WedgeGeometryGenerator.LODLevel interop.
     public enum RenderTier: Int, CaseIterable, Sendable {
         case nominal = 0
         case fair = 1
@@ -53,56 +54,72 @@ public final class ThermalQualityAdapter {
         public var enableHaptics: Bool { self.rawValue <= 2 }
     }
 
-    public private(set) var currentTier: RenderTier = .nominal
+    /// Current render tier — read from C++ engine.
+    public var currentTier: RenderTier {
+        var state = aether_thermal_quality_state_t()
+        aether_thermal_quality_state(handle, &state)
+        return RenderTier(rawValue: Int(state.current_tier)) ?? .nominal
+    }
 
-    private var lastTierChangeTime: TimeInterval = 0
-    private var frameTimeSamples: [Double] = []
+    /// Pass mask bitmask from C++ engine.
+    public var passMask: UInt32 {
+        var state = aether_thermal_quality_state_t()
+        aether_thermal_quality_state(handle, &state)
+        return state.pass_mask
+    }
 
-    /// v7.0.1: Cross-platform time source
-    private func currentTime() -> TimeInterval {
-        ProcessInfo.processInfo.systemUptime
+    private var handle: OpaquePointer?
+
+    public init() {
+        var config = aether_thermal_quality_config_t(
+            hysteresis_s: Float(ScanGuidanceConstants.thermalHysteresisS),
+            overshoot_ratio: Float(ScanGuidanceConstants.frameBudgetOvershootRatio),
+            window_frames: Int32(ScanGuidanceConstants.frameBudgetWindowFrames),
+            proactive_threshold: Float(ScanGuidanceConstants.proactiveFairThresholdRatio),
+            cooldown_threshold: Float(ScanGuidanceConstants.coolDownThresholdRatio),
+            cooldown_multiplier: Float(ScanGuidanceConstants.coolDownHysteresisMultiplier),
+            tier_max_triangles: (
+                Int32(ScanGuidanceConstants.thermalNominalMaxTriangles),
+                Int32(ScanGuidanceConstants.thermalFairMaxTriangles),
+                Int32(ScanGuidanceConstants.thermalSeriousMaxTriangles),
+                Int32(ScanGuidanceConstants.thermalCriticalMaxTriangles)
+            ),
+            tier_target_fps: (60, 60, 30, 24)
+        )
+        aether_thermal_quality_create(&config, &handle)
+    }
+
+    deinit {
+        aether_thermal_quality_destroy(handle)
     }
 
     #if os(iOS) || os(macOS)
     public func updateThermalState(_ state: ProcessInfo.ThermalState) {
-        let targetTier: RenderTier
+        let osLevel: Int32
         switch state {
-        case .nominal:  targetTier = .nominal
-        case .fair:     targetTier = .fair
-        case .serious:  targetTier = .serious
-        case .critical: targetTier = .critical
-        @unknown default: targetTier = .fair
+        case .nominal:  osLevel = 0
+        case .fair:     osLevel = 1
+        case .serious:  osLevel = 2
+        case .critical: osLevel = 3
+        @unknown default: osLevel = 1
         }
-        let now = currentTime()
-        if targetTier != currentTier && (now - lastTierChangeTime) > ScanGuidanceConstants.thermalHysteresisS {
-            currentTier = targetTier
-            lastTierChangeTime = now
-        }
+        aether_thermal_quality_update_os(handle, osLevel, ProcessInfo.processInfo.systemUptime)
     }
     #endif
 
     public func updateFrameTiming(gpuDurationMs: Double) {
-        frameTimeSamples.append(gpuDurationMs)
-        if frameTimeSamples.count > ScanGuidanceConstants.frameBudgetWindowFrames {
-            frameTimeSamples.removeFirst()
-        }
-        let targetMs = 1000.0 / Double(currentTier.targetFPS) // LINT:ALLOW
-        let threshold = targetMs * ScanGuidanceConstants.frameBudgetOvershootRatio
-        let sorted = frameTimeSamples.sorted()
-        let p95Index = Int(Double(sorted.count) * 0.95)
-        let p95 = sorted[min(p95Index, sorted.count - 1)]
-        if p95 > threshold {
-            let nextTier = RenderTier(rawValue: min(currentTier.rawValue + 1, 3))!
-            let now = currentTime()
-            if (now - lastTierChangeTime) > ScanGuidanceConstants.thermalHysteresisS {
-                currentTier = nextTier
-                lastTierChangeTime = now
-            }
-        }
+        aether_thermal_quality_update_frame(handle, Float(gpuDurationMs), ProcessInfo.processInfo.systemUptime)
+    }
+
+    public func evaluateProactiveThermal() {
+        aether_thermal_quality_evaluate(handle, ProcessInfo.processInfo.systemUptime)
+    }
+
+    public func evaluateCoolDown() {
+        // C++ evaluate() handles both proactive and cool-down in one call.
     }
 
     public func forceRenderTier(_ tier: RenderTier) {
-        currentTier = tier
-        lastTierChangeTime = currentTime()
+        aether_thermal_quality_force_tier(handle, Int32(tier.rawValue), ProcessInfo.processInfo.systemUptime)
     }
 }

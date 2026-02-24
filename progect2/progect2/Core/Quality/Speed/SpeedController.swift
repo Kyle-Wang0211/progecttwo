@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// SpeedController - manages speed feedback
 /// Separates progress speed (0-100%) and animation speed (5-100%)
@@ -26,46 +27,24 @@ public class SpeedController {
         whiteCoverageIncrement: Int,
         noProgressDurationMs: Int64
     ) {
-        // Calculate progress speed from d(whiteCoverage)/dt over 500ms window
-        // Deterministic baseline calculation.
-        let progressSpeed = min(100.0, Double(whiteCoverageIncrement) * 0.1)
-        currentProgressSpeed = progressSpeed
-        
-        // Map to tier
-        let newTier: SpeedTier
-        if progressSpeed >= 100.0 {
-            newTier = .excellent
-        } else if progressSpeed >= 70.0 {
-            newTier = .good
-        } else if progressSpeed >= 40.0 {
-            newTier = .moderate
-        } else if progressSpeed >= 15.0 {
-            newTier = .poor
-        } else {
-            newTier = .stopped
+        var native = aether_speed_feedback_result_t()
+        let rc = aether_quality_speed_feedback(
+            Int32(whiteCoverageIncrement),
+            noProgressDurationMs,
+            currentAnimationSpeed,
+            QualityPreCheckConstants.SPEED_SMOOTHING_WINDOW_MS,
+            QualityPreCheckConstants.SPEED_MAX_CHANGE_RATE,
+            QualityPreCheckConstants.SPEED_SMOOTHING_WINDOW_MS,
+            QualityPreCheckConstants.NO_PROGRESS_WARNING_MS,
+            &native
+        )
+        guard rc == 0 else {
+            return
         }
-        
-        // Smooth transition (max 30% per 200ms)
-        currentTier = newTier
-        
-        // Map tier to animation speed
-        switch currentTier {
-        case .excellent:
-            currentAnimationSpeed = 100.0
-        case .good:
-            currentAnimationSpeed = 85.0
-        case .moderate:
-            currentAnimationSpeed = 60.0
-        case .poor:
-            currentAnimationSpeed = 35.0
-        case .stopped:
-            currentAnimationSpeed = 5.0  // Never stops
-        }
-        
-        // Log when tier changes to stopped (H1)
-        if currentTier == .stopped {
-            // Log SpeedAuditEntry with triggeringReason
-        }
+
+        currentProgressSpeed = native.progress_speed
+        currentAnimationSpeed = native.animation_speed
+        currentTier = SpeedTier(nativeCode: native.tier) ?? .stopped
     }
     
     /// Get current speed tier

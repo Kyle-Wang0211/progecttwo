@@ -36,7 +36,7 @@ let package = Package(
     // swift-crypto: Required for Linux compatibility (replaces Apple-only CryptoKit)
     // Used for cross-platform SHA-256 hashing and as BLAKE3 fallback
     // Note: blake3-swift removed due to swift-frontend crashes in CI (macOS + Ubuntu)
-    .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0")
+    .package(path: ".deps/swift-crypto")
   ],
   targets: [
     .systemLibrary(
@@ -55,6 +55,7 @@ let package = Package(
         "src/evidence/coverage_estimator.cpp",
         "src/evidence/deterministic_json.cpp",
         "src/evidence/ds_mass_function.cpp",
+        "src/evidence/patch_evidence_kernel.cpp",
         "src/evidence/patch_display_kernel.cpp",
         "src/evidence/pr1_admission_kernel.cpp",
         "src/evidence/pr1_information_gain.cpp",
@@ -79,8 +80,11 @@ let package = Package(
         "src/merkle/merkle_tree_hash.cpp",
         "src/memory/arena.cpp",
         "src/quality/deterministic_triangulator.cpp",
+        "src/quality/environment_light_estimator.cpp",
         "src/quality/image_metrics.cpp",
         "src/quality/motion_analyzer.cpp",
+        "src/quality/motion_speed.cpp",
+        "src/quality/speed_state.cpp",
         "src/quality/photometric_checker.cpp",
         "src/quality/geometry_ml_fusion.cpp",
         "src/quality/pure_vision_runtime.cpp",
@@ -106,6 +110,8 @@ let package = Package(
         "src/tsdf/isotropic_remesher.cpp",
         "src/tsdf/marching_cubes.cpp",
         "src/tsdf/mesh_extraction_scheduler.cpp",
+        "src/tsdf/mesh_fiedler.cpp",
+        "src/tsdf/mesh_topology.cpp",
         "src/tsdf/depth_filter.cpp",
         "src/tsdf/icp_registration.cpp",
         "src/tsdf/loop_detector.cpp",
@@ -120,7 +126,9 @@ let package = Package(
         "src/tsdf/volume_controller.cpp",
         "src/tsdf_volume.cpp",
         "src/upload/erasure_coding.cpp",
+        "src/upload/fusion_scheduler.cpp",
         "src/upload/kalman_bandwidth.cpp",
+        "src/upload/network_speed_monitor.cpp",
         "src/geo/haversine.cpp",
         "src/geo/asc_cell.cpp",
         "src/geo/rtree.cpp",
@@ -139,12 +147,24 @@ let package = Package(
         "src/geo/temporal_index.cpp",
         "src/geo/temporal_cluster.cpp",
         "src/geo/cross_temporal_gs.cpp",
+        "src/render/oklab_color.cpp",
+        "src/render/spz_compressor.cpp",
+        "src/quality/thermal_quality_decision.cpp",
+        "src/quality/multiview_photometric.cpp",
+        "src/quality/bayesian_quality_network.cpp",
+        "src/quality/multiscale_image_quality.cpp",
+        "src/evidence/choquet_learner.cpp",
+        "src/evidence/mc_uncertainty.cpp",
+        "src/render/pbr_material.cpp",
         "src/c_api.cpp",
         "src/geo_c_api.cpp"
       ],
       publicHeadersPath: "include",
       cxxSettings: [
         .headerSearchPath("include")
+      ],
+      linkerSettings: [
+        .linkedLibrary("z")
       ]
     ),
     .target(

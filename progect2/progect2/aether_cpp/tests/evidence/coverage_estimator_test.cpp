@@ -39,12 +39,15 @@ int test_level_weighting_and_smoothing() {
         std::fprintf(stderr, "coverage update failed\n");
         return 1;
     }
-    // L0 weight=0.00, L6 weight=1.00 → raw = (0*1 + 1*1) / 2 = 0.5
-    if (!approx(result.raw_coverage, 0.5, 1e-6)) {
+    // L0 view_count defaults to 0, L6 defaults to 25 (view-diversity boost path).
+    // Effective areas: A0 = 1.0, A6 = 1.15, weighted occupied numerator = 1.15
+    // raw = 1.15 / (1.0 + 1.15) = 0.53488372
+    constexpr double expected_raw = 1.15 / 2.15;
+    if (!approx(result.raw_coverage, expected_raw, 1e-6)) {
         std::fprintf(stderr, "unexpected raw coverage: %f\n", result.raw_coverage);
         failed++;
     }
-    if (!approx(result.coverage, 0.5, 1e-6)) {
+    if (!approx(result.coverage, expected_raw, 1e-6)) {
         std::fprintf(stderr, "unexpected coverage output: %f\n", result.coverage);
         failed++;
     }

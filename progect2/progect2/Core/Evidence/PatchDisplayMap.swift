@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Display entry for a patch
 public struct DisplayEntry: Codable, Sendable {
@@ -44,16 +47,16 @@ public struct DisplayEntry: Codable, Sendable {
 }
 
 /// Patch display evidence storage
-/// 
+///
 /// INVARIANTS:
 /// - Display evidence NEVER decreases per patch
-/// - Uses EMA smoothing for gradual updates
+/// - Uses core C++ patch-display kernel (EMA + lock acceleration) as SSOT
 /// - Locked patches accelerate display growth (but remain monotonic)
 public final class PatchDisplayMap {
-    
+
     /// Patch ID → Display Entry storage
     private var displays: [String: DisplayEntry] = [:]
-    
+
     public init() {}
     
     /// Update display evidence for a patch
@@ -80,35 +83,32 @@ public final class PatchDisplayMap {
         
         let prevDisplay = entry.display
         let prevEma = entry.ema
-        
+
         // Clamp target to [0, 1]
         let clampedTarget = max(0.0, min(1.0, target))
-        
-        // EMA update: ema = alpha * target + (1 - alpha) * prevEma
-        let alpha = constants.patchDisplayAlpha
-        let newEma = alpha * clampedTarget + (1.0 - alpha) * prevEma
-        
-        // Compute base next display (from EMA)
-        let baseNext = newEma
-        
-        // Apply locked acceleration if applicable
+
+        // Core-layer SSOT path for display evolution.
         let nextDisplay: Double
-        if isLocked {
-            // Locked acceleration: multiply growth delta by acceleration factor
-            let growthDelta = baseNext - prevDisplay
-            let acceleratedDelta = growthDelta * constants.patchDisplayLockedAcceleration
-            let acceleratedNext = prevDisplay + acceleratedDelta
-            
-            // Clamp to [0, 1] and ensure monotonic
-            nextDisplay = max(prevDisplay, min(1.0, acceleratedNext))
+        let nextEma: Double
+        if let step = NativePatchDisplayBridge.patchDisplayStep(
+            previousDisplay: prevDisplay,
+            previousEMA: prevEma,
+            observationCount: entry.observationCount,
+            target: clampedTarget,
+            isLocked: isLocked,
+            config: nil
+        ) {
+            nextDisplay = max(prevDisplay, min(1.0, step.display))
+            nextEma = max(0.0, min(1.0, step.ema))
         } else {
-            // Normal: just ensure monotonic
-            nextDisplay = max(prevDisplay, min(1.0, baseNext))
+            // Fail-closed when native bridge is unavailable: never regress and never recompute style in Swift.
+            nextDisplay = prevDisplay
+            nextEma = prevEma
         }
-        
+
         // Update entry
         entry.display = nextDisplay
-        entry.ema = newEma
+        entry.ema = nextEma
         entry.observationCount += 1
         entry.lastUpdateMs = timestampMs
         
@@ -139,11 +139,14 @@ public final class PatchDisplayMap {
         let local = display(for: patchId)
         let clampedGlobal = max(0.0, min(1.0, globalDisplay))
         
-        // Hybrid formula: local * localWeight + global * globalWeight
-        let color = local * constants.colorEvidenceLocalWeight + clampedGlobal * constants.colorEvidenceGlobalWeight
-        
-        // Clamp to [0, 1]
-        return max(0.0, min(1.0, color))
+        if let color = NativePatchDisplayBridge.patchColorEvidence(
+            localDisplay: local,
+            globalDisplay: clampedGlobal,
+            config: nil
+        ) {
+            return max(0.0, min(1.0, color))
+        }
+        return 0.0
     }
     
     /// Get all entries sorted by patch ID (deterministic)

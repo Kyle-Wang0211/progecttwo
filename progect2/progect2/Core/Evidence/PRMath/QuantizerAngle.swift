@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// Type-safe quantizer for angle values
 ///
@@ -21,6 +24,12 @@ public enum QuantizerAngle {
     public static let scale: Double = 1e9
     public static let scaleInt64: Int64 = 1_000_000_000
 
+    @inline(__always)
+    private static func failClosed<T>(_ fallback: T) -> T {
+        assertionFailure("CAetherNativeBridge is required for QuantizerAngle kernels")
+        return fallback
+    }
+
     /// Quantize angle in degrees to Int64
     ///
     /// PRECONDITION: value is finite
@@ -30,8 +39,12 @@ public enum QuantizerAngle {
     /// - Returns: Quantized Int64 value
     @inlinable
     public static func quantize(_ degrees: Double) -> Int64 {
-        guard degrees.isFinite else { return 0 }
-        return Int64((degrees * scale).rounded(.toNearestOrAwayFromZero))
+        #if canImport(CAetherNativeBridge)
+        return aether_quantize_angle_deg(degrees)
+        #else
+        _ = degrees
+        return failClosed(0)
+        #endif
     }
 
     /// Dequantize Int64 back to Double
@@ -40,6 +53,11 @@ public enum QuantizerAngle {
     /// - Returns: Angle in degrees
     @inlinable
     public static func dequantize(_ q: Int64) -> Double {
-        return Double(q) / scale
+        #if canImport(CAetherNativeBridge)
+        return aether_dequantize_angle_deg(q)
+        #else
+        _ = q
+        return failClosed(0.0)
+        #endif
     }
 }

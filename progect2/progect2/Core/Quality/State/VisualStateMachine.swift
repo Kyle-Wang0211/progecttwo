@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// VisualStateMachine - manages VisualState transitions
 /// Never retreats: uses max() to enforce forward progression
@@ -26,7 +27,15 @@ public class VisualStateMachine {
     /// Update visual state (never retreats)
     /// Uses max() to enforce forward progression
     public func updateState(_ newState: VisualState) -> VisualState {
-        let updatedState = max(currentState, newState)
+        var outState = currentState.nativeCode
+        let rc = aether_quality_visual_state_update(
+            currentState.nativeCode,
+            newState.nativeCode,
+            &outState
+        )
+        guard rc == 0, let updatedState = VisualState(nativeCode: outState) else {
+            return currentState
+        }
         currentState = updatedState
         return updatedState
     }
@@ -36,4 +45,3 @@ public class VisualStateMachine {
         currentState = .black
     }
 }
-

@@ -139,28 +139,12 @@ public class PhotometricConsistencyChecker {
                 )
             }
         }
-
-        let luminanceVar = luminanceHistory.variance()
-        let labVar = labHistory.labVariance()
-        let expConsistency = exposureHistory.consistencyRatio()
-        
-        // H1: NaN/Inf check
-        let safeLuminanceVar = luminanceVar.isNaN || luminanceVar.isInfinite ? 0.0 : luminanceVar
-        let safeLabVar = labVar.isNaN || labVar.isInfinite ? 0.0 : labVar
-        let safeExpConsistency = expConsistency.isNaN || expConsistency.isInfinite ? 1.0 : expConsistency
-        
-        let isConsistent = safeLuminanceVar <= FrameQualityConstants.MAX_LUMINANCE_VARIANCE_FOR_NERF
-            && safeLabVar <= FrameQualityConstants.MAX_LAB_VARIANCE_FOR_NERF
-            && safeExpConsistency >= FrameQualityConstants.MIN_EXPOSURE_CONSISTENCY_RATIO
-        
-        let confidence = Double(luminanceHistory.currentCount) / Double(windowSize)
-        
         return PhotometricResult(
-            luminanceVariance: safeLuminanceVar,
-            labVariance: safeLabVar,
-            exposureConsistency: safeExpConsistency,
-            isConsistent: isConsistent,
-            confidence: min(1.0, confidence)
+            luminanceVariance: .infinity,
+            labVariance: .infinity,
+            exposureConsistency: 0.0,
+            isConsistent: false,
+            confidence: 0.0
         )
     }
     

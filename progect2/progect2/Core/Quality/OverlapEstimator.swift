@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// Overlap Estimator
 ///
@@ -24,48 +25,39 @@ public actor OverlapEstimator {
     ///   - direction: Motion direction
     /// - Returns: Overlap ratio (0.0 to 1.0)
     public func estimateOverlap(frame1: FrameData, frame2: FrameData, direction: MotionDirection) async -> Double {
-        // Deterministic overlap proxy based on frame intensity drift + temporal spacing.
-        // This keeps behavior replayable while avoiding non-deterministic feature extractors.
-        let baseline: Double
-        switch direction {
-        case .forward:
-            baseline = QualityThresholds.frameOverlapForward
-        case .side:
-            baseline = QualityThresholds.frameOverlapSide
-        case .backward:
-            baseline = QualityThresholds.frameOverlapForward
-        }
-
-        let photometricDelta = sampleAbsoluteDifference(frame1.imageData, frame2.imageData)
-        let photometricPenalty = min(0.45, photometricDelta * 0.55)
-
         let dt = abs(frame2.timestamp.timeIntervalSince(frame1.timestamp))
-        let temporalPenalty = min(0.25, dt / 8.0)
-
-        let overlap = baseline - photometricPenalty - temporalPenalty
-        return max(0.0, min(1.0, overlap))
-    }
-
-    private func sampleAbsoluteDifference(_ lhs: Data, _ rhs: Data) -> Double {
-        let count = min(lhs.count, rhs.count)
-        guard count > 0 else { return 0.0 }
-
-        let sampleCount = min(1024, count)
-        let stride = max(1, count / sampleCount)
-
-        var diffSum = 0.0
-        var used = 0
-        var index = 0
-        while index < count, used < sampleCount {
-            let a = Double(lhs[lhs.index(lhs.startIndex, offsetBy: index)])
-            let b = Double(rhs[rhs.index(rhs.startIndex, offsetBy: index)])
-            diffSum += abs(a - b)
-            used += 1
-            index += stride
+        let directionCode: Int32
+        switch direction {
+        case .forward: directionCode = 0
+        case .side: directionCode = 1
+        case .backward: directionCode = 2
         }
 
-        guard used > 0 else { return 0.0 }
-        return diffSum / (Double(used) * 255.0)
+        var native = aether_mobile_overlap_result_t()
+        let rc = frame1.imageData.withUnsafeBytes { frame1Buffer in
+            frame2.imageData.withUnsafeBytes { frame2Buffer in
+                aether_mobile_estimate_overlap(
+                    frame1Buffer.bindMemory(to: UInt8.self).baseAddress,
+                    Int32(frame1.imageData.count),
+                    frame2Buffer.bindMemory(to: UInt8.self).baseAddress,
+                    Int32(frame2.imageData.count),
+                    directionCode,
+                    dt,
+                    &native
+                )
+            }
+        }
+        guard rc == 0, native.overlap_ratio.isFinite else {
+            // Fail-closed: return SSOT baseline threshold for requested direction.
+            switch direction {
+            case .forward, .backward:
+                return QualityThresholds.frameOverlapForward
+            case .side:
+                return QualityThresholds.frameOverlapSide
+            }
+        }
+
+        return max(0.0, min(1.0, native.overlap_ratio))
     }
 }
 

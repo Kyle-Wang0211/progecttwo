@@ -10,6 +10,9 @@
 //
 
 import Foundation
+#if canImport(CAetherNativeBridge)
+import CAetherNativeBridge
+#endif
 
 /// SaturationResult - result of exposure analysis
 public struct SaturationResult: Codable, Sendable {
@@ -37,6 +40,12 @@ public final class ExposureAnalyzer: @unchecked Sendable {
     /// - Parameter frame: Frame data
     /// - Returns: Saturation result
     public func analyze(frame: FrameData) async -> SaturationResult {
+        #if canImport(CAetherNativeBridge)
+        if let native = analyzeNative(frame: frame) {
+            return native
+        }
+        #endif
+
         // Analyze overexposure and underexposure
         let overexposePct = calculateOverexposure(frame: frame)
         let underexposePct = calculateUnderexposure(frame: frame)
@@ -48,6 +57,40 @@ public final class ExposureAnalyzer: @unchecked Sendable {
             hasLargeBlownRegion: hasLargeBlownRegion
         )
     }
+
+    #if canImport(CAetherNativeBridge)
+    private func analyzeNative(frame: FrameData) -> SaturationResult? {
+        guard
+            let width = frame.width,
+            let height = frame.height,
+            width > 0,
+            height > 0,
+            frame.imageData.count >= width * height
+        else {
+            return nil
+        }
+
+        var native = aether_exposure_analysis_t()
+        let rc: Int32 = frame.imageData.withUnsafeBytes { raw in
+            let base = raw.bindMemory(to: UInt8.self).baseAddress
+            return aether_exposure_analyze_image(
+                base,
+                Int32(width),
+                Int32(height),
+                Int32(width),
+                &native
+            )
+        }
+        guard rc == 0 else {
+            return nil
+        }
+        return SaturationResult(
+            overexposePct: native.overexpose_ratio,
+            underexposePct: native.underexpose_ratio,
+            hasLargeBlownRegion: native.has_large_blown_region != 0
+        )
+    }
+    #endif
     
     /// Calculate overexposure percentage
     private func calculateOverexposure(frame: FrameData) -> Double {

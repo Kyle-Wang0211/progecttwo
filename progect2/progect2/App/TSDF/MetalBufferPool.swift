@@ -9,6 +9,7 @@
 
 import Metal
 import Foundation
+import Aether3DCore
 
 /// Triple-buffered Metal buffer pool for per-frame data
 ///
@@ -85,4 +86,3 @@ public final class MetalBufferPool {
 public enum MetalBufferPoolError: Error {
     case bufferAllocationFailed
 }
-

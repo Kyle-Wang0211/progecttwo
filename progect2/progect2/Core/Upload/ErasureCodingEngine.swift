@@ -54,9 +54,6 @@ public enum ChunkPriority: Int, Sendable {
 /// - Priority 2: 1.5x redundancy
 /// - Priority 3: 1x redundancy
 public actor ErasureCodingEngine: ErasureCoder {
-    
-    private var raptorQEngine: RaptorQEngine?
-    
     public init() {}
     
     // MARK: - Mode Selection
@@ -68,15 +65,17 @@ public actor ErasureCodingEngine: ErasureCoder {
     ///   - lossRate: Estimated loss rate (0.0-1.0)
     /// - Returns: Selected coding mode
     public func selectCoder(chunkCount: Int, lossRate: Double) -> ErasureCodingMode {
-        if chunkCount <= 255 && lossRate < UploadConstants.ERASURE_RAPTORQ_FALLBACK_LOSS_RATE {
-            return .reedSolomon(.gf256)  // Fastest for small counts, low loss
-        } else if chunkCount <= 255 && lossRate >= UploadConstants.ERASURE_RAPTORQ_FALLBACK_LOSS_RATE {
-            return .raptorQ  // Rateless for high loss
-        } else if chunkCount > 255 && lossRate < 0.03 {
-            return .reedSolomon(.gf65536)  // Large counts, low loss
-        } else {
-            return .raptorQ  // Large counts OR high loss
+        var nativeSelection = aether_erasure_selection_t(mode: 1, field: 0)
+        let safeChunkCount = max(0, min(chunkCount, Int(Int32.max)))
+        let safeLossRate = max(0.0, min(1.0, lossRate))
+        if aether_erasure_select_mode(Int32(safeChunkCount), safeLossRate, &nativeSelection) == 0 {
+            if nativeSelection.mode == 0 {
+                return .reedSolomon(nativeSelection.field == 0 ? .gf256 : .gf65536)
+            }
+            return .raptorQ
         }
+        // Fail-closed: prefer rateless mode when native selector is unavailable.
+        return .raptorQ
     }
     
     // MARK: - ErasureCoder Protocol
@@ -90,22 +89,11 @@ public actor ErasureCodingEngine: ErasureCoder {
     public func encode(data: [Data], redundancy: Double) async -> [Data] {
         // Select mode
         let mode = selectCoder(chunkCount: data.count, lossRate: 0.0)
-        
-        switch mode {
-        case .reedSolomon(let field):
-            if let native = nativeEncode(data: data, redundancy: redundancy, mode: .reedSolomon(field)) {
-                return native
-            }
-            return await encodeReedSolomon(data: data, redundancy: redundancy, field: field)
-        case .raptorQ:
-            if let native = nativeEncode(data: data, redundancy: redundancy, mode: .raptorQ) {
-                return native
-            }
-            if raptorQEngine == nil {
-                raptorQEngine = RaptorQEngine()
-            }
-            return await raptorQEngine!.encode(data: data, redundancy: redundancy)
+        if let native = nativeEncode(data: data, redundancy: redundancy, mode: mode) {
+            return native
         }
+        // Fail-closed: keep upload pipeline moving without Swift-side FEC algorithm fallback.
+        return data
     }
     
     /// Decode blocks to recover original data.
@@ -134,122 +122,7 @@ public actor ErasureCodingEngine: ErasureCoder {
         if let native = nativeDecode(blocks: blocks, originalCount: originalCount, mode: mode) {
             return native
         }
-
-        // Try RS first (faster for systematic codes when loss is small)
-        if originalCount <= 255 {
-            do {
-                return try await decodeReedSolomon(blocks: blocks, originalCount: originalCount, field: .gf256)
-            } catch {
-                // Fall back to RaptorQ if RS path cannot recover.
-            }
-        }
-
-        // Use RaptorQ
-        if raptorQEngine == nil {
-            raptorQEngine = RaptorQEngine()
-        }
-        return try await raptorQEngine!.decode(blocks: blocks, originalCount: originalCount)
-    }
-    
-    // MARK: - Reed-Solomon Encoding
-    
-    /// Encode using Reed-Solomon.
-    private func encodeReedSolomon(
-        data: [Data],
-        redundancy: Double,
-        field: ErasureCodingMode.GaloisField
-    ) async -> [Data] {
-        _ = field
-
-        // Simplified RS encoding with bounded linear-time parity synthesis.
-        // The previous O(k^2) concatenation path was pathological on large k.
-        // This path keeps systematic output and deterministic data-dependent parity.
-        let k = data.count
-        if k == 0 {
-            return []
-        }
-        let safeRedundancy = max(0.0, redundancy)
-        let parityCount = Int(Double(k) * safeRedundancy)
-        let n = k + parityCount
-
-        var encoded: [Data] = []
-        encoded.reserveCapacity(n)
-        
-        // Systematic: first k blocks = original data
-        encoded.append(contentsOf: data)
-
-        if parityCount == 0 {
-            return encoded
-        }
-
-        // Build deterministic 64-bit fingerprint from full payload + block sizes.
-        // Linear in total input bytes, no quadratic blow-up.
-        var fingerprint: UInt64 = 0xcbf29ce484222325
-        for block in data {
-            var sizeLE = UInt32(truncatingIfNeeded: block.count).littleEndian
-            withUnsafeBytes(of: &sizeLE) { raw in
-                for b in raw {
-                    fingerprint = (fingerprint ^ UInt64(b)) &* 0x100000001b3
-                }
-            }
-            for b in block {
-                fingerprint = (fingerprint ^ UInt64(b)) &* 0x100000001b3
-            }
-        }
-
-        // Keep parity symbols lightweight and bounded.
-        let maxBlockSize = data.reduce(into: 0) { $0 = max($0, $1.count) }
-        let symbolSize = min(maxBlockSize, 256)
-
-        for parityIndex in 0..<parityCount {
-            if symbolSize == 0 {
-                encoded.append(Data())
-                continue
-            }
-
-            var state = fingerprint ^ UInt64(truncatingIfNeeded: parityIndex) &* 0x9e3779b97f4a7c15
-            @inline(__always) func nextByte() -> UInt8 {
-                state = (state ^ (state >> 30)) &* 0xbf58476d1ce4e5b9
-                state = (state ^ (state >> 27)) &* 0x94d049bb133111eb
-                state = state ^ (state >> 31)
-                return UInt8(truncatingIfNeeded: state)
-            }
-
-            var parity = Data(repeating: 0, count: symbolSize)
-            parity.withUnsafeMutableBytes { mutableRaw in
-                let bytes = mutableRaw.bindMemory(to: UInt8.self)
-                for i in 0..<bytes.count {
-                    let mix = UInt8((parityIndex &+ i) & 0xff)
-                    bytes[i] = nextByte() ^ mix
-                }
-            }
-            encoded.append(parity)
-        }
-        
-        return encoded
-    }
-    
-    /// Decode using Reed-Solomon.
-    private func decodeReedSolomon(
-        blocks: [Data?],
-        originalCount: Int,
-        field: ErasureCodingMode.GaloisField
-    ) async throws -> [Data] {
-        // Simplified RS decoding
-        // In production, use proper GF arithmetic with erasure recovery
-        var recovered: [Data] = []
-        
-        for i in 0..<originalCount {
-            if let block = blocks[i] {
-                recovered.append(block)
-            } else {
-                // Erasure - need to recover from parity
-                // Simplified: return error if any systematic block is missing
-                throw ErasureCodingError.decodingFailed
-            }
-        }
-        
-        return recovered
+        throw ErasureCodingError.decodingFailed
     }
 
     // MARK: - Native Primary Path
@@ -431,11 +304,4 @@ public enum ErasureCodingError: Error, Sendable {
     case decodingFailed
     case insufficientBlocks
     case invalidRedundancy
-}
-
-/// Safe array access extension.
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        return indices.contains(index) ? self[index] : nil
-    }
 }

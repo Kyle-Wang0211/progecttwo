@@ -103,6 +103,11 @@ public actor ByzantineVerifier {
     /// Calculate sample count: max(ceil(log2(n)), ceil(sqrt(n/10))).
     private func calculateSampleCount(totalChunks: Int) -> Int {
         guard totalChunks > 0 else { return 0 }
+        // For small uploads, verify all chunks to remove sampling blind spots and
+        // avoid probabilistic misses on partially missing proofs.
+        if totalChunks <= 32 {
+            return totalChunks
+        }
         let log2Count = Int(ceil(log2(Double(totalChunks))))
         let sqrtCount = Int(ceil(sqrt(Double(totalChunks) / 10.0)))
         return max(1, max(log2Count, sqrtCount))

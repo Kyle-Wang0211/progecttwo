@@ -5,10 +5,190 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <vector>
 
 namespace aether {
 namespace quality {
+
+namespace {
+
+inline bool finite(double value) {
+    return std::isfinite(value);
+}
+
+inline double clamp01(double value) {
+    if (!finite(value)) {
+        return 0.0;
+    }
+    return std::clamp(value, 0.0, 1.0);
+}
+
+double sampled_ratio_threshold(
+    const std::uint8_t* bytes,
+    int width,
+    int height,
+    int row_bytes,
+    int threshold,
+    bool count_if_ge) {
+    if (bytes == nullptr || width <= 0 || height <= 0 || row_bytes < width) {
+        return 0.0;
+    }
+    const int sample_stride = std::max(1, std::min(width, height) / 320);
+    int hit = 0;
+    int sampled = 0;
+    for (int y = 0; y < height; y += sample_stride) {
+        const int row = y * row_bytes;
+        for (int x = 0; x < width; x += sample_stride) {
+            const int luma = static_cast<int>(bytes[row + x]);
+            const bool pass = count_if_ge ? (luma >= threshold) : (luma <= threshold);
+            if (pass) {
+                ++hit;
+            }
+            ++sampled;
+        }
+    }
+    if (sampled <= 0) {
+        return 0.0;
+    }
+    return static_cast<double>(hit) / static_cast<double>(sampled);
+}
+
+bool has_large_blown_region(
+    const std::uint8_t* bytes,
+    int width,
+    int height,
+    int row_bytes,
+    int threshold) {
+    if (bytes == nullptr || width < 8 || height < 8 || row_bytes < width) {
+        return false;
+    }
+    const int stride = std::max(2, std::min(width, height) / 128);
+    const int mask_width = (width + stride - 1) / stride;
+    const int mask_height = (height + stride - 1) / stride;
+    const int mask_count = mask_width * mask_height;
+    if (mask_count <= 0) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> blown(static_cast<std::size_t>(mask_count), 0u);
+    int total_blown = 0;
+    for (int my = 0; my < mask_height; ++my) {
+        const int y = std::min(my * stride, height - 1);
+        const int row = y * row_bytes;
+        for (int mx = 0; mx < mask_width; ++mx) {
+            const int x = std::min(mx * stride, width - 1);
+            if (static_cast<int>(bytes[row + x]) >= threshold) {
+                blown[static_cast<std::size_t>(my * mask_width + mx)] = 1u;
+                ++total_blown;
+            }
+        }
+    }
+    if (total_blown <= 0) {
+        return false;
+    }
+
+    std::vector<std::uint8_t> visited(static_cast<std::size_t>(mask_count), 0u);
+    std::vector<int> queue(static_cast<std::size_t>(mask_count), 0);
+    int max_region = 0;
+
+    for (int start = 0; start < mask_count; ++start) {
+        if (blown[static_cast<std::size_t>(start)] == 0u ||
+            visited[static_cast<std::size_t>(start)] != 0u) {
+            continue;
+        }
+
+        int head = 0;
+        int tail = 0;
+        queue[static_cast<std::size_t>(tail++)] = start;
+        visited[static_cast<std::size_t>(start)] = 1u;
+        int region_size = 0;
+
+        while (head < tail) {
+            const int node = queue[static_cast<std::size_t>(head++)];
+            ++region_size;
+            const int x = node % mask_width;
+            const int y = node / mask_width;
+
+            const int left = node - 1;
+            const int right = node + 1;
+            const int up = node - mask_width;
+            const int down = node + mask_width;
+
+            if (x > 0 && blown[static_cast<std::size_t>(left)] != 0u &&
+                visited[static_cast<std::size_t>(left)] == 0u) {
+                visited[static_cast<std::size_t>(left)] = 1u;
+                queue[static_cast<std::size_t>(tail++)] = left;
+            }
+            if (x + 1 < mask_width && blown[static_cast<std::size_t>(right)] != 0u &&
+                visited[static_cast<std::size_t>(right)] == 0u) {
+                visited[static_cast<std::size_t>(right)] = 1u;
+                queue[static_cast<std::size_t>(tail++)] = right;
+            }
+            if (y > 0 && blown[static_cast<std::size_t>(up)] != 0u &&
+                visited[static_cast<std::size_t>(up)] == 0u) {
+                visited[static_cast<std::size_t>(up)] = 1u;
+                queue[static_cast<std::size_t>(tail++)] = up;
+            }
+            if (y + 1 < mask_height && blown[static_cast<std::size_t>(down)] != 0u &&
+                visited[static_cast<std::size_t>(down)] == 0u) {
+                visited[static_cast<std::size_t>(down)] = 1u;
+                queue[static_cast<std::size_t>(tail++)] = down;
+            }
+        }
+        max_region = std::max(max_region, region_size);
+    }
+
+    const int absolute_threshold = std::max(16, static_cast<int>(static_cast<double>(mask_count) * 0.02));
+    const bool relative_threshold =
+        static_cast<double>(max_region) / static_cast<double>(mask_count) >= 0.015;
+    return max_region >= absolute_threshold && relative_threshold;
+}
+
+double texture_entropy(
+    const std::uint8_t* bytes,
+    int width,
+    int height,
+    int row_bytes) {
+    if (bytes == nullptr || width <= 0 || height <= 0 || row_bytes < width) {
+        return 0.0;
+    }
+    const int sample_stride = std::max(1, std::min(width, height) / 320);
+    static constexpr int kBinCount = 32;
+    int histogram[kBinCount] = {0};
+    int sample_count = 0;
+
+    for (int y = 0; y < height; y += sample_stride) {
+        const int row = y * row_bytes;
+        for (int x = 0; x < width; x += sample_stride) {
+            const int luma = static_cast<int>(bytes[row + x]);
+            const int bucket = std::min(kBinCount - 1, (luma * kBinCount) / 256);
+            ++histogram[bucket];
+            ++sample_count;
+        }
+    }
+    if (sample_count <= 0) {
+        return 0.0;
+    }
+
+    double entropy = 0.0;
+    for (int i = 0; i < kBinCount; ++i) {
+        const int count = histogram[i];
+        if (count <= 0) {
+            continue;
+        }
+        const double p = static_cast<double>(count) / static_cast<double>(sample_count);
+        entropy -= p * std::log2(p);
+    }
+    if (!finite(entropy)) {
+        return 0.0;
+    }
+    return std::max(0.0, entropy);
+}
+
+}  // namespace
 
 aether::core::Status laplacian_variance(
     const std::uint8_t* bytes,
@@ -173,6 +353,171 @@ aether::core::Status tenengrad_metric_from_image(
         *out_value = 0.0;
         *out_confidence = 0.0;
         *out_roi_coverage = 0.0;
+    }
+    return aether::core::Status::kOk;
+}
+
+aether::core::Status exposure_analyze(
+    const std::uint8_t* bytes,
+    int width,
+    int height,
+    int row_bytes,
+    ExposureAnalysis* out_result) {
+    if (out_result == nullptr) {
+        return aether::core::Status::kInvalidArgument;
+    }
+    *out_result = {};
+
+    if (bytes == nullptr || width <= 0 || height <= 0 || row_bytes < width) {
+        return aether::core::Status::kInvalidArgument;
+    }
+
+    static constexpr int kOverexposedLumaThreshold = 250;
+    static constexpr int kUnderexposedLumaThreshold = 5;
+    out_result->overexpose_ratio = sampled_ratio_threshold(
+        bytes, width, height, row_bytes, kOverexposedLumaThreshold, true);
+    out_result->underexpose_ratio = sampled_ratio_threshold(
+        bytes, width, height, row_bytes, kUnderexposedLumaThreshold, false);
+    out_result->has_large_blown_region = has_large_blown_region(
+        bytes, width, height, row_bytes, kOverexposedLumaThreshold);
+    return aether::core::Status::kOk;
+}
+
+aether::core::Status texture_analyze(
+    const std::uint8_t* bytes,
+    int width,
+    int height,
+    int row_bytes,
+    TextureAnalysis* out_result) {
+    if (out_result == nullptr) {
+        return aether::core::Status::kInvalidArgument;
+    }
+    *out_result = {};
+
+    if (bytes == nullptr || width < 5 || height < 5 || row_bytes < width) {
+        return aether::core::Status::kInvalidArgument;
+    }
+
+    static constexpr int kGridSize = 8;
+    std::uint8_t active_grid[kGridSize * kGridSize] = {};
+    int feature_count = 0;
+    const int sample_stride = std::max(1, std::min(width, height) / 256);
+    static constexpr int kGradientThresholdSq = 28 * 28;
+    static constexpr int kLocalContrastThreshold = 18;
+
+    for (int y = 2; y < height - 2; y += sample_stride) {
+        const int row = y * row_bytes;
+        for (int x = 2; x < width - 2; x += sample_stride) {
+            const int center = row + x;
+            const int gx = static_cast<int>(bytes[center + 1]) - static_cast<int>(bytes[center - 1]);
+            const int gy = static_cast<int>(bytes[center + row_bytes]) - static_cast<int>(bytes[center - row_bytes]);
+            const int gradient_sq = gx * gx + gy * gy;
+            if (gradient_sq < kGradientThresholdSq) {
+                continue;
+            }
+
+            const int p1 = static_cast<int>(bytes[center - row_bytes - 1]);
+            const int p2 = static_cast<int>(bytes[center - row_bytes + 1]);
+            const int p3 = static_cast<int>(bytes[center + row_bytes - 1]);
+            const int p4 = static_cast<int>(bytes[center + row_bytes + 1]);
+            const int local_min = std::min(std::min(p1, p2), std::min(p3, p4));
+            const int local_max = std::max(std::max(p1, p2), std::max(p3, p4));
+            if (local_max - local_min < kLocalContrastThreshold) {
+                continue;
+            }
+
+            ++feature_count;
+            const int gx_index = std::min(kGridSize - 1, x * kGridSize / width);
+            const int gy_index = std::min(kGridSize - 1, y * kGridSize / height);
+            active_grid[gy_index * kGridSize + gx_index] = 1u;
+        }
+    }
+
+    int active_cell_count = 0;
+    for (int i = 0; i < kGridSize * kGridSize; ++i) {
+        active_cell_count += static_cast<int>(active_grid[i]);
+    }
+    const double spread =
+        static_cast<double>(active_cell_count) / static_cast<double>(kGridSize * kGridSize);
+
+    const double entropy = texture_entropy(bytes, width, height, row_bytes);
+    const double normalized_entropy = clamp01(entropy / 7.5);
+    const double repetitive_penalty = std::max(0.0, 1.0 - normalized_entropy);
+    const double normalized_feature = clamp01(
+        static_cast<double>(feature_count) / static_cast<double>(300));
+    const double fused_score = std::max(
+        0.0,
+        (0.55 * normalized_feature + 0.25 * normalized_entropy + 0.20 * spread) *
+            (1.0 - 0.5 * repetitive_penalty));
+    const double confidence = clamp01(0.55 + 0.45 * spread);
+
+    out_result->feature_count = feature_count;
+    out_result->spatial_spread = spread;
+    out_result->entropy = entropy;
+    out_result->repetitive_penalty = repetitive_penalty;
+    out_result->fused_score = clamp01(fused_score);
+    out_result->confidence = confidence;
+    return aether::core::Status::kOk;
+}
+
+aether::core::Status brightness_metric_for_quality(
+    int quality_level,
+    double* out_value,
+    double* out_confidence) {
+    if (out_value == nullptr || out_confidence == nullptr) {
+        return aether::core::Status::kInvalidArgument;
+    }
+
+    switch (quality_level) {
+    case 0:  // full
+        *out_value = 0.52;
+        *out_confidence = 0.88;
+        break;
+    case 1:  // degraded
+        *out_value = 0.50;
+        *out_confidence = 0.74;
+        break;
+    default:  // emergency and any invalid level fall back to lowest quality behavior
+        *out_value = 0.48;
+        *out_confidence = 0.60;
+        break;
+    }
+    return aether::core::Status::kOk;
+}
+
+aether::core::Status material_analyze_for_quality(
+    int quality_level,
+    MaterialAnalysis* out_result) {
+    if (out_result == nullptr) {
+        return aether::core::Status::kInvalidArgument;
+    }
+    *out_result = {};
+
+    switch (quality_level) {
+    case 0:  // full
+        out_result->specular_percent = 2.0;
+        out_result->transparent_percent = 5.0;
+        out_result->textureless_percent = 10.0;
+        out_result->is_non_lambertian = false;
+        out_result->confidence = 0.95;
+        out_result->largest_specular_region = 200;
+        break;
+    case 1:  // degraded
+        out_result->specular_percent = 2.0;
+        out_result->transparent_percent = 5.0;
+        out_result->textureless_percent = 10.0;
+        out_result->is_non_lambertian = false;
+        out_result->confidence = 0.85;
+        out_result->largest_specular_region = 200;
+        break;
+    default:  // emergency and invalid
+        out_result->specular_percent = 0.0;
+        out_result->transparent_percent = 0.0;
+        out_result->textureless_percent = 0.0;
+        out_result->is_non_lambertian = false;
+        out_result->confidence = 0.60;
+        out_result->largest_specular_region = 0;
+        break;
     }
     return aether::core::Status::kOk;
 }

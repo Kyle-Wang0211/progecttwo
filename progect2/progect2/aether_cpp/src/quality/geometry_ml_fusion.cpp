@@ -2,6 +2,7 @@
 // Copyright (c) 2024-2026 Aether3D. All rights reserved.
 
 #include "aether/quality/geometry_ml_fusion.h"
+#include "aether/quality/bayesian_quality_network.h"
 
 #include <algorithm>
 #include <cmath>
@@ -287,6 +288,28 @@ GeometryMLResult evaluate_geometry_ml_fusion(
     }
 
     result.passes = (result.reason_mask == 0u);
+
+    // ── Bayesian network posterior enrichment (P1a) ──
+    // Run Bayesian inference on the 6 component scores to get
+    // variance and credible intervals for fusion/risk.
+    {
+        const double scores[6] = {
+            geometry_score, cv_score, capture_score,
+            evidence_score, transport_score, security_score
+        };
+        const double w[6] = {
+            weights.geometry, weights.cross_validation, weights.capture,
+            weights.evidence, weights.transport, weights.security
+        };
+        BayesianQualityNetwork bqn;
+        bqn.initialize_from_weights(w);
+        const BayesianQualityResult bqr = bqn.infer(scores);
+        result.fusion_variance = bqr.fusion_variance;
+        result.risk_variance = bqr.risk_variance;
+        result.fusion_credible_low = bqr.fusion_posterior.credible_low;
+        result.fusion_credible_high = bqr.fusion_posterior.credible_high;
+    }
+
     return result;
 }
 

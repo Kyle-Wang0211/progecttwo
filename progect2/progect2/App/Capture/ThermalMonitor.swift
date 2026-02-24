@@ -10,6 +10,8 @@
 //
 
 import Foundation
+import Aether3DCore
+import CAetherNativeBridge
 #if canImport(IOKit)
 import IOKit
 #endif
@@ -103,19 +105,31 @@ public actor ThermalMonitor {
         #if os(iOS)
         let processInfo = ProcessInfo.processInfo
         let state = processInfo.thermalState
-        
+
+        let osState: Int32
         switch state {
         case .nominal:
-            return .normal
+            osState = 0
         case .fair:
-            return .warning
+            osState = 1
         case .serious:
-            return .critical
+            osState = 2
         case .critical:
-            return .shutdown
+            osState = 3
         @unknown default:
-            return .normal
+            osState = 0
         }
+
+        var mappedState: Int32 = 0
+        if aether_mobile_map_thermal_state(osState, &mappedState) == 0 {
+            switch mappedState {
+            case 1: return .warning
+            case 2: return .critical
+            case 3: return .shutdown
+            default: return .normal
+            }
+        }
+        return .normal
         #else
         return .normal
         #endif

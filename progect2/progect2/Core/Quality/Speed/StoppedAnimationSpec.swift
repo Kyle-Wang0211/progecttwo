@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import CAetherNativeBridge
 
 /// StoppedAnimationSpec - specification for stopped breathing animation
 /// P8: 0.5Hz alpha pulse only, no geometry deformation
@@ -21,13 +22,13 @@ public struct StoppedAnimationSpec {
     /// Calculate alpha value for current time
     /// H2: Deterministic calculation based on time, no randomness
     public static func calculateAlpha(timestampMs: Int64) -> Double {
-        let periodMs = Int64(1000.0 / frequencyHz)  // 2000ms for 0.5Hz
-        let phase = Double(timestampMs % periodMs) / Double(periodMs)
-        
-        // Sine wave for smooth breathing (0.0 to 1.0)
-        let alpha = 0.5 + 0.5 * sin(phase * 2.0 * .pi)
-        
-        return alpha
+        var alpha = 0.5
+        let rc = aether_quality_stopped_animation_alpha(
+            timestampMs,
+            frequencyHz,
+            &alpha
+        )
+        return rc == 0 ? alpha : 0.5
     }
     
     /// P8/H2: Hard rules
@@ -37,4 +38,3 @@ public struct StoppedAnimationSpec {
     /// - No topology changes
     /// - Continuous time-based cycle, sampled every frame
 }
-

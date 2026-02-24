@@ -24,7 +24,7 @@ public struct CameraConfig: Sendable {
     public let frameRate: Double
     
     /// Video codec
-    public let codec: VideoCodec
+    public let codec: CameraVideoCodec
     
     /// Enable HDR
     public let enableHDR: Bool
@@ -50,7 +50,7 @@ public struct CameraConfig: Sendable {
     public init(
         resolution: VideoResolution = .resolution4K,
         frameRate: Double = 60.0,
-        codec: VideoCodec = .hevc,
+        codec: CameraVideoCodec = .hevc,
         enableHDR: Bool = true,
         enableProResRAW: Bool = false,
         enableZeroShutterLag: Bool = true,
@@ -91,7 +91,7 @@ public enum VideoResolution: String, Codable, Sendable {
 }
 
 /// Video Codec
-public enum VideoCodec: String, Codable, Sendable {
+public enum CameraVideoCodec: String, Codable, Sendable {
     case h264 = "H.264"
     case hevc = "HEVC"
     case proResRAW = "ProRes RAW"
