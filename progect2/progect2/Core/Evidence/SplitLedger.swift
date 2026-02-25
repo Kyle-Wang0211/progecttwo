@@ -129,7 +129,9 @@ public final class SplitLedger {
             }
         }
         
-        return Array(patchMap.values).map { (patchId: "", evidence: $0.evidence, weight: $0.weight, lastUpdate: $0.lastUpdate) }
+        // Layer 4.8: Was `patchId: ""` — all patch identities were lost during
+        // recalibration, making the returned tuples useless for any per-patch logic.
+        return patchMap.map { (patchId: $0.key, evidence: $0.value.evidence, weight: $0.value.weight, lastUpdate: $0.value.lastUpdate) }
     }
     
     /// Export patches for serialization

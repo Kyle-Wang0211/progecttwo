@@ -55,11 +55,16 @@ public final class FlipAnimationController {
     }
 
     private func currentTime() -> TimeInterval {
-        if let timelineNow {
-            return timelineNow
-        }
+        // Layer 4.12: External time source (render pipeline's CACurrentMediaTime)
+        // takes priority over internal timeline to ensure flip animations are
+        // synchronized with the Metal frame clock. Previously, timelineNow took
+        // priority, causing clock skew between checkThresholdCrossings() (which
+        // records flip start times) and tick() (which computes easing progress).
         if let externalTimeSource {
             return externalTimeSource()
+        }
+        if let timelineNow {
+            return timelineNow
         }
         return ProcessInfo.processInfo.systemUptime
     }
@@ -179,12 +184,18 @@ public final class FlipAnimationController {
         guard let nativeRuntime else {
             return []
         }
-        if timelineNow == nil {
-            timelineNow = ProcessInfo.processInfo.systemUptime
-        }
-        let step = max(0.0, deltaTime)
-        if step > 0.0 {
-            timelineNow = currentTime() + step
+        // Layer 4.12: When using an external time source (render pipeline clock),
+        // don't maintain a separate internal timeline — let the render pipeline
+        // drive the clock. Internal timeline is only used as a fallback when no
+        // external source is configured.
+        if externalTimeSource == nil {
+            if timelineNow == nil {
+                timelineNow = ProcessInfo.processInfo.systemUptime
+            }
+            let step = max(0.0, deltaTime)
+            if step > 0.0 {
+                timelineNow = (timelineNow ?? 0) + step
+            }
         }
         let now = currentTime()
 

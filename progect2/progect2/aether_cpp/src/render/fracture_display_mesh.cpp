@@ -111,7 +111,11 @@ FragmentVisualParams compute_visual_params(
 
     // PBR material from evidence state (replaces hardcoded metallic/roughness)
     const PBRMaterialParams pbr = compute_pbr_from_evidence(d, 0);
-    p.metallic = pbr.metallic;
+    // Area-boosted metallic: bigger triangles → more prominent metallic sheen.
+    // area_factor is sqrt(triangle_area / median_area), clamped [0.5, 2.0].
+    // boost scales metallic by up to 30% for large triangles while preserving base.
+    const float area_metallic_boost = 1.0f + 0.3f * (area_factor - 1.0f);
+    p.metallic = std::min(1.0f, pbr.metallic * area_metallic_boost);
     p.roughness = pbr.roughness;
     p.f0 = pbr.f0;
     p.clearcoat = pbr.clearcoat;

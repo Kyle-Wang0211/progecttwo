@@ -16,7 +16,9 @@ import Foundation
 /// Adaptive memory management for mobile devices.
 /// 符合 Phase 4: Mobile Optimization - Memory Pressure Handler
 public actor MobileMemoryPressureHandler {
-    
+
+    public init() {}
+
     /// Memory threshold for critical state
     private let memoryThresholdCritical: UInt64 = 1_000_000_000 // 1GB
     

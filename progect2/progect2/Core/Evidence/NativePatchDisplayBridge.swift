@@ -17,7 +17,8 @@ enum NativePatchDisplayBridge {
         observationCount: Int,
         target: Double,
         isLocked: Bool,
-        config: aether_patch_display_kernel_config_t? = nil
+        config: aether_patch_display_kernel_config_t? = nil,
+        ghostDisplayHighWater: Double = 0.0
     ) -> aether_patch_display_step_result_t? {
         #if canImport(CAetherNativeBridge)
         var result = aether_patch_display_step_result_t()
@@ -25,11 +26,11 @@ enum NativePatchDisplayBridge {
         if var cfgVal = config {
             rc = aether_patch_display_step(
                 previousDisplay, previousEMA, Int32(observationCount),
-                target, isLocked ? 1 : 0, &cfgVal, &result)
+                target, isLocked ? 1 : 0, &cfgVal, ghostDisplayHighWater, &result)
         } else {
             rc = aether_patch_display_step(
                 previousDisplay, previousEMA, Int32(observationCount),
-                target, isLocked ? 1 : 0, nil, &result)
+                target, isLocked ? 1 : 0, nil, ghostDisplayHighWater, &result)
         }
         return rc == 0 ? result : nil
         #else

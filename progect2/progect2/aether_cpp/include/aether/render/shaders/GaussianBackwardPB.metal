@@ -181,7 +181,12 @@ struct PBVertexOut {
     float2   offset;
     float3   color;
     float    opacity;
-    float2x2 inv_cov2D;
+    // Inverse 2D covariance — flattened from float2x2 to 4 scalars because
+    // Metal does not support matrix types as vertex-to-fragment interpolants.
+    float    inv_cov_00;     // inv_cov2D[0][0]
+    float    inv_cov_01;     // inv_cov2D[0][1]
+    float    inv_cov_10;     // inv_cov2D[1][0]
+    float    inv_cov_11;     // inv_cov2D[1][1]
     uint     gaussian_idx;
     float3   world_pos;
     float3   view_dir;
@@ -255,7 +260,12 @@ vertex PBVertexOut gaussian_backward_pb_vertex(
 
     out.position = float4(final_ndc.x, final_ndc.y, clip_pos.z / clip_pos.w, 1.0);
     out.offset = pixel_offset;
-    out.inv_cov2D = inv2x2_pb(cov2D);
+    // Inverse 2D covariance (flattened for Metal vertex output)
+    float2x2 inv_cov_mat = inv2x2_pb(cov2D);
+    out.inv_cov_00 = inv_cov_mat[0][0];
+    out.inv_cov_01 = inv_cov_mat[0][1];
+    out.inv_cov_10 = inv_cov_mat[1][0];
+    out.inv_cov_11 = inv_cov_mat[1][1];
     out.opacity = decode_opacity_pb(uint(g.opacity_u8));
 
     float3 view_dir = normalize(pos - uniforms.camera_position);
@@ -295,8 +305,8 @@ fragment PBFragmentOut gaussian_backward_pb_fragment(
     // Compute 2D Gaussian weight
     float2 offset = in.offset;
     float power = -0.5 * (
-        offset.x * (in.inv_cov2D[0][0] * offset.x + in.inv_cov2D[0][1] * offset.y) +
-        offset.y * (in.inv_cov2D[1][0] * offset.x + in.inv_cov2D[1][1] * offset.y)
+        offset.x * (in.inv_cov_00 * offset.x + in.inv_cov_01 * offset.y) +
+        offset.y * (in.inv_cov_10 * offset.x + in.inv_cov_11 * offset.y)
     );
 
     if (power < -4.5) {
@@ -425,7 +435,11 @@ fragment PBFragmentOut gaussian_backward_pb_fragment(
         float3 pos = in.world_pos;
         float3 view_pos = (uniforms.view_matrix * float4(pos, 1.0)).xyz;
         float tz = max(view_pos.z, 1e-6);
-        float2x2 inv_cov = in.inv_cov2D;
+        // Reconstruct inverse covariance matrix from flattened scalars
+        float2x2 inv_cov = float2x2(
+            float2(in.inv_cov_00, in.inv_cov_01),
+            float2(in.inv_cov_10, in.inv_cov_11)
+        );
 
         float2 dp_dscreen = float2(
             -(inv_cov[0][0] * offset.x + inv_cov[0][1] * offset.y),

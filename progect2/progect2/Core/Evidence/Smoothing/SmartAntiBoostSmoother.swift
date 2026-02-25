@@ -57,7 +57,7 @@ public final class SmartAntiBoostSmoother: @unchecked Sendable {
             degrade_factor: config.degradeFactor,
             max_consecutive_invalid: Int32(max(1, config.maxConsecutiveInvalid)),
             worst_case_fallback: config.worstCaseFallback,
-            capture_mode: 0
+            capture_mode: config.captureMode ? 1 : 0
         )
         var handle: OpaquePointer?
         let rc = aether_smart_smoother_create(&nativeConfig, &handle)

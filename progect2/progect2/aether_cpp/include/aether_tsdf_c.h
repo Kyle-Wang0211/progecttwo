@@ -1201,6 +1201,7 @@ int aether_patch_display_step(
     double target,
     int is_locked,
     const aether_patch_display_kernel_config_t* config_or_null,
+    double ghost_display_high_water,
     aether_patch_display_step_result_t* out_result);
 int aether_patch_color_evidence(
     double local_display,
@@ -4324,6 +4325,249 @@ int aether_mobile_recommended_scan_quality(int low_power_mode_enabled, int* out_
 int aether_mobile_should_allow_background_processing(
     int low_power_mode_enabled,
     int* out_allow);
+
+// ─── Device Capability Detection & Algorithm Gating ───────────────────
+//
+// Cross-platform device capability descriptor.
+// The platform layer (Swift/JNI/NAPI) fills this struct once at startup,
+// then passes it to aether_device_select_algorithm_set() which returns
+// a bitmask of algorithms that should be activated.
+//
+// This keeps ALL gating logic in the C++ core — the platform layer
+// is a thin capability reporter, never a decision maker.
+
+typedef struct aether_device_capabilities {
+    int has_depth_camera;          // 1 if LiDAR/ToF depth sensor present
+    int has_mesh_reconstruction;   // 1 if real-time mesh reconstruction available
+    int has_scene_depth;           // 1 if per-frame depth maps available (e.g. ARKit sceneDepth)
+    int has_mesh_shader;           // 1 if GPU supports mesh shaders (Apple A15+ / Vulkan mesh)
+    int has_compute_shader;        // 1 if GPU supports general compute
+    int has_gpu_hiz;               // 1 if GPU supports hierarchical Z-buffer
+    int cpu_core_count;            // number of CPU cores (for parallelism decisions)
+    int gpu_tier;                  // 0=low, 1=mid, 2=high (estimated GPU class)
+    float ram_gb;                  // total device RAM in GB
+    int os_platform;               // 0=iOS, 1=Android, 2=HarmonyOS
+
+    // Extended capabilities for adaptive budget estimation (Phase 1)
+    float gpu_clock_mhz;           // GPU max clock speed in MHz (0 = unknown)
+    float gpu_flops_estimate;      // Estimated peak GFLOPS (0 = auto-detect from other fields)
+    int screen_width;              // Screen width in pixels (0 = assume 1170)
+    int screen_height;             // Screen height in pixels (0 = assume 2532)
+    float target_frame_time_ms;    // Target frame time (0 = default 16.67ms for 60fps)
+} aether_device_capabilities_t;
+
+// Algorithm set bitmask — each bit enables a specific algorithm module.
+// The C++ core decides which algorithms to activate based on device caps.
+#define AETHER_ALGO_GHOST_WARMSTART       (1 << 0)
+#define AETHER_ALGO_ADMISSION_CONTROL     (1 << 1)
+#define AETHER_ALGO_VIEW_DIVERSITY        (1 << 2)
+#define AETHER_ALGO_PATCH_IDENTITY_MATCH  (1 << 3)
+#define AETHER_ALGO_STABLE_RENDER_SELECT  (1 << 4)
+#define AETHER_ALGO_FRUSTUM_CULLER        (1 << 5)
+#define AETHER_ALGO_TWO_PASS_CULLER       (1 << 6)
+#define AETHER_ALGO_MESHLET_BUILDER       (1 << 7)
+#define AETHER_ALGO_SCREEN_DETAIL         (1 << 8)
+#define AETHER_ALGO_LOD_PIPELINE          (1 << 9)
+#define AETHER_ALGO_DEPTH_FILTER          (1 << 10)
+#define AETHER_ALGO_DA3_DEPTH_FUSER       (1 << 11)
+#define AETHER_ALGO_TSDF_INTEGRATION      (1 << 12)
+#define AETHER_ALGO_FRAME_PACING          (1 << 13)
+#define AETHER_ALGO_BATTERY_AWARE         (1 << 14)
+#define AETHER_ALGO_THERMAL_HANDLER       (1 << 15)
+#define AETHER_ALGO_MEMORY_HANDLER        (1 << 16)
+#define AETHER_ALGO_MOTION_ANALYZER       (1 << 17)
+#define AETHER_ALGO_COVERAGE_ESTIMATOR    (1 << 18)
+#define AETHER_ALGO_EVIDENCE_STATE_MACHINE (1 << 19)
+#define AETHER_ALGO_DIRECTIONAL_HAPTICS   (1 << 20)
+#define AETHER_ALGO_POSE_STABILIZER       (1 << 21)
+#define AETHER_ALGO_MARCHING_CUBES        (1 << 22)
+
+// Pure-visual algorithm set: algorithms that require NO depth camera.
+// These are ALWAYS enabled regardless of device capabilities.
+#define AETHER_ALGO_SET_PURE_VISUAL ( \
+    AETHER_ALGO_GHOST_WARMSTART | \
+    AETHER_ALGO_ADMISSION_CONTROL | \
+    AETHER_ALGO_VIEW_DIVERSITY | \
+    AETHER_ALGO_PATCH_IDENTITY_MATCH | \
+    AETHER_ALGO_STABLE_RENDER_SELECT | \
+    AETHER_ALGO_FRAME_PACING | \
+    AETHER_ALGO_BATTERY_AWARE | \
+    AETHER_ALGO_THERMAL_HANDLER | \
+    AETHER_ALGO_MEMORY_HANDLER | \
+    AETHER_ALGO_MOTION_ANALYZER | \
+    AETHER_ALGO_COVERAGE_ESTIMATOR | \
+    AETHER_ALGO_EVIDENCE_STATE_MACHINE | \
+    AETHER_ALGO_DIRECTIONAL_HAPTICS \
+)
+
+// Depth-dependent algorithm set: only enabled when depth camera is present.
+#define AETHER_ALGO_SET_DEPTH_DEPENDENT ( \
+    AETHER_ALGO_DEPTH_FILTER | \
+    AETHER_ALGO_DA3_DEPTH_FUSER | \
+    AETHER_ALGO_TSDF_INTEGRATION | \
+    AETHER_ALGO_MARCHING_CUBES | \
+    AETHER_ALGO_POSE_STABILIZER \
+)
+
+// GPU-dependent algorithm set: only enabled when compute shaders available.
+#define AETHER_ALGO_SET_GPU_DEPENDENT ( \
+    AETHER_ALGO_FRUSTUM_CULLER | \
+    AETHER_ALGO_TWO_PASS_CULLER | \
+    AETHER_ALGO_MESHLET_BUILDER | \
+    AETHER_ALGO_SCREEN_DETAIL | \
+    AETHER_ALGO_LOD_PIPELINE \
+)
+
+typedef struct aether_algorithm_set_result {
+    uint32_t enabled_algorithms;      // bitmask of enabled algorithms
+    uint32_t depth_algorithms;        // bitmask of depth-dependent algorithms (subset of enabled)
+    uint32_t gpu_algorithms;          // bitmask of GPU-dependent algorithms (subset of enabled)
+    int culling_tier;                 // 0=A, 1=B, 2=C (determined from caps)
+    int recommended_max_triangles;    // initial budget from static estimation
+
+    // ── Adaptive Budget Output (Phase 1: static scoring) ──
+    float device_perf_score;          // [0, 1] continuous device performance score
+    int budget_floor;                 // absolute minimum (never go below this)
+    int budget_ceiling;               // absolute maximum (hardware limit)
+} aether_algorithm_set_result_t;
+
+/// Determine which algorithms to activate based on device capabilities.
+/// This is the SINGLE decision point for algorithm gating — keeps all
+/// logic in C++ core for cross-platform consistency.
+///
+/// The recommended_max_triangles field is now computed via continuous
+/// scoring rather than 3-tier bucketing. The score considers:
+///   - RAM contribution (log-weighted, diminishing returns above 8GB)
+///   - CPU parallelism (sqrt-weighted, accounts for thermal throttle)
+///   - GPU class (continuous score from fill rate + compute caps)
+///   - Screen resolution (more pixels = higher per-triangle GPU cost)
+///   - Culling tier bonus (Tier A gets +20%, Tier B +10%)
+///
+/// - Parameter caps: Device capabilities reported by platform layer
+/// - Parameter out_result: Output algorithm set + parameters
+/// - Returns: 0 on success, nonzero on error
+int aether_device_select_algorithm_set(
+    const aether_device_capabilities_t* caps,
+    aether_algorithm_set_result_t* out_result);
+
+// ─── Adaptive Triangle Budget: Runtime Calibration (Phase 2+3) ────────
+//
+// Phase 2: Runtime calibration
+//   After the first few frames, measure actual frame time to refine the
+//   static estimate. The calibrator learns: "this device renders N triangles
+//   in T ms" and extrapolates the optimal budget to fill 80% of frame time
+//   (leaving 20% headroom for evidence/haptics/UI).
+//
+// Phase 3: Continuous dynamic feedback
+//   Each frame feeds back (triangle_count, frame_time_ms, thermal_state,
+//   battery_level) and the controller adjusts the budget via PID-like
+//   control with asymmetric gain: drops fast (2-frame response),
+//   recovers slow (30-frame ramp to prevent oscillation).
+
+typedef struct aether_adaptive_budget_controller aether_adaptive_budget_controller_t;
+
+typedef struct aether_budget_controller_config {
+    int initial_budget;            // from aether_device_select_algorithm_set()
+    int budget_floor;              // absolute minimum (from result.budget_floor)
+    int budget_ceiling;            // absolute maximum (from result.budget_ceiling)
+    float target_frame_time_ms;    // target (default 16.67 for 60fps)
+    float headroom_fraction;       // fraction of frame time reserved (default 0.20)
+    float drop_rate;               // budget drop speed on overrun (default 0.5 = halve excess)
+    float recover_rate;            // budget recovery speed on headroom (default 0.02 = 2%/frame)
+    float thermal_penalty_per_level; // budget reduction per thermal level (default 0.10 = -10%)
+    float ema_alpha;               // EMA smoothing for frame time (default 0.15)
+} aether_budget_controller_config_t;
+
+typedef struct aether_budget_frame_sample {
+    int triangle_count;            // number of triangles rendered this frame
+    float frame_time_ms;           // measured frame time in milliseconds
+    int thermal_state;             // 0=nominal, 1=fair, 2=serious, 3=critical
+    float battery_fraction;        // [0, 1] remaining battery (1.0 = full, 0.0 = unknown)
+    int low_power_mode;            // 1 if OS low-power mode is active
+    int memory_pressure;           // 0=normal, 1=warning, 2=critical (NEW)
+    int app_became_active;         // 1 on first frame after returning from background (NEW)
+} aether_budget_frame_sample_t;
+
+typedef struct aether_budget_decision {
+    int recommended_budget;        // triangles for next frame
+    float estimated_cost_per_tri;  // learned: milliseconds per 1000 triangles
+    float utilization;             // frame_time / target_time [0, ∞)
+    float headroom_ms;             // remaining ms after rendering
+    int calibrated;                // 1 if enough samples to be confident
+    int sample_count;              // total frames fed so far
+    float confidence;              // [0, 1] confidence in the estimate
+} aether_budget_decision_t;
+
+/// Create an adaptive budget controller.
+/// Config fields set to 0 will use sensible defaults.
+int aether_adaptive_budget_create(
+    const aether_budget_controller_config_t* config,
+    aether_adaptive_budget_controller_t** out_controller);
+
+/// Destroy the controller and free resources.
+int aether_adaptive_budget_destroy(
+    aether_adaptive_budget_controller_t* controller);
+
+/// Feed a frame sample and get the recommended budget for next frame.
+/// This is the main runtime loop call — should be called every frame.
+int aether_adaptive_budget_update(
+    aether_adaptive_budget_controller_t* controller,
+    const aether_budget_frame_sample_t* sample,
+    aether_budget_decision_t* out_decision);
+
+/// Get the current budget without feeding a new sample.
+/// Useful for querying the last decision.
+int aether_adaptive_budget_query(
+    const aether_adaptive_budget_controller_t* controller,
+    aether_budget_decision_t* out_decision);
+
+/// Reset the controller (e.g., when starting a new scan session).
+int aether_adaptive_budget_reset(
+    aether_adaptive_budget_controller_t* controller);
+
+/// Fill config with sensible defaults.
+int aether_adaptive_budget_default_config(
+    aether_budget_controller_config_t* out_config);
+
+// ─── Cross-Validation Framework ───────────────────────────────────────
+//
+// When redundant algorithms exist (e.g. ThermalQualityAdapter + MobileThermalStateHandler),
+// the cross-validation framework runs both and compares outputs.
+// Disagreements are logged and the more conservative result is used.
+
+typedef struct aether_cross_validation_pair {
+    double value_a;           // Primary algorithm output
+    double value_b;           // Secondary algorithm output
+    double tolerance;         // Maximum acceptable divergence
+} aether_cross_validation_pair_t;
+
+typedef struct aether_cross_validation_result {
+    double final_value;       // Chosen output (conservative)
+    int agreement;            // 1 = within tolerance, 0 = diverged
+    double divergence;        // |value_a - value_b|
+    int preferred_source;     // 0 = A chosen, 1 = B chosen
+} aether_cross_validation_result_t;
+
+/// Cross-validate two redundant algorithm outputs.
+/// Returns the more conservative (lower/safer) value when they diverge.
+int aether_cross_validate(
+    const aether_cross_validation_pair_t* pair,
+    aether_cross_validation_result_t* out_result);
+
+/// Cross-validate coverage estimates from two independent sources.
+/// Uses monotonic constraint: final coverage >= max(current high-water, min(a, b))
+int aether_cross_validate_coverage(
+    double coverage_a,
+    double coverage_b,
+    double current_high_water,
+    double* out_coverage);
+
+/// Cross-validate thermal budget from two independent sources.
+/// Uses conservative constraint: final budget = min(budget_a, budget_b)
+int aether_cross_validate_thermal_budget(
+    int budget_a,
+    int budget_b,
+    int* out_budget);
 
 #ifdef __cplusplus
 }

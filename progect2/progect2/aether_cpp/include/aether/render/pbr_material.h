@@ -45,10 +45,10 @@ struct BRDFEvalResult {
 struct PBRFromEvidenceConfig {
     float ior_s0{1.0f};
     float ior_s5{1.5f};
-    float roughness_s0{1.0f};
+    float roughness_s0{0.6f};   // Match ScanGuidanceConstants.roughnessBase — glossy from S0
     float roughness_s5{0.15f};
-    float metallic_s0{0.0f};
-    float metallic_s5{0.5f};
+    float metallic_s0{0.3f};   // Match ScanGuidanceConstants.metallicBase — metallic sheen from S0
+    float metallic_s5{0.7f};   // Strong metallic at full evidence
     float clearcoat_threshold{0.75f};
     float clearcoat_max{0.3f};
 };

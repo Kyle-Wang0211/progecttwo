@@ -16,7 +16,9 @@ import Foundation
 /// Adaptive quality based on device temperature.
 /// 符合 Phase 4: Mobile Optimization - Thermal Throttling Response
 public actor MobileThermalStateHandler {
-    
+
+    public init() {}
+
     #if os(iOS)
     private var thermalStateObserver: NSObjectProtocol?
     #endif

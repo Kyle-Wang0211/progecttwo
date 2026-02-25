@@ -223,7 +223,12 @@ struct GaussianVertexOut {
     float2 offset;           // offset from gaussian center in screen space
     float3 color;            // SH-evaluated color
     float  opacity;          // decoded opacity
-    float2x2 inv_cov2D;     // inverse 2D covariance for fragment evaluation
+    // Inverse 2D covariance — flattened from float2x2 to 4 scalars because
+    // Metal does not support matrix types as vertex-to-fragment interpolants.
+    float  inv_cov_00;       // inv_cov2D[0][0]
+    float  inv_cov_01;       // inv_cov2D[0][1]
+    float  inv_cov_10;       // inv_cov2D[1][0]
+    float  inv_cov_11;       // inv_cov2D[1][1]
     uint   gaussian_idx;     // for gradient writeback in training
 };
 
@@ -320,8 +325,12 @@ vertex GaussianVertexOut gaussian_vertex(
     out.position = float4(final_ndc.x, final_ndc.y, clip_pos.z / clip_pos.w, 1.0);
     out.offset = pixel_offset;
 
-    // Inverse 2D covariance for fragment evaluation
-    out.inv_cov2D = inv2x2(cov2D);
+    // Inverse 2D covariance for fragment evaluation (flattened for Metal)
+    float2x2 inv_cov = inv2x2(cov2D);
+    out.inv_cov_00 = inv_cov[0][0];
+    out.inv_cov_01 = inv_cov[0][1];
+    out.inv_cov_10 = inv_cov[1][0];
+    out.inv_cov_11 = inv_cov[1][1];
 
     // Decode opacity
     out.opacity = decode_opacity_fwd(uint(g.opacity_u8));
@@ -353,8 +362,8 @@ fragment GaussianFragmentOut gaussian_fragment(
     // Compute 2D Gaussian weight
     float2 offset = in.offset;
     float power = -0.5 * (
-        offset.x * (in.inv_cov2D[0][0] * offset.x + in.inv_cov2D[0][1] * offset.y) +
-        offset.y * (in.inv_cov2D[1][0] * offset.x + in.inv_cov2D[1][1] * offset.y)
+        offset.x * (in.inv_cov_00 * offset.x + in.inv_cov_01 * offset.y) +
+        offset.y * (in.inv_cov_10 * offset.x + in.inv_cov_11 * offset.y)
     );
 
     // Discard fragments outside 3-sigma ellipse

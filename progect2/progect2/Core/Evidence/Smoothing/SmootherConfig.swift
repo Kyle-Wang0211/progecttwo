@@ -35,6 +35,12 @@ public struct SmootherConfig: Sendable {
     /// Worst-case fallback value
     public let worstCaseFallback: Double
 
+    /// Capture mode: when true, the C++ kernel maintains a high_water_mark
+    /// and prevents visual regression.  Smoothed values never decrease below
+    /// the historical peak, matching the "no visual regression" guarantee
+    /// required during active scanning.
+    public let captureMode: Bool
+
     /// Default configuration
     public static let `default` = SmootherConfig(
         jitterBand: 0.05,
@@ -42,7 +48,19 @@ public struct SmootherConfig: Sendable {
         normalImproveFactor: 0.7,
         degradeFactor: 1.0,
         maxConsecutiveInvalid: 5,
-        worstCaseFallback: 0.0
+        worstCaseFallback: 0.0,
+        captureMode: false
+    )
+
+    /// Capture-mode configuration: anti-regression for active scanning
+    public static let capture = SmootherConfig(
+        jitterBand: 0.05,
+        antiBoostFactor: 0.3,
+        normalImproveFactor: 0.7,
+        degradeFactor: 1.0,
+        maxConsecutiveInvalid: 5,
+        worstCaseFallback: 0.0,
+        captureMode: true
     )
 
     /// Initialize with custom values
@@ -54,13 +72,15 @@ public struct SmootherConfig: Sendable {
     ///   - degradeFactor: Degradation factor
     ///   - maxConsecutiveInvalid: Max consecutive invalid frames
     ///   - worstCaseFallback: Worst-case fallback value
+    ///   - captureMode: Enable capture-mode anti-regression (default: false)
     public init(
         jitterBand: Double,
         antiBoostFactor: Double,
         normalImproveFactor: Double,
         degradeFactor: Double,
         maxConsecutiveInvalid: Int,
-        worstCaseFallback: Double
+        worstCaseFallback: Double,
+        captureMode: Bool = false
     ) {
         self.jitterBand = jitterBand
         self.antiBoostFactor = antiBoostFactor
@@ -68,5 +88,6 @@ public struct SmootherConfig: Sendable {
         self.degradeFactor = degradeFactor
         self.maxConsecutiveInvalid = maxConsecutiveInvalid
         self.worstCaseFallback = worstCaseFallback
+        self.captureMode = captureMode
     }
 }

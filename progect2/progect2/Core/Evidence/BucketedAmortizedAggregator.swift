@@ -188,7 +188,11 @@ public final class BucketedAmortizedAggregator {
                 patchLocations = patchLocations.filter { $0.value.bucketIndex < Self.maxBuckets }
             }
             
-            currentBucketStart = timestamp
+            // Layer 6.1: Align bucket start to bucket boundaries instead of raw timestamp.
+            // Using raw timestamp causes cumulative drift — each rotation shifts the
+            // bucket boundary by the fractional seconds past the boundary, eventually
+            // making buckets shorter or longer than intended 15s.
+            currentBucketStart = currentBucketStart + Double(bucketsToRotate) * Self.bucketDurationSec
         }
     }
 }

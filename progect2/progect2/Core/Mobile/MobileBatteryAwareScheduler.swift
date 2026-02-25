@@ -17,7 +17,9 @@ import CAetherNativeBridge
 /// Power-efficient processing based on battery state.
 /// 符合 Phase 4: Mobile Optimization - Battery-Aware Processing
 public actor MobileBatteryAwareScheduler {
-    
+
+    public init() {}
+
     #if os(iOS)
     /// Check if Low Power Mode is enabled
     /// 

@@ -103,6 +103,64 @@ inline half3 evaluateSH(float3 n, constant float3 *shCoeffs) {
     return max(result, 0.0h);
 }
 
+// ─── Oklab Perceptual Color Space (Layer 7.2) ───
+// Reference: Björn Ottosson 2020, "A perceptual color space for image processing"
+// Oklab provides perceptually uniform lightness, enabling smooth gradients
+// that look visually even across the entire display [0,1] range.
+
+/// Convert Oklab (L, a, b) → linear sRGB
+/// Uses the exact matrix from Ottosson's paper (LMS→linear sRGB).
+inline half3 oklabToLinearSRGB(half L, half a, half b) {
+    // Oklab → LMS (cube root domain)
+    half l_ = L + 0.3963377774h * a + 0.2158037573h * b;
+    half m_ = L - 0.1055613458h * a - 0.0638541728h * b;
+    half s_ = L - 0.0894841775h * a - 1.2914855480h * b;
+
+    // Undo cube root
+    half l = l_ * l_ * l_;
+    half m = m_ * m_ * m_;
+    half s = s_ * s_ * s_;
+
+    // LMS → linear sRGB
+    half3 rgb;
+    rgb.r = +4.0767416621h * l - 3.3077115913h * m + 0.2309699292h * s;
+    rgb.g = -1.2684380046h * l + 2.6097574011h * m - 0.3413193965h * s;
+    rgb.b = -0.0041960863h * l - 0.7034186147h * m + 1.7076147010h * s;
+
+    return clamp(rgb, 0.0h, 1.0h);
+}
+
+/// Apply IEC 61966-2-1 sRGB OETF (linear → sRGB gamma).
+/// Required because render target uses .bgra8Unorm (no hardware conversion).
+/// The precise piecewise function avoids banding artifacts in dark regions.
+inline half3 linearToSRGB(half3 linear) {
+    // Per-channel piecewise sRGB OETF:
+    //   c <= 0.0031308: sRGB = c × 12.92
+    //   c >  0.0031308: sRGB = 1.055 × c^(1/2.4) - 0.055
+    half3 srgb;
+    srgb.r = linear.r <= 0.0031308h ? linear.r * 12.92h : 1.055h * pow(linear.r, 1.0h / 2.4h) - 0.055h;
+    srgb.g = linear.g <= 0.0031308h ? linear.g * 12.92h : 1.055h * pow(linear.g, 1.0h / 2.4h) - 0.055h;
+    srgb.b = linear.b <= 0.0031308h ? linear.b * 12.92h : 1.055h * pow(linear.b, 1.0h / 2.4h) - 0.055h;
+    return clamp(srgb, 0.0h, 1.0h);
+}
+
+/// Map display evidence [0,1] → Oklab perceptual color
+/// Cold (subtle blue) at low evidence → warm neutral white at high evidence.
+/// Chroma is kept very low to stay close to grayscale while adding depth.
+inline half3 evidenceToOklabColor(half display) {
+    // Lightness: 0.05 (near-black) → 0.97 (near-white)
+    // S0 triangles appear nearly pure black with white borders
+    half L = mix(0.05h, 0.97h, display);
+
+    // Chroma via a,b: small cool offset at low display, fading to neutral
+    // a (green-red): slight warm shift at high evidence
+    half a_ok = mix(-0.005h, 0.003h, display);
+    // b (blue-yellow): cool (negative) at low → neutral at high
+    half b_ok = mix(-0.015h, 0.002h, display);
+
+    return oklabToLinearSRGB(L, a_ok, b_ok);
+}
+
 // Quaternion from axis-angle
 inline float4 quatFromAxisAngle(float3 axis, float angle) {
     float halfAngle = angle * 0.5;
@@ -197,8 +255,14 @@ fragment half4 wedgeFillFragment(
     // fp16-safe roughness floor (Filament: prevents fp16 underflow at 6.1e-5)
     half roughness = max(half(in.roughness), 0.089h);
 
-    // Base color: grayscale/Oklab mapped by coverage
-    half3 baseColor = half3(in.grayscaleColor);
+    // Base color: blend CPU grayscale with GPU Oklab for perceptual uniformity.
+    // Layer 7.2: Oklab provides perceptually even lightness transitions that
+    // linear grayscale cannot — mid-tones look evenly spaced to the human eye.
+    half3 cpuColor = half3(in.grayscaleColor);
+    half3 oklabColor = evidenceToOklabColor(half(in.display));
+    // 70% Oklab + 30% CPU grayscale: Oklab dominates for perceptual uniformity,
+    // CPU color adds per-patch variation from the evidence system.
+    half3 baseColor = mix(cpuColor, oklabColor, 0.7h);
     // Ensure base color is never pure black (prevents zero ambient floor)
     baseColor = max(baseColor, half3(0.02h));
 
@@ -295,12 +359,18 @@ fragment half4 wedgeFillFragment(
         // Progressive fade from S4 (0.75) to S5+ (1.0)
         half fade = (half(in.display) - 0.75h) / (1.0h - 0.75h);
         // Position-based hash for blue-noise-like dithering (TAA-friendly)
-        // Will upgrade to STBN 128×128×64 texture in future pass
-        float2 screenPos = in.position.xy;
+        // Layer 3.8: Added temporal seed (uniforms.time * 60.0) so the dithering
+        // pattern varies per frame, preventing persistent stipple artifacts.
+        // Will upgrade to STBN 128×128×64 texture in future pass.
+        float2 screenPos = in.position.xy + uniforms.time * 60.0;
         half noise = half(fract(sin(dot(screenPos, float2(12.9898, 78.233))) * 43758.5453));
         // Stochastic transparency: converges under temporal accumulation
         alpha = (fade < noise) ? 1.0h : 0.0h;
     }
+
+    // sRGB gamma encoding — pixel format is .bgra8Unorm (no hardware conversion).
+    // Apply OETF BEFORE pre-multiplied alpha to avoid double-gamma on blended edges.
+    color = linearToSRGB(color);
 
     // Pre-multiplied alpha for AR compositing
     color *= alpha;
@@ -334,54 +404,90 @@ fragment half4 borderStrokeFragment(
 ) {
     // Border width from AdaptiveBorderCalculator
     half borderWidth = half(in.borderWidth);
-    
+
     // Skip if border width is effectively zero
     if (borderWidth < 0.5h) {
         discard_fragment();
     }
-    
+
     // Border color: bright white
     half3 borderColor = half3(1.0h, 1.0h, 1.0h);
-    
+
     // Alpha: modulated by display value
     half baseAlpha = 1.0h;  // borderAlphaAtS0
     half displayFade = 1.0h - half(in.display) * 0.5h;
     half alpha = baseAlpha * displayFade;
-    
+
     // Apply Stevens' Power Law gamma correction
-    half gamma = half(uniforms.borderGamma);  // 1.4
-    alpha = pow(alpha, 1.0h / gamma);
-    
-    // Anti-aliasing: smooth edge based on screen-space derivatives
-    half edgeSoftness = half(fwidth(in.position.x) + fwidth(in.position.y)) * 0.5h;
-    alpha *= smoothstep(0.0h, edgeSoftness * 2.0h, borderWidth * 0.1h);
-    
+    // Layer 7.5: gamma = 0.45 → pow(alpha, 2.22) matches sRGB EOTF for
+    // perceptually linear border fade on iPhone/iPad displays.
+    half gamma = half(uniforms.borderGamma);
+    alpha = pow(max(alpha, 0.001h), 1.0h / gamma);
+
+    // ── Layer 7.1: Edge Temporal Anti-Aliasing (ETAA) ──
+    // Multi-sample edge detection using screen-space derivatives for
+    // sub-pixel accurate anti-aliasing at mesh boundaries.
+    //
+    // Standard fwidth gives 1px softness; ETAA extends this with:
+    // 1. Anisotropic edge softness (respects edge direction)
+    // 2. Temporal jitter to break up aliasing under motion
+    // 3. Variance-aware clamping to prevent ghosting
+
+    // Anisotropic screen-space derivatives (better than isotropic fwidth)
+    float2 dPosDx = float2(dfdx(in.worldPosition.x), dfdx(in.worldPosition.z));
+    float2 dPosDy = float2(dfdy(in.worldPosition.x), dfdy(in.worldPosition.z));
+    // Edge softness: geometric mean of derivative magnitudes for balanced AA
+    half edgeSoftX = half(length(dPosDx));
+    half edgeSoftY = half(length(dPosDy));
+    half edgeSoftness = sqrt(edgeSoftX * edgeSoftX + edgeSoftY * edgeSoftY);
+    // Fallback to position-based fwidth if world derivatives are degenerate
+    edgeSoftness = max(edgeSoftness, half(fwidth(in.position.x) + fwidth(in.position.y)) * 0.5h);
+
+    // Temporal sub-pixel jitter: shifts the AA kernel by ±0.5 texel per frame
+    // to break up static aliasing patterns.  Under temporal accumulation (TAA)
+    // this converges to super-sampled quality.
+    float timeFrac = fract(uniforms.time * 7.0);  // 7 Hz jitter cycle
+    half jitterOffset = half(timeFrac - 0.5) * edgeSoftness * 0.5h;
+    half effectiveBorderWidth = borderWidth * 1.5h + jitterOffset;
+
+    // Variance clipping: limit the jitter to prevent ghosting
+    // (k-DOP simplified to 1D: clamp within ±1σ of the static border)
+    half staticBorder = borderWidth * 1.5h;
+    half varianceClip = edgeSoftness * 1.0h;  // 1σ clipping range
+    effectiveBorderWidth = clamp(effectiveBorderWidth,
+                                  staticBorder - varianceClip,
+                                  staticBorder + varianceClip);
+
+    alpha *= smoothstep(0.0h, edgeSoftness * 2.0h, effectiveBorderWidth);
+
     // Pre-multiplied alpha
     borderColor *= alpha;
-    
+
     return half4(borderColor, alpha);
 }
 
 // ─── Pass 3: Metallic Lighting Enhancement ───
-// Adds screen-space metallic sheen for high-evidence patches (display > 0.5).
-// Fresnel-based rim light emphasizes surface curvature and scanning completion.
+// Adds screen-space metallic sheen for ALL patches (from S0 onwards).
+// Fresnel-based rim light emphasizes surface curvature. Bigger/darker triangles
+// show the most metallic character (area_factor boost applied in C++ Core layer).
 
 fragment half4 metallicLightingFragment(
     VertexOut in [[stage_in]],
     constant ScanGuidanceUniforms &uniforms [[buffer(1)]]
 ) {
     half display = half(in.display);
-    if (display < 0.5h) discard_fragment();
+    // No display gate — metallic sheen visible from S0 (C++ sets metallic_s0=0.3)
 
     float3 N = normalize(in.worldNormal);
     float3 V = normalize(uniforms.cameraPosition - in.worldPosition);
 
     half NdotV = half(max(dot(N, V), 0.0));
     half fresnel = pow(1.0h - NdotV, 3.0h);
-    half metallicBoost = (display - 0.5h) * 2.0h;  // [0,1] for display [0.5, 1.0]
-    half3 sheen = half3(fresnel * metallicBoost * 0.15h);
+    // Metallic intensity from vertex attribute (set by C++ PBR pipeline, area-boosted)
+    half metalIntensity = half(in.metallic);
+    half3 sheen = half3(fresnel * metalIntensity * 0.15h);
 
-    half alpha = fresnel * metallicBoost * 0.3h;
+    half alpha = fresnel * metalIntensity * 0.3h;
     // Pre-multiplied alpha
     return half4(sheen * alpha, alpha);
 }

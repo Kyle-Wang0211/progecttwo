@@ -34,6 +34,19 @@ public final class ScanGuidanceRenderPipeline {
     private var currentIndexCount: Int = 0
     private var lastWrittenBufferIndex: Int = 0
 
+    /// Tracks whether update() has produced new data that encode() hasn't consumed yet.
+    /// Prevents semaphore over-signaling: encode() only adds a GPU-completion signal()
+    /// when there's a corresponding update() wait(). Without this, MTKView calling
+    /// draw() faster than ARSession fires frames causes unbounded semaphore growth,
+    /// breaking the triple-buffer protection guarantee.
+    private var hasUnconsumedUpdate: Bool = false
+
+    /// Protects currentIndexCount / lastWrittenBufferIndex / hasUnconsumedUpdate from
+    /// concurrent read (encode on MTKView delegate thread) and write (update on main thread).
+    /// Without this, encode() can read a partially-written bufferIndex or indexCount,
+    /// causing Metal to draw from the wrong buffer or with a stale count.
+    private let bufferLock = NSLock()
+
     // Sub-systems (Core/ pure algorithms)
     private let wedgeGenerator: WedgeGeometryGenerator
     private let borderCalculator: AdaptiveBorderCalculator
@@ -60,12 +73,25 @@ public final class ScanGuidanceRenderPipeline {
         self.lightEstimator = EnvironmentLightEstimator()
         self.thermalAdapter = ThermalQualityAdapter()
         
-        // Initialize triple buffers
+        // Layer 4.3: Initialize triple buffers with guard-let instead of force unwrap.
+        // device.makeBuffer() can return nil under memory pressure or with invalid
+        // parameters, and force unwrap would crash the entire app.
         for _ in 0..<Self.kMaxInflightBuffers {
-            vertexBuffers.append(device.makeBuffer(length: 1024 * 1024, options: [])!)  // 1MB initial
-            indexBuffers.append(device.makeBuffer(length: 256 * 1024, options: [])!)  // 256KB initial
-            uniformBuffers.append(device.makeBuffer(length: 1024, options: [])!)  // 1KB
-            perTriangleBuffers.append(device.makeBuffer(length: 64 * 1024, options: [])!)  // 64KB
+            // Wedge geometry expansion: each input triangle generates a 3D prism
+            // with lod0TrianglesPerPrism (44) output triangles = 132 indices.
+            // For 2000 input triangles: 2000 × 132 = 264K indices × 4 bytes = 1.06MB.
+            // Use 4MB initial buffers to handle up to ~7500 input triangles without reallocation.
+            guard let vb = device.makeBuffer(length: 4 * 1024 * 1024, options: []),   // 4MB vertex
+                  let ib = device.makeBuffer(length: 4 * 1024 * 1024, options: []),   // 4MB index
+                  let ub = device.makeBuffer(length: 1024, options: []),               // 1KB uniform
+                  let ptb = device.makeBuffer(length: 256 * 1024, options: [])         // 256KB per-tri
+            else {
+                throw ScanGuidanceError.deviceInitializationFailed
+            }
+            vertexBuffers.append(vb)
+            indexBuffers.append(ib)
+            uniformBuffers.append(ub)
+            perTriangleBuffers.append(ptb)
         }
         
         // Create render pipeline states
@@ -96,6 +122,25 @@ public final class ScanGuidanceRenderPipeline {
         precomputedFlipAxisData: [(origin: SIMD3<Float>, direction: SIMD3<Float>)]? = nil,
         gpuDurationMs: Double? = nil
     ) {
+        // Layer 4.1: Acquire semaphore at start of update() to prevent writing
+        // to a triple-buffer slot that the GPU is still reading from encode().
+        // The signal() remains in encode()'s completedHandler.
+        //
+        // CRITICAL: Use wait(timeout:) instead of wait() to prevent deadlock.
+        // If encode() is never called (MTKView paused, pipeline nil, app background),
+        // the semaphore is never signaled → wait() blocks the main thread FOREVER.
+        // With a 100ms timeout, we skip this frame instead of freezing the app.
+        // 100ms = ~6 frames at 60fps, generous enough for GPU pipeline stalls.
+        let waitResult = inflightSemaphore.wait(timeout: .now() + .milliseconds(100))
+        if waitResult == .timedOut {
+            // GPU is backed up — skip this update entirely instead of blocking.
+            // The render pipeline will re-use the previous frame's data (stale but visible).
+            #if DEBUG
+            print("[Aether3D] ⚠️ Triple-buffer semaphore timed out — skipping frame update")
+            #endif
+            return
+        }
+
         #if os(iOS) || os(macOS)
         thermalAdapter.updateThermalState(ProcessInfo.processInfo.thermalState)
         #endif
@@ -104,8 +149,28 @@ public final class ScanGuidanceRenderPipeline {
             thermalAdapter.updateFrameTiming(gpuDurationMs: gpuDuration)
         }
 
+        // Note: ScanViewModel already performs C++ multi-factor selection
+        // (selectStableRenderTriangles) before passing meshTriangles here.
+        // The thermal adapter's own tier limit is still applied as a safety cap.
         let tier = thermalAdapter.currentTier
-        let limitedTriangles = Array(meshTriangles.prefix(tier.maxTriangles))
+
+        // v7.2: Adaptive LOD-based cap replaces hardcoded 6000.
+        // Index buffer = 4MB = 1,048,576 UInt32 slots. Indices per input varies by LOD:
+        //   LOD 0 (full): ~44 subtriangles × 3 = 132 indices → max ~7943 inputs
+        //   LOD 1 (medium): ~22 subtriangles × 3 = 66 indices → max ~15891 inputs
+        //   LOD 2+ (low): ~11 subtriangles × 3 = 33 indices → max ~31775 inputs
+        let indicesPerInput: Int
+        switch tier.lodLevel {
+        case .full:   indicesPerInput = 132  // ~44 subtriangles × 3
+        case .medium: indicesPerInput = 66   // ~22 subtriangles × 3
+        case .low:    indicesPerInput = 33   // ~11 subtriangles × 3
+        case .flat:   indicesPerInput = 9    // ~3 subtriangles × 3
+        }
+        let indexBufferCapacity = 1_048_576  // 4MB / sizeof(UInt32)
+        let maxSafeInputTriangles = min(tier.maxTriangles, indexBufferCapacity / indicesPerInput)
+        let limitedTriangles = meshTriangles.count > maxSafeInputTriangles
+            ? Array(meshTriangles.prefix(maxSafeInputTriangles))
+            : meshTriangles
 
         let wedgeData = wedgeGenerator.generate(
             triangles: limitedTriangles,
@@ -155,6 +220,17 @@ public final class ScanGuidanceRenderPipeline {
             triangleCount: limitedTriangles.count
         )
 
+        #if DEBUG
+        // One-shot diagnostic: confirm buffer sizes on first frame
+        if currentBufferIndex == 1 {  // After first advance (was 0 → 1)
+            let ibLen = indexBuffers[0].length
+            let vbLen = vertexBuffers[0].length
+            print("[Aether3D] Pipeline: ib=\(ibLen) vb=\(vbLen) "
+                + "wedge[v=\(wedgeData.vertices.count),i=\(wedgeData.indices.count)] "
+                + "input=\(limitedTriangles.count) bufSlot=\(currentBufferIndex - 1)")
+        }
+        #endif
+
         uploadToBuffers(
             wedgeData: wedgeData,
             lightState: lightState,
@@ -172,39 +248,68 @@ public final class ScanGuidanceRenderPipeline {
 
     /// Encode all render passes into command buffer
     /// Phase 2: Only encodes wedge fill + border stroke passes
+    ///
+    /// Layer 4.1: inflightSemaphore.wait() moved to update() to protect the WRITE
+    /// side. Here we only register the signal handler — the semaphore was already
+    /// acquired before uploadToBuffers() wrote data.
     public func encode(
         into commandBuffer: MTLCommandBuffer,
         renderPassDescriptor: MTLRenderPassDescriptor
     ) {
-        inflightSemaphore.wait()
-        commandBuffer.addCompletedHandler { [weak self] _ in
-            self?.inflightSemaphore.signal()
-        }
-        // Read from the buffer that was last written to by update()
+        // Read shared state under lock to prevent tearing with update() on main thread.
+        // Also consume the update flag: only signal the semaphore if update() produced
+        // new data (paired wait/signal). Without this, MTKView calling draw() faster
+        // than ARSession produces frames → extra signal() calls → semaphore count
+        // grows beyond kMaxInflightBuffers → triple-buffer protection breaks.
+        bufferLock.lock()
         let bufferIndex = lastWrittenBufferIndex
-        // Advance write index for next update() call
-        currentBufferIndex = (currentBufferIndex + 1) % Self.kMaxInflightBuffers
+        let indexCountSnapshot = currentIndexCount
+        let shouldSignalSemaphore = hasUnconsumedUpdate
+        hasUnconsumedUpdate = false
+        bufferLock.unlock()
+
+        // Safety: validate bufferIndex is in range. If it's stale or corrupted,
+        // skip encoding entirely to prevent array-out-of-bounds crash.
+        guard bufferIndex >= 0 && bufferIndex < Self.kMaxInflightBuffers else {
+            if shouldSignalSemaphore {
+                inflightSemaphore.signal()  // Balance the wait() from update()
+            }
+            return
+        }
+
+        // Safety: validate indexCount against actual buffer capacity.
+        // If buffer growth failed (makeBuffer returned nil), indexCount may
+        // exceed what the index buffer can hold → Metal validation crash.
+        let maxSafeIndices = indexBuffers[bufferIndex].length / MemoryLayout<UInt32>.stride
+        let safeIndexCount = min(indexCountSnapshot, maxSafeIndices)
+
+        if shouldSignalSemaphore {
+            commandBuffer.addCompletedHandler { [weak self] _ in
+                self?.inflightSemaphore.signal()
+            }
+        }
 
         guard let encoder = commandBuffer.makeRenderCommandEncoder(
             descriptor: renderPassDescriptor
         ) else { return }
 
-        encodeWedgeFill(encoder: encoder, bufferIndex: bufferIndex)
-        encodeBorderStroke(encoder: encoder, bufferIndex: bufferIndex)
+        encodeWedgeFill(encoder: encoder, bufferIndex: bufferIndex, indexCount: safeIndexCount)
+        encodeBorderStroke(encoder: encoder, bufferIndex: bufferIndex, indexCount: safeIndexCount)
 
         // Pass 3-6: thermal-aware pass mask from C++ engine
-        let mask = thermalAdapter.passMask
+        let rawMask = thermalAdapter.passMask
+        let mask = rawMask == 0 ? UInt32(0x3F) : rawMask  // Safety: zero fallback → all passes enabled
         if mask & 0x04 != 0 {  // bit2: metallic lighting
-            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: metallicLightingPipeline)
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, indexCount: safeIndexCount, pipeline: metallicLightingPipeline)
         }
         if mask & 0x08 != 0 {  // bit3: color correction
-            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: colorCorrectionPipeline)
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, indexCount: safeIndexCount, pipeline: colorCorrectionPipeline)
         }
         if mask & 0x10 != 0 {  // bit4: ambient occlusion
-            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: ambientOcclusionPipeline)
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, indexCount: safeIndexCount, pipeline: ambientOcclusionPipeline)
         }
         if mask & 0x20 != 0 {  // bit5: post-processing
-            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, pipeline: postProcessPipeline)
+            encodeAdditionalPass(encoder: encoder, bufferIndex: bufferIndex, indexCount: safeIndexCount, pipeline: postProcessPipeline)
         }
 
         encoder.endEncoding()
@@ -317,13 +422,14 @@ public final class ScanGuidanceRenderPipeline {
         }
     }
 
-    private func encodeWedgeFill(encoder: MTLRenderCommandEncoder, bufferIndex: Int) {
+    private func encodeWedgeFill(encoder: MTLRenderCommandEncoder, bufferIndex: Int, indexCount: Int) {
         guard let wedgeFillPipeline else { return }
+        guard bufferIndex >= 0 && bufferIndex < vertexBuffers.count else { return }
 
         encoder.setRenderPipelineState(wedgeFillPipeline)
         encoder.setCullMode(.back)
         encoder.setDepthStencilState(depthStencilState)
-        
+
         // Bind buffers
         encoder.setVertexBuffer(vertexBuffers[bufferIndex],
                                offset: 0,
@@ -334,16 +440,16 @@ public final class ScanGuidanceRenderPipeline {
         encoder.setVertexBuffer(perTriangleBuffers[bufferIndex],
                                offset: 0,
                                index: ScanGuidanceVertexDescriptor.BufferIndex.perTriangleData)
-        
+
         // Fragment buffers
         encoder.setFragmentBuffer(uniformBuffers[bufferIndex],
                                  offset: 0,
                                  index: ScanGuidanceVertexDescriptor.BufferIndex.uniforms)
-        
-        if currentIndexCount > 0 {
+
+        if indexCount > 0 {
             encoder.drawIndexedPrimitives(
                 type: .triangle,
-                indexCount: currentIndexCount,
+                indexCount: indexCount,
                 indexType: .uint32,
                 indexBuffer: indexBuffers[bufferIndex],
                 indexBufferOffset: 0
@@ -351,12 +457,18 @@ public final class ScanGuidanceRenderPipeline {
         }
     }
 
-    private func encodeBorderStroke(encoder: MTLRenderCommandEncoder, bufferIndex: Int) {
+    private func encodeBorderStroke(encoder: MTLRenderCommandEncoder, bufferIndex: Int, indexCount: Int) {
         guard let borderStrokePipeline else { return }
+        guard bufferIndex >= 0 && bufferIndex < vertexBuffers.count else { return }
 
         encoder.setRenderPipelineState(borderStrokePipeline)
+        // Layer 3.1: Set depth stencil state for border pass — was missing, causing
+        // Z-fighting where border fragments render behind wedge fill fragments.
+        if let depthStencilState {
+            encoder.setDepthStencilState(depthStencilState)
+        }
         encoder.setCullMode(.back)
-        
+
         // Same buffer bindings as wedge fill
         encoder.setVertexBuffer(vertexBuffers[bufferIndex],
                                offset: 0,
@@ -370,11 +482,11 @@ public final class ScanGuidanceRenderPipeline {
         encoder.setFragmentBuffer(uniformBuffers[bufferIndex],
                                  offset: 0,
                                  index: ScanGuidanceVertexDescriptor.BufferIndex.uniforms)
-        
-        if currentIndexCount > 0 {
+
+        if indexCount > 0 {
             encoder.drawIndexedPrimitives(
                 type: .triangle,
-                indexCount: currentIndexCount,
+                indexCount: indexCount,
                 indexType: .uint32,
                 indexBuffer: indexBuffers[bufferIndex],
                 indexBufferOffset: 0
@@ -387,13 +499,21 @@ public final class ScanGuidanceRenderPipeline {
     private func encodeAdditionalPass(
         encoder: MTLRenderCommandEncoder,
         bufferIndex: Int,
+        indexCount: Int,
         pipeline: MTLRenderPipelineState?
     ) {
         guard let pipeline else { return }
-        guard currentIndexCount > 0 else { return }
+        guard indexCount > 0 else { return }
+        // Safety: ensure bufferIndex is within bounds to prevent array-out-of-bounds crash.
+        // This can happen if encode() reads a stale bufferIndex from before a buffer resize.
+        guard bufferIndex >= 0 && bufferIndex < vertexBuffers.count else { return }
 
         encoder.setRenderPipelineState(pipeline)
         encoder.setCullMode(.back)
+        // Layer 3.1: Set depth stencil state for additional passes — prevents Z-fighting
+        if let depthStencilState {
+            encoder.setDepthStencilState(depthStencilState)
+        }
 
         encoder.setVertexBuffer(vertexBuffers[bufferIndex],
                                offset: 0,
@@ -410,7 +530,7 @@ public final class ScanGuidanceRenderPipeline {
 
         encoder.drawIndexedPrimitives(
             type: .triangle,
-            indexCount: currentIndexCount,
+            indexCount: indexCount,
             indexType: .uint32,
             indexBuffer: indexBuffers[bufferIndex],
             indexBufferOffset: 0
@@ -431,13 +551,24 @@ public final class ScanGuidanceRenderPipeline {
         qualityTier: Int
     ) {
         let bufferIndex = currentBufferIndex
-        lastWrittenBufferIndex = bufferIndex
+        // Advance to next triple-buffer slot for the NEXT frame.
+        // Without this, all frames write to slot 0 — CPU writes collide with
+        // GPU reads on the same buffer, causing torn geometry and visual glitches.
+        currentBufferIndex = (currentBufferIndex + 1) % Self.kMaxInflightBuffers
+
+        // CRITICAL: Do NOT publish lastWrittenBufferIndex yet!
+        // encode() runs on the MTKView delegate thread and reads lastWrittenBufferIndex
+        // to decide which buffer slot the GPU should draw from. If we publish the new
+        // index here (before writing data), encode() will submit a draw call to a buffer
+        // that the CPU is still filling → GPU reads half-written vertex/index/uniform
+        // data → LLDB RPC server crash / GPU hang / visual corruption.
+        // We publish AFTER all four buffer writes are complete (see end of method).
 
         // ── Vertex Buffer ──
         let vertexCount = wedgeData.vertices.count
         let stride = MemoryLayout<Float>.size * 10 + MemoryLayout<UInt32>.size  // 44 bytes
         let requiredVertexSize = vertexCount * stride
-        
+
         // Grow buffer if needed
         if requiredVertexSize > vertexBuffers[bufferIndex].length {
             let newSize = max(requiredVertexSize, vertexBuffers[bufferIndex].length * 2)
@@ -445,10 +576,15 @@ public final class ScanGuidanceRenderPipeline {
                 vertexBuffers[bufferIndex] = newBuffer
             }
         }
-        
+
+        // SAFETY CLAMP: ensure we don't write past buffer end
+        let maxSafeVertexCount = vertexBuffers[bufferIndex].length / stride
+        let safeVertexCount = min(vertexCount, maxSafeVertexCount)
+
         // Copy vertex data
         let vertexPtr = vertexBuffers[bufferIndex].contents()
-        for (i, vertex) in wedgeData.vertices.enumerated() {
+        for i in 0..<safeVertexCount {
+            let vertex = wedgeData.vertices[i]
             let base = vertexPtr + i * stride
             base.storeBytes(of: vertex.position.x, as: Float.self)
             (base + 4).storeBytes(of: vertex.position.y, as: Float.self)
@@ -462,27 +598,37 @@ public final class ScanGuidanceRenderPipeline {
             (base + 36).storeBytes(of: vertex.thickness, as: Float.self)
             (base + 40).storeBytes(of: vertex.triangleId, as: UInt32.self)
         }
-        
-        self.currentVertexCount = vertexCount
-        
+
         // ── Index Buffer ──
         let indexCount = wedgeData.indices.count
         let requiredIndexSize = indexCount * MemoryLayout<UInt32>.stride
-        
+
         if requiredIndexSize > indexBuffers[bufferIndex].length {
             let newSize = max(requiredIndexSize, indexBuffers[bufferIndex].length * 2)
             if let newBuffer = device.makeBuffer(length: newSize, options: []) {
                 indexBuffers[bufferIndex] = newBuffer
             }
         }
-        
-        if indexCount > 0 {
-            wedgeData.indices.withUnsafeBytes { indexBytes in
-                memcpy(indexBuffers[bufferIndex].contents(), indexBytes.baseAddress!, indexBytes.count)
+
+        // SAFETY CLAMP: if buffer growth failed (nil from makeBuffer), clamp indices
+        // to what the current buffer can hold. Prevents Metal validation crash:
+        // "indexBufferOffset + indexCount * 4 must be <= indexBuffer.length"
+        let maxSafeIndexCount = indexBuffers[bufferIndex].length / MemoryLayout<UInt32>.stride
+        let safeIndexCount = min(indexCount, maxSafeIndexCount)
+
+        // VERTEX-INDEX COHERENCE: if vertices were clamped (safeVertexCount < vertexCount),
+        // some indices may reference vertex IDs >= safeVertexCount. The GPU would read
+        // uninitialized vertex memory, causing garbage rendering or validation crashes.
+        // Solution: copy indices but clamp any out-of-range vertex references.
+        if safeIndexCount > 0 {
+            let maxVertexId = UInt32(max(0, safeVertexCount - 1))
+            let ibPtr = indexBuffers[bufferIndex].contents().bindMemory(to: UInt32.self, capacity: safeIndexCount)
+            for i in 0..<safeIndexCount {
+                let idx = wedgeData.indices[i]
+                ibPtr[i] = min(idx, maxVertexId)
             }
         }
-        self.currentIndexCount = indexCount
-        
+
         // ── Uniform Buffer ──
         // v7.0.3 FIX: Removed _pad0 — Metal float3 in struct is 16-byte aligned,
         // and Swift SIMD3<Float> also has 16-byte stride, so no manual padding needed
@@ -508,6 +654,7 @@ public final class ScanGuidanceRenderPipeline {
             var cameraPosition: SIMD3<Float>             // offset 128 (stride 16)
             var primaryLightDirection: SIMD3<Float>      // offset 144 (stride 16)
             var primaryLightIntensity: Float             // offset 160
+            // [12 bytes implicit padding to align SIMD3<Float> to 16 bytes]
             var shCoeffs: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, SIMD3<Float>,
                            SIMD3<Float>, SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)  // offset 176
             var qualityTier: UInt32                      // offset 320
@@ -515,6 +662,11 @@ public final class ScanGuidanceRenderPipeline {
             var borderGamma: Float                      // offset 328
             var _pad1: Float = 0                        // offset 332 (align to 336)
         }
+        // Layer 4.5: Compile-time assertion to catch layout mismatches between
+        // Swift GPUUniforms and Metal ScanGuidanceUniforms. Any change to either
+        // side must keep them in sync — a mismatch silently corrupts SH lighting.
+        assert(MemoryLayout<GPUUniforms>.size == 336,
+               "GPUUniforms size mismatch: expected 336 bytes, got \(MemoryLayout<GPUUniforms>.size)")
         
         // Extract camera position from transform
         let camPos = SIMD3<Float>(cameraTransform.columns.3.x,
@@ -596,6 +748,23 @@ public final class ScanGuidanceRenderPipeline {
             (base + 40).storeBytes(of: grayColor.1, as: Float.self)
             (base + 44).storeBytes(of: grayColor.2, as: Float.self)
         }
+
+        // ── ATOMIC PUBLISH ──
+        // ALL four buffers (vertex, index, uniform, perTriangle) for this slot are
+        // now fully written. Publish the new state under a single lock so encode()
+        // sees a consistent snapshot: either the PREVIOUS frame's data (all old) or
+        // THIS frame's data (all new). Never a mix of old counts with new buffers
+        // or vice versa.
+        //
+        // This is the fix for the LLDB RPC server crash: previously,
+        // lastWrittenBufferIndex was set at the TOP of this method, so encode()
+        // could submit a draw call referencing a buffer mid-write.
+        bufferLock.lock()
+        self.lastWrittenBufferIndex = bufferIndex
+        self.currentVertexCount = safeVertexCount
+        self.currentIndexCount = safeIndexCount
+        self.hasUnconsumedUpdate = true
+        bufferLock.unlock()
     }
 
     private func normalizePerTriangleArray(

@@ -47,18 +47,23 @@ public enum ScanGuidanceConstants {
 
     // MARK: - Section 2: Border System (8 constants)
 
-    /// Base border width (pixels)
-    public static let borderBaseWidthPx: Double = 6.0
-    /// Minimum border width (pixels)
-    public static let borderMinWidthPx: Double = 1.0
-    /// Maximum border width (pixels)
-    public static let borderMaxWidthPx: Double = 12.0
+    /// Base border width (pixels) — Layer 3.2: increased for user-requested thicker borders
+    public static let borderBaseWidthPx: Double = 8.0
+    /// Minimum border width (pixels) — Layer 3.2: raised floor so borders never vanish
+    public static let borderMinWidthPx: Double = 2.0
+    /// Maximum border width (pixels) — Layer 3.2: wider cap for prominent borders
+    public static let borderMaxWidthPx: Double = 16.0
     /// Display factor weight in border calculation
     public static let borderDisplayWeight: Double = 0.6
     /// Area factor weight in border calculation
     public static let borderAreaWeight: Double = 0.4
     /// Border gamma (Stevens' Power Law for brightness perception)
-    public static let borderGamma: Double = 1.4
+    /// Layer 7.5: Changed from 1.4 → 0.45 to match sRGB perceptual curve.
+    /// Stevens' power law exponent for area luminance is ~0.5; the sRGB OETF
+    /// uses 1/2.2 ≈ 0.4545.  In the shader `pow(alpha, 1/gamma)` produces
+    /// pow(alpha, 2.22) which compensates for the display's non-linear EOTF,
+    /// yielding a perceptually linear border fade as display increases.
+    public static let borderGamma: Double = 0.45
     /// Border color: white RGB(255,255,255)
     /// v7.0.3: Changed from UInt8 to Int for SystemConstantSpec registration
     public static let borderColorR: Int = 255
@@ -164,14 +169,16 @@ public enum ScanGuidanceConstants {
 
     /// Maximum inflight Metal buffers
     public static let kMaxInflightBuffers: Int = 3
-    /// Nominal tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
-    public static let thermalNominalMaxTriangles: Int = 20000
-    /// Fair tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
-    public static let thermalFairMaxTriangles: Int = 12000
-    /// Serious tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
-    public static let thermalSeriousMaxTriangles: Int = 6000
-    /// Critical tier: max triangles — aligned to C++ ThermalQualityDecision (authoritative)
-    public static let thermalCriticalMaxTriangles: Int = 3000
+    /// Nominal tier: max triangles — Layer 3.5: increased budgets for spatial continuity.
+    /// With selectStableRenderTriangles scoring, higher budgets are safe because
+    /// the C++ engine does spatial-aware prioritization instead of naive truncation.
+    public static let thermalNominalMaxTriangles: Int = 50000
+    /// Fair tier: max triangles
+    public static let thermalFairMaxTriangles: Int = 30000
+    /// Serious tier: max triangles
+    public static let thermalSeriousMaxTriangles: Int = 15000
+    /// Critical tier: max triangles
+    public static let thermalCriticalMaxTriangles: Int = 8000
     /// Thermal hysteresis duration (seconds)
     public static let thermalHysteresisS: Double = 10.0
     /// Frame budget overshoot threshold (ratio of target frame time)
@@ -415,7 +422,7 @@ public enum ScanGuidanceConstants {
             name: "Border Gamma",
             unit: .dimensionless,
             category: .quality,
-            min: 1.0,
+            min: 0.2,
             max: 2.5,
             defaultValue: borderGamma,
             onExceed: .warn,
@@ -1052,9 +1059,9 @@ public enum ScanGuidanceConstants {
         if rippleDampingPerHop <= 0 || rippleDampingPerHop > 1.0 {
             errors.append("rippleDampingPerHop must be in (0, 1], got \(rippleDampingPerHop)")
         }
-        // Border gamma must be positive
-        if borderGamma <= 0 {
-            errors.append("borderGamma must be > 0, got \(borderGamma)")
+        // Border gamma must be positive and within Stevens' power law range
+        if borderGamma <= 0 || borderGamma > 3.0 {
+            errors.append("borderGamma must be in (0, 3.0], got \(borderGamma)")
         }
         // Thermal tier triangle budgets must be descending
         if thermalFairMaxTriangles >= thermalNominalMaxTriangles {

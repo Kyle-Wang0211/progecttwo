@@ -183,7 +183,7 @@ public struct CaptureRecordingConstants {
     // - MUST NOT use DispatchSemaphore or blocking waits
     // - If budget exceeded, skip remaining checks IMMEDIATELY
     // This design prioritizes determinism over completeness
-    static let assetCheckTimeoutSeconds: TimeInterval = 1.5 // Reduced budget, skip faster
+    public static let assetCheckTimeoutSeconds: TimeInterval = 1.5 // Reduced budget, skip faster
     static let reconfigureDelaySeconds: TimeInterval = 0.3  // Faster reconfigure
     static let reconfigureDebounceSeconds: TimeInterval = 2.0  // Reduced from 3.0
     

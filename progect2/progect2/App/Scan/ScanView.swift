@@ -41,6 +41,18 @@ struct ScanView: View {
             ARCameraPreview(viewModel: viewModel)
                 .ignoresSafeArea()
 
+            // Layer 1.5: Fullscreen blackout overlay — appears immediately when
+            // user taps "Start Scan", then gradually fades as triangles cover
+            // the screen. Ensures the visual lifecycle:
+            //   tap → full black → black triangles + white borders → color reveal
+            if viewModel.isCapturing {
+                Color.black
+                    .ignoresSafeArea()
+                    .opacity(viewModel.blackoutOpacity)
+                    .allowsHitTesting(false)
+                    .animation(.easeOut(duration: 0.3), value: viewModel.blackoutOpacity)
+            }
+
             // Layer 2: Metal mesh overlay is injected via ARSCNView delegate
             // (handled inside ARCameraPreview coordinator — no separate SwiftUI layer)
 

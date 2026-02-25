@@ -68,15 +68,17 @@ PBRMaterialParams compute_pbr_from_evidence(
     params.ior = config.ior_s0 + (config.ior_s5 - config.ior_s0) * ior_t;
     params.f0 = f0_from_ior(params.ior);
 
-    // Roughness: smooth → rough for low evidence
+    // Roughness: interpolate from S0 (roughness_s0=0.6, glossy) to S5 (0.15, mirror-like)
+    // Full range from display=0.0 — visible gloss from the very first observation.
     params.roughness = config.roughness_s0 +
         (config.roughness_s5 - config.roughness_s0) *
-        smoothstep(0.1f, 0.88f, t);
+        smoothstep(0.0f, 0.88f, t);
 
-    // Metallic: low evidence → dielectric, high → semi-metallic
+    // Metallic: from S0 (metallic_s0=0.3, subtle sheen) to S5 (0.7, strong metallic)
+    // Full range from display=0.0 — bigger/darker triangles show metallic character.
     params.metallic = config.metallic_s0 +
         (config.metallic_s5 - config.metallic_s0) *
-        smoothstep(0.45f, 0.88f, t);
+        smoothstep(0.0f, 0.88f, t);
 
     // Clearcoat: only for high-evidence surfaces
     if (t > config.clearcoat_threshold) {

@@ -72,7 +72,7 @@ public final class WedgeGeometryGenerator {
         var config = aether_capture_style_runtime_config_t()
         var runtime: OpaquePointer?
         if aether_capture_style_runtime_default_config(&config) == 0 {
-            config.smoothing_alpha = 0.2
+            config.smoothing_alpha = 0.9  // Near-passthrough: PatchDisplayMap already smoothed (alpha=0.85)
             config.freeze_threshold = Float(ScanGuidanceConstants.s3ToS4Threshold)
             config.min_thickness = Float(ScanGuidanceConstants.wedgeMinThicknessM)
             config.max_thickness = Float(ScanGuidanceConstants.wedgeBaseThicknessM)
@@ -186,7 +186,11 @@ public final class WedgeGeometryGenerator {
             )
             nativeTriangles[index].metallic = style.metallic
             nativeTriangles[index].roughness = style.roughness
-            nativeTriangles[index].display = style.resolved_display
+            // Safety: fallback to Swift display if C++ returns invalid value
+            let resolvedDisplay = style.resolved_display
+            nativeTriangles[index].display = resolvedDisplay.isFinite && resolvedDisplay >= 0
+                ? resolvedDisplay
+                : Float(displayValues[triangle.patchId] ?? 0.0)
             nativeTriangles[index].thickness = style.thickness
             nativeTriangles[index].triangle_id = UInt32(index)
         }
@@ -273,7 +277,7 @@ public final class WedgeGeometryGenerator {
         let medianArea = max(1e-6, sortedAreas[sortedAreas.count / 2])
         var config = aether_capture_style_runtime_config_t()
         if aether_capture_style_runtime_default_config(&config) == 0 {
-            config.smoothing_alpha = 0.2
+            config.smoothing_alpha = 0.9  // Near-passthrough: PatchDisplayMap already smoothed (alpha=0.85)
             config.freeze_threshold = Float(ScanGuidanceConstants.s3ToS4Threshold)
             config.min_thickness = Float(ScanGuidanceConstants.wedgeMinThicknessM)
             config.max_thickness = Float(ScanGuidanceConstants.wedgeBaseThicknessM)
@@ -331,7 +335,11 @@ public final class WedgeGeometryGenerator {
             )
             nativeTriangles[index].metallic = style.metallic
             nativeTriangles[index].roughness = style.roughness
-            nativeTriangles[index].display = style.resolved_display
+            // Safety: fallback to Swift display if C++ returns invalid value
+            let resolvedDisplay = style.resolved_display
+            nativeTriangles[index].display = resolvedDisplay.isFinite && resolvedDisplay >= 0
+                ? resolvedDisplay
+                : Float(displayValues[triangle.patchId] ?? 0.0)
             nativeTriangles[index].thickness = style.thickness
             nativeTriangles[index].triangle_id = UInt32(index)
         }

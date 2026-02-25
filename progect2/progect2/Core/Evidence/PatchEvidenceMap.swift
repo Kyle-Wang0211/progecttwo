@@ -190,11 +190,70 @@ public final class PatchEvidenceMap {
             )
         }
         
-        _ = ledgerQuality
-        _ = verdict
-        _ = frameId
-        _ = errorType
-        EvidenceLogger.warn("Native patch-evidence kernel unavailable for patch \(patchId); update skipped")
+        // Layer 6.9: Software-only fallback when C++ bridge is unavailable.
+        //
+        // CRITICAL FIX: Uses ADDITIVE accumulation, not EMA convergence.
+        //
+        // OLD BUG: `evidence += alpha * (ledgerQuality - evidence)` treats
+        // ledgerQuality as a CEILING. If quality=0.3, evidence can NEVER
+        // exceed 0.3 — no matter how many frames you observe. The user scans
+        // for 30 seconds and the triangles stay permanently dark.
+        //
+        // NEW: Each observation ADDS a quality-modulated increment. Evidence
+        // grows toward 1.0 as observations accumulate. Good observations
+        // add more, suspect observations add less. Target: ~10-15 seconds of
+        // good observations to reach 1.0.
+        //
+        // Rate: baseIncrement × verdictMultiplier × qualityModifier
+        //   good observation, quality 0.5:  0.012 × 1.0 × 0.75 = 0.009/frame
+        //   At 60fps × 50% admission duty cycle = 30 effective frames/sec × 0.009 = 0.27/sec
+        //   display=0.3 (visually noticeable) in ~1.1 seconds ✓
+        //   display=0.7 (bright) in ~2.6 seconds ✓
+        //   display=1.0 (full) in ~3.7 seconds ✓
+        let baseIncrement = 0.01  // Admission removed: 0.01×60fps×0.75(quality)=0.45/sec → display=0.3 in ~0.7s, display=1.0 in ~2.2s
+        let verdictMultiplier: Double
+        switch verdict {
+        case .good:
+            verdictMultiplier = 1.0     // Full speed
+        case .suspect:
+            verdictMultiplier = 0.3     // 30% speed — still makes progress
+        case .bad:
+            verdictMultiplier = 0.0     // No growth, penalty below
+        case .unknown:
+            verdictMultiplier = 0.15    // Minimal growth
+        }
+
+        if verdict == .bad {
+            // Penalty: fixed decrement (never below 0), with streak tracking.
+            // Bad observations still penalize, but don't erase all progress.
+            let penaltyAmount = min(0.02, 0.008 * Double(1 + entry.errorStreak))
+            entry.evidence = max(0.0, entry.evidence - penaltyAmount)
+            entry.errorCount += 1
+            entry.errorStreak += 1
+        } else {
+            // ADDITIVE growth: quality modulates the rate, NOT the ceiling.
+            // qualityModifier has a floor of 0.3 — even low-quality observations
+            // contribute, just slower. This ensures distant/small triangles still
+            // change color over time (the user's core complaint).
+            let qualityModifier = max(0.3, min(1.0, ledgerQuality * 1.5))
+            let increment = baseIncrement * verdictMultiplier * qualityModifier
+            entry.evidence = min(1.0, entry.evidence + increment)
+            entry.errorStreak = 0
+            entry.lastGoodUpdateMs = timestampMs
+            if verdict == .suspect {
+                entry.suspectCount += 1
+            }
+        }
+        entry.observationCount += 1
+        entry.lastUpdateMs = timestampMs
+
+        // Track best frame on quality improvement
+        if verdict == .good && ledgerQuality > previousEvidence {
+            entry.bestFrameId = frameId
+        }
+
+        _ = errorType  // Reserved for future per-error-type penalty curves
+        EvidenceLogger.warn("Native patch-evidence kernel unavailable for patch \(patchId); software fallback (evidence: \(String(format: "%.4f", previousEvidence)) → \(String(format: "%.4f", entry.evidence)))")
         patches[patchId] = entry
 
         let weight = computeBaseWeight(entry: entry, timestampMs: timestampMs)
@@ -206,7 +265,7 @@ public final class PatchEvidenceMap {
         )
 
         return PatchEntryUpdateResult(
-            wasUpdated: false,
+            wasUpdated: true,
             previousEvidence: previousEvidence,
             newEvidence: entry.evidence,
             isLocked: entry.isLocked
@@ -375,6 +434,38 @@ public final class PatchEvidenceMap {
     public func reset() {
         patches.removeAll()
         aggregator = BucketedAmortizedAggregator()
+    }
+
+    // MARK: - Persistence (save/load)
+
+    /// Save evidence state to disk. PatchEntry conforms to Codable.
+    /// - Parameter url: File URL to write the JSON data.
+    /// - Throws: Encoding or I/O errors.
+    public func saveToDisk(url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(patches)
+        try data.write(to: url, options: [.atomic])
+    }
+
+    /// Load evidence state from disk. Merges by taking higher evidence per patch
+    /// (monotonic guarantee — loaded state never regresses current state).
+    /// - Parameter url: File URL to read the JSON data from.
+    /// - Throws: Decoding or I/O errors.
+    public func loadFromDisk(url: URL) throws {
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        let loaded = try decoder.decode([String: PatchEntry].self, from: data)
+        for (patchId, loadedEntry) in loaded {
+            if let existing = patches[patchId] {
+                // Monotonic merge — take higher evidence
+                if loadedEntry.evidence > existing.evidence {
+                    patches[patchId] = loadedEntry
+                }
+            } else {
+                patches[patchId] = loadedEntry
+            }
+        }
     }
 }
 

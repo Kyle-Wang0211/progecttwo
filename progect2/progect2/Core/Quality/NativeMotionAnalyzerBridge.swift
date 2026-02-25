@@ -5,8 +5,8 @@ import Foundation
 import CAetherNativeBridge
 #endif
 /// Native bridge for motion analyzer (optical flow + quality).
-enum NativeMotionAnalyzerBridge {
-    static func create() -> OpaquePointer? {
+public enum NativeMotionAnalyzerBridge {
+    public static func create() -> OpaquePointer? {
         #if canImport(CAetherNativeBridge)
         var analyzer: OpaquePointer?
         let rc = aether_motion_analyzer_create(&analyzer)
@@ -15,12 +15,12 @@ enum NativeMotionAnalyzerBridge {
         fatalError("CAetherNativeBridge not available")
         #endif
     }
-    static func destroy(_ analyzer: OpaquePointer) {
+    public static func destroy(_ analyzer: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_motion_analyzer_destroy(analyzer)
         #endif
     }
-    static func reset(_ analyzer: OpaquePointer) {
+    public static func reset(_ analyzer: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_motion_analyzer_reset(analyzer)
         #endif

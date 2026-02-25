@@ -117,6 +117,28 @@ struct ARCameraPreview: UIViewRepresentable {
         private var overlayPipeline: ScanGuidanceRenderPipeline?
         #endif
 
+        /// Frame-dropping guard — prevents ARFrame backpressure.
+        /// When processARFrame() takes >16ms (thermal throttle, complex mesh,
+        /// heavy evidence computation), 60fps dispatch queues frames faster than
+        /// they drain. ARKit retains each ARFrame until its last reference is
+        /// released → 11+ retained ARFrames → memory pressure → crash.
+        /// With this flag, we process at most ONE frame at a time. Skipped
+        /// frames are simply dropped (ARKit releases them immediately).
+        ///
+        /// Thread safety: Accessed from ARSession delegate (background) and
+        /// @MainActor (completion). Uses os_unfair_lock for atomic test-and-set.
+        private let frameLock = NSLock()
+        private var _isProcessingFrame = false
+
+        /// Thread-safe reset of frame processing flag.
+        /// Extracted to a nonisolated synchronous method because NSLock.lock()/unlock()
+        /// are unavailable from async contexts (Swift concurrency safety).
+        private nonisolated func releaseFrameProcessingLock() {
+            frameLock.lock()
+            _isProcessingFrame = false
+            frameLock.unlock()
+        }
+
         init(viewModel: ScanViewModel) {
             self.viewModel = viewModel
         }
@@ -131,8 +153,49 @@ struct ARCameraPreview: UIViewRepresentable {
 
         // ARSessionDelegate — called per frame (~60 FPS)
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            // Collect mesh anchors from current frame
+            // ── Frame dropping ──
+            // If the previous frame is still being processed on the main thread,
+            // DROP this frame entirely. This is the #1 defense against ARFrame
+            // retention backpressure. Without this, 60fps dispatch into a handler
+            // that takes >16ms causes unbounded frame accumulation:
+            //   Frame 1 dispatched → still processing
+            //   Frame 2 dispatched → queued behind Frame 1
+            //   Frame 3 dispatched → queued behind Frame 2
+            //   ...
+            //   Frame 11 dispatched → 11 ARFrames retained → crash
+            //
+            // With frame dropping, we process at most 1 frame at a time.
+            // Effective FPS = min(60, 1/processTime). At 25ms process time,
+            // effective FPS = 40, which is perfectly smooth for AR overlay.
+            // Atomic test-and-set: check if idle and claim the slot in one lock region.
+            // ARSession delegate calls from a background thread; the reset happens
+            // on @MainActor. Without the lock, two frames could both pass the guard.
+            frameLock.lock()
+            let busy = _isProcessingFrame
+            if !busy { _isProcessingFrame = true }
+            frameLock.unlock()
+            guard !busy else { return }
+
+            // ── Extract ALL needed data from ARFrame ON THIS THREAD ──
+            // CRITICAL: Do NOT capture `frame` OR `ARMeshAnchor` in the Task closure!
+            // ARMeshAnchor holds strong references to ARKit's Metal geometry buffers.
+            // Each retained anchor prevents ARKit from recycling ~500KB of mesh data.
+            // At 60fps dispatch, this rapidly accumulates 11+ retained frames → memory
+            // pressure → camera pipeline stall → "retaining N ARFrames" warning → freeze.
+            //
+            // FIX (v7.1): Run MeshExtractor.extract() HERE on the ARSession thread.
+            // MeshExtractor is a pure struct with no mutable state — thread-safe.
+            // extract() reads vertex/face/normal data from ARMeshAnchor Metal buffers
+            // and produces lightweight [ScanTriangle] (just value types: SIMD3, Float, String).
+            // Once extract() returns, all ARMeshAnchor references are released immediately.
+            // The Task closure captures ONLY the lightweight ScanTriangle array.
             let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+            let extractedTriangles = MeshExtractor().extract(from: meshAnchors)
+            // meshAnchors goes out of scope here → ARKit can recycle mesh buffers
+
+            let frameTimestamp = frame.timestamp
+            let cameraTransform = frame.camera.transform
+            let lightEstimate = frame.lightEstimate
             #if os(iOS)
             let orientation = overlayView?.window?.windowScene?.interfaceOrientation ?? .portrait
             let viewportSize = overlayView?.drawableSize ?? CGSize(width: 1080, height: 1920)
@@ -144,20 +207,27 @@ struct ARCameraPreview: UIViewRepresentable {
                 zFar: 1000.0
             )
             #else
-            let viewMatrix = simd_inverse(frame.camera.transform)
+            let viewMatrix = simd_inverse(cameraTransform)
             let projectionMatrix = matrix_identity_float4x4
             #endif
 
-            Task { @MainActor in
-                viewModel.processARFrame(
-                    frame: frame,
-                    meshAnchors: meshAnchors,
+            // Task closure captures ONLY lightweight value types — no ARKit objects.
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.viewModel.processARFrame(
+                    timestamp: frameTimestamp,
+                    cameraTransform: cameraTransform,
+                    lightEstimate: lightEstimate,
+                    preExtractedTriangles: extractedTriangles,
                     viewMatrix: viewMatrix,
                     projectionMatrix: projectionMatrix
                 )
                 #if canImport(MetalKit)
-                overlayPipeline = viewModel.currentRenderPipelineForOverlay()
+                self.overlayPipeline = self.viewModel.currentRenderPipelineForOverlay()
                 #endif
+                // Release frame-processing lock AFTER all work completes.
+                // Next ARFrame callback can now proceed.
+                self.releaseFrameProcessingLock()
             }
         }
 

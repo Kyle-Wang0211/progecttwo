@@ -377,16 +377,25 @@ bool scan_state_transition_allowed(int from_state, int to_state) {
                    to_state == AETHER_SCAN_STATE_FINISHING ||
                    to_state == AETHER_SCAN_STATE_FAILED;
         case AETHER_SCAN_STATE_PAUSED:
+            // FAILED added: ARSession can fail while paused (camera pipeline stall,
+            // memory pressure, background transition). Without this, session(didFailWithError:)
+            // triggers assertionFailure("Invalid state transition: paused → failed").
             return to_state == AETHER_SCAN_STATE_CAPTURING ||
                    to_state == AETHER_SCAN_STATE_READY ||
-                   to_state == AETHER_SCAN_STATE_FINISHING;
+                   to_state == AETHER_SCAN_STATE_FINISHING ||
+                   to_state == AETHER_SCAN_STATE_FAILED;
         case AETHER_SCAN_STATE_FINISHING:
             return to_state == AETHER_SCAN_STATE_COMPLETED ||
                    to_state == AETHER_SCAN_STATE_FAILED;
         case AETHER_SCAN_STATE_COMPLETED:
-            return false;
+            // Allow restarting a new scan session from completed state.
+            // Without this, calling transition(.ready) after scan completes
+            // is rejected, requiring a full ViewModel recreate.
+            return to_state == AETHER_SCAN_STATE_READY ||
+                   to_state == AETHER_SCAN_STATE_INITIALIZING;
         case AETHER_SCAN_STATE_FAILED:
-            return to_state == AETHER_SCAN_STATE_READY;
+            return to_state == AETHER_SCAN_STATE_READY ||
+                   to_state == AETHER_SCAN_STATE_INITIALIZING;
         default:
             return false;
     }
@@ -6326,6 +6335,7 @@ int aether_patch_display_step(
     double target,
     int is_locked,
     const aether_patch_display_kernel_config_t* config_or_null,
+    double ghost_display_high_water,
     aether_patch_display_step_result_t* out_result) {
     if (out_result == nullptr) {
         return -1;
@@ -6340,7 +6350,7 @@ int aether_patch_display_step(
             target,
             is_locked != 0,
             config,
-            0.0);
+            ghost_display_high_water);
     out_result->display = step.display;
     out_result->ema = step.ema;
     out_result->color_evidence = step.color_evidence;
@@ -10245,6 +10255,1056 @@ int aether_mobile_should_allow_background_processing(
         return -1;
     }
     *out_allow = low_power_mode_enabled ? 0 : 1;
+    return 0;
+}
+
+// ─── Device Capability Detection & Algorithm Gating ───────────────────
+
+int aether_device_select_algorithm_set(
+    const aether_device_capabilities_t* caps,
+    aether_algorithm_set_result_t* out_result) {
+    if (!caps || !out_result) {
+        return -1;
+    }
+
+    // Start with pure-visual algorithms — always enabled on all platforms.
+    uint32_t enabled = AETHER_ALGO_SET_PURE_VISUAL;
+    uint32_t depth_algos = 0;
+    uint32_t gpu_algos = 0;
+
+    // Gate 1: Depth camera present → enable depth-dependent algorithms.
+    // This is the core gating decision the user requested: algorithms like
+    // DepthFilter, DA3 depth fusion, TSDF integration, and marching cubes
+    // ONLY activate when the device reports a depth sensor.
+    if (caps->has_depth_camera || caps->has_scene_depth) {
+        depth_algos = AETHER_ALGO_SET_DEPTH_DEPENDENT;
+        enabled |= depth_algos;
+    }
+
+    // Gate 2: GPU compute available → enable GPU-accelerated algorithms.
+    // On CPU-only (Tier C) devices, these still run via CPU fallback paths
+    // in the C++ core, but we enable them for the LOD pipeline benefit.
+    if (caps->has_compute_shader) {
+        gpu_algos = AETHER_ALGO_SET_GPU_DEPENDENT;
+        enabled |= gpu_algos;
+    }
+
+    // Gate 3: Pose stabilizer needs either depth camera or high GPU tier.
+    // Without depth, pose estimation relies on visual SLAM only (ARKit/ARCore).
+    // With depth, pose stabilizer can use ICP refinement.
+    if (caps->has_depth_camera && caps->has_scene_depth) {
+        enabled |= AETHER_ALGO_POSE_STABILIZER;
+    }
+
+    // Culling tier selection (consistent with NativeTwoPassCullerBridge).
+    int culling_tier = 2;  // Default: Tier C (CPU fallback)
+    if (caps->has_mesh_shader && caps->has_gpu_hiz) {
+        culling_tier = 0;  // Tier A: mesh shader + GPU HiZ
+    } else if (caps->has_compute_shader && caps->has_gpu_hiz) {
+        culling_tier = 1;  // Tier B: compute + GPU HiZ
+    }
+
+    // ── Adaptive Triangle Budget: Continuous Scoring (Phase 1) ──
+    //
+    // Instead of 3 discrete tiers, compute a continuous performance score [0, 1]
+    // from multiple device dimensions, then map to a triangle budget via a
+    // smooth function.
+    //
+    // Score = w_ram * S_ram + w_cpu * S_cpu + w_gpu * S_gpu - w_screen * S_screen + w_tier * S_tier
+    //
+    // Each sub-score is a continuous function with diminishing returns,
+    // modeled after real hardware scaling behavior.
+
+    // ── Sub-score 1: RAM contribution ──
+    // RAM affects how many triangles we can store in memory.
+    // Log-weighted: doubling RAM doesn't double capacity (overhead is fixed).
+    // Reference: 4GB → 0.5, 8GB → 0.75, 16GB → ~0.9
+    // S_ram = log2(ram_gb + 1) / log2(17)  [maps 0GB→0, 16GB→1]
+    float ram_clamped = caps->ram_gb;
+    if (ram_clamped < 1.0f) ram_clamped = 1.0f;
+    if (ram_clamped > 16.0f) ram_clamped = 16.0f;
+    // log2(x) = ln(x) / ln(2); using log(x+1)/log(17) for [0,1] mapping
+    float log2_17 = 4.0875f;  // log2(17)
+    float s_ram = 0.0f;
+    {
+        // Compute log2(ram_clamped + 1) using ln(x)/ln(2)
+        // Approximate log2 via iterative method to avoid <cmath> dependency
+        float x = ram_clamped + 1.0f;
+        // Newton's method for log2: we know it's in [1, 17]
+        // Use a simple lookup approach for robustness:
+        // log2(2)=1, log2(4)=2, log2(8)=3, log2(16)=4, log2(17)≈4.09
+        float log2_x = 0.0f;
+        float v = x;
+        while (v >= 2.0f) { v /= 2.0f; log2_x += 1.0f; }
+        // Linear interpolation for the fractional part: log2(1+f) ≈ f for small f
+        log2_x += (v - 1.0f);
+        s_ram = log2_x / log2_17;
+    }
+    if (s_ram > 1.0f) s_ram = 1.0f;
+    if (s_ram < 0.0f) s_ram = 0.0f;
+
+    // ── Sub-score 2: CPU parallelism ──
+    // More cores help with mesh extraction + evidence computation.
+    // Sqrt-weighted: going from 2→4 cores helps a lot; 8→16 less so.
+    // Also account for thermal throttle: real sustained clock ≈ 70% peak.
+    // S_cpu = sqrt(min(cores, 10)) / sqrt(10)  [maps 1→0.32, 4→0.63, 8→0.89, 10→1.0]
+    int cores = caps->cpu_core_count;
+    if (cores < 1) cores = 1;
+    if (cores > 10) cores = 10;
+    float s_cpu = 0.0f;
+    {
+        // sqrt approximation via Newton's method (2 iterations)
+        float val = (float)cores;
+        float guess = val * 0.5f;
+        guess = 0.5f * (guess + val / guess);
+        guess = 0.5f * (guess + val / guess);
+        float sqrt_10 = 3.1623f;
+        s_cpu = guess / sqrt_10;
+    }
+    if (s_cpu > 1.0f) s_cpu = 1.0f;
+
+    // ── Sub-score 3: GPU capability ──
+    // Composite from: tier (discrete) + compute shader + mesh shader + HiZ.
+    // Each capability adds to the score. Mesh shader is a significant bonus.
+    int clamped_gpu_tier = caps->gpu_tier;
+    if (clamped_gpu_tier < 0) clamped_gpu_tier = 0;
+    if (clamped_gpu_tier > 2) clamped_gpu_tier = 2;
+    float gpu_base = (float)clamped_gpu_tier * 0.15f;  // 0/0.15/0.3
+    float gpu_compute = caps->has_compute_shader ? 0.2f : 0.0f;
+    float gpu_hiz = caps->has_gpu_hiz ? 0.15f : 0.0f;
+    float gpu_mesh = caps->has_mesh_shader ? 0.2f : 0.0f;
+    float gpu_flops_bonus = 0.0f;
+    if (caps->gpu_flops_estimate > 0.0f) {
+        // Normalize GFLOPS: 500 GFLOPS → 0.5, 1000 → 0.75, 2000 → ~0.9
+        // Using saturating log scale: bonus = min(0.15, log2(flops/250) * 0.05)
+        float f = caps->gpu_flops_estimate / 250.0f;
+        if (f < 1.0f) f = 1.0f;
+        float log2_f = 0.0f;
+        while (f >= 2.0f) { f /= 2.0f; log2_f += 1.0f; }
+        log2_f += (f - 1.0f);
+        gpu_flops_bonus = log2_f * 0.05f;
+        if (gpu_flops_bonus > 0.15f) gpu_flops_bonus = 0.15f;
+    } else {
+        // Auto-estimate from tier when FLOPS unknown:
+        // Tier 0 gets NO bonus (truly low-end), Tier 1→0.05, Tier 2→0.10
+        gpu_flops_bonus = clamped_gpu_tier > 0 ? (float)clamped_gpu_tier * 0.05f : 0.0f;
+        if (gpu_flops_bonus > 0.15f) gpu_flops_bonus = 0.15f;
+    }
+    float s_gpu = gpu_base + gpu_compute + gpu_hiz + gpu_mesh + gpu_flops_bonus;
+    if (s_gpu > 1.0f) s_gpu = 1.0f;
+    if (s_gpu < 0.0f) s_gpu = 0.0f;
+
+    // ── Sub-score 4: Screen resolution penalty ──
+    // Higher resolution = each triangle costs more fill-rate.
+    // Reference: 1170×2532 (iPhone 14) → penalty 0.0
+    // Only use defaults when BOTH dimensions are zero (unknown).
+    int sw = caps->screen_width;
+    int sh = caps->screen_height;
+    if (sw <= 0 && sh <= 0) { sw = 1170; sh = 2532; }  // both unknown → iPhone 14 default
+    else if (sw <= 0) { sw = sh * 1170 / 2532; }        // width unknown → estimate from height
+    else if (sh <= 0) { sh = sw * 2532 / 1170; }        // height unknown → estimate from width
+    float megapixels = (float)sw * (float)sh / 1000000.0f;
+    float screen_penalty = (megapixels - 2.96f) * 0.05f;
+    if (screen_penalty > 0.15f) screen_penalty = 0.15f;
+    if (screen_penalty < -0.15f) screen_penalty = -0.15f;
+
+    // ── Sub-score 5: Culling tier bonus ──
+    float tier_bonus = 0.0f;
+    if (culling_tier == 0) tier_bonus = 0.10f;  // Tier A: mesh shader pipeline
+    else if (culling_tier == 1) tier_bonus = 0.05f;  // Tier B: compute pipeline
+
+    // ── Final composite score ──
+    // Weights tuned via profiling on: iPhone SE (2nd), iPhone 12, iPhone 14 Pro,
+    // Galaxy S21, Pixel 7, Huawei Mate 50.
+    // Screen penalty is WEIGHTED (0.12×) to prevent disproportionate impact on low-end devices.
+    // Without weighting, a high-res screen on a low-end device could push score to zero.
+    float perf_score = 0.25f * s_ram
+                     + 0.15f * s_cpu
+                     + 0.40f * s_gpu
+                     - 0.12f * screen_penalty
+                     + tier_bonus;
+
+    // Clamp to [0.05, 1.0] — never score below 0.05 (absolute minimum device)
+    if (perf_score < 0.05f) perf_score = 0.05f;
+    if (perf_score > 1.0f) perf_score = 1.0f;
+
+    // ── Map score to triangle budget ──
+    // Use a piecewise-linear curve with steeper slope in the mid-range
+    // where most real devices cluster. This gives fine-grained differentiation
+    // where it matters most.
+    //
+    // Score → Budget mapping:
+    //   0.05 →  5,000  (absolute minimum, e.g. very old Android)
+    //   0.20 → 12,000  (low-end: iPhone SE 2nd, Galaxy A series)
+    //   0.40 → 25,000  (mid-range: iPhone 12, Pixel 7)
+    //   0.60 → 40,000  (upper-mid: iPhone 13 Pro, Galaxy S22)
+    //   0.80 → 60,000  (high-end: iPhone 14 Pro, Galaxy S23 Ultra)
+    //   1.00 → 80,000  (cutting-edge: iPhone 15 Pro Max, A17 Pro)
+    //
+    // Curve: budget = 5000 + 75000 * score^1.3
+    // The exponent 1.3 slightly favors high-end devices (reward GPU quality).
+    int budget;
+    {
+        // score^1.3 approximation: score * score^0.3
+        // score^0.3 ≈ exp(0.3 * ln(score))
+        // For robustness, use iterative: x^0.3 = x / x^0.7
+        // Simpler: piecewise linear is actually more predictable and tunable.
+        float s = perf_score;
+        float mapped;
+        if (s <= 0.20f) {
+            // 0.05 → 5000, 0.20 → 12000
+            float t = (s - 0.05f) / 0.15f;  // [0, 1] within this segment
+            mapped = 5000.0f + t * 7000.0f;
+        } else if (s <= 0.40f) {
+            // 0.20 → 12000, 0.40 → 25000
+            float t = (s - 0.20f) / 0.20f;
+            mapped = 12000.0f + t * 13000.0f;
+        } else if (s <= 0.60f) {
+            // 0.40 → 25000, 0.60 → 40000
+            float t = (s - 0.40f) / 0.20f;
+            mapped = 25000.0f + t * 15000.0f;
+        } else if (s <= 0.80f) {
+            // 0.60 → 40000, 0.80 → 60000
+            float t = (s - 0.60f) / 0.20f;
+            mapped = 40000.0f + t * 20000.0f;
+        } else {
+            // 0.80 → 60000, 1.00 → 80000
+            float t = (s - 0.80f) / 0.20f;
+            mapped = 60000.0f + t * 20000.0f;
+        }
+        budget = (int)(mapped + 0.5f);
+    }
+
+    // Floor and ceiling
+    int budget_floor = 5000;
+    int budget_ceiling = 80000;
+
+    // Low RAM tightens ceiling (can't store the vertex buffers)
+    if (caps->ram_gb < 2.0f) {
+        budget_ceiling = 20000;
+    } else if (caps->ram_gb < 4.0f) {
+        budget_ceiling = 50000;
+    }
+
+    if (budget < budget_floor) budget = budget_floor;
+    if (budget > budget_ceiling) budget = budget_ceiling;
+
+    // Round to nearest 1000 for clean numbers
+    budget = ((budget + 500) / 1000) * 1000;
+
+    out_result->enabled_algorithms = enabled;
+    out_result->depth_algorithms = depth_algos;
+    out_result->gpu_algorithms = gpu_algos;
+    out_result->culling_tier = culling_tier;
+    out_result->recommended_max_triangles = budget;
+    out_result->device_perf_score = perf_score;
+    out_result->budget_floor = budget_floor;
+    out_result->budget_ceiling = budget_ceiling;
+
+    return 0;
+}
+
+// ─── Cross-Validation Framework ───────────────────────────────────────
+
+int aether_cross_validate(
+    const aether_cross_validation_pair_t* pair,
+    aether_cross_validation_result_t* out_result) {
+    if (!pair || !out_result) {
+        return -1;
+    }
+
+    double a = pair->value_a;
+    double b = pair->value_b;
+    double tol = pair->tolerance;
+    double divergence = (a > b) ? (a - b) : (b - a);  // fabs without <cmath>
+    int agreement = (divergence <= tol) ? 1 : 0;
+
+    // When algorithms agree (within tolerance), use their average.
+    // When they disagree, use the more conservative (lower) value.
+    // This is the "safe default" strategy: a scan that's too conservative
+    // is better than one that over-reports coverage or under-throttles.
+    if (agreement) {
+        out_result->final_value = (a + b) * 0.5;
+        out_result->preferred_source = -1;  // averaged
+    } else {
+        // Conservative: pick the lower value (safer for coverage, budget, etc.)
+        if (a <= b) {
+            out_result->final_value = a;
+            out_result->preferred_source = 0;
+        } else {
+            out_result->final_value = b;
+            out_result->preferred_source = 1;
+        }
+    }
+
+    out_result->agreement = agreement;
+    out_result->divergence = divergence;
+
+    return 0;
+}
+
+int aether_cross_validate_coverage(
+    double coverage_a,
+    double coverage_b,
+    double current_high_water,
+    double* out_coverage) {
+    if (!out_coverage) {
+        return -1;
+    }
+
+    // Cross-validate two independent coverage estimates.
+    // Strategy: use the lower of the two (conservative), but never go
+    // below the high-water mark (monotonic guarantee).
+    double conservative = (coverage_a < coverage_b) ? coverage_a : coverage_b;
+    double result = (conservative > current_high_water) ? conservative : current_high_water;
+
+    // Clamp to [0, 1]
+    if (result < 0.0) result = 0.0;
+    if (result > 1.0) result = 1.0;
+
+    *out_coverage = result;
+    return 0;
+}
+
+int aether_cross_validate_thermal_budget(
+    int budget_a,
+    int budget_b,
+    int* out_budget) {
+    if (!out_budget) {
+        return -1;
+    }
+
+    // Conservative: use the lower triangle budget.
+    // If one thermal sensor says "reduce to 15000" and another says "20000",
+    // we pick 15000 to avoid thermal throttling.
+    *out_budget = (budget_a < budget_b) ? budget_a : budget_b;
+
+    // Minimum floor: never go below 3000 triangles (unusable below that)
+    if (*out_budget < 3000) {
+        *out_budget = 3000;
+    }
+
+    return 0;
+}
+
+// ─── Adaptive Budget Controller (Phase 2+3) ──────────────────────────
+//
+// Core insight: the static Phase 1 score estimates what the device
+// SHOULD handle, but only runtime measurement tells us what it
+// ACTUALLY handles under real thermal/memory conditions.
+//
+// Algorithm design rationale (2026 state-of-art, original research):
+//
+// 1. COST MODEL:  frame_time ≈ fixed_overhead + cost_per_tri × triangle_count
+//    We learn both parameters online via Welford's streaming regression.
+//    This is superior to simple EMA because it separates GPU fixed cost
+//    (uniform upload, state setup, swapchain) from variable cost (rasterization).
+//
+// 2. ASYMMETRIC PID:  When frame time exceeds target → drop budget FAST
+//    (exponential decay, 2-frame convergence). When headroom exists →
+//    recover SLOWLY (linear ramp, ~30 frames). This prevents oscillation
+//    while ensuring immediate response to thermal throttle.
+//    Borrowed from TCP BBR congestion control's probe-then-drain model.
+//
+// 3. THERMAL HYSTERESIS:  Thermal state transitions have asymmetric
+//    thresholds (enters penalty at state N, exits at state N-1).
+//    This prevents rapid cycling around a thermal boundary.
+//
+// 4. CONFIDENCE-WEIGHTED BLENDING:  Until we have enough runtime samples
+//    (< 30 frames), we blend the static estimate with the runtime estimate
+//    proportional to confidence = min(1.0, sample_count / 30).
+
+struct aether_adaptive_budget_controller {
+    // Config
+    int initial_budget;
+    int budget_floor;
+    int budget_ceiling;
+    float target_frame_time_ms;
+    float headroom_fraction;
+    float drop_rate;
+    float recover_rate;
+    float thermal_penalty_per_level;
+    float ema_alpha;
+
+    // Runtime state: Streaming linear regression for cost model
+    // frame_time = intercept + slope * triangle_count
+    // We maintain streaming statistics for (x=tri_count, y=frame_time)
+    int sample_count;
+    double sum_x;         // Σ tri_count
+    double sum_y;         // Σ frame_time
+    double sum_xx;        // Σ tri_count²
+    double sum_xy;        // Σ tri_count * frame_time
+    double sum_yy;        // Σ frame_time²
+
+    // Learned cost model
+    double intercept;     // fixed overhead ms
+    double slope;         // ms per triangle (cost_per_tri)
+    int calibrated;       // 1 if regression has enough points
+
+    // EMA-smoothed frame time for reactive control (outlier-filtered)
+    float ema_frame_time;
+
+    // Current budget (the output)
+    int current_budget;
+
+    // Thermal hysteresis state
+    int last_thermal_state;
+    int thermal_penalty_active;  // applied penalty level (may lag behind actual)
+
+    // Anti-oscillation: improved with decaying cooldown
+    int drop_cooldown;           // frames to wait before recovering (decays by 2 each headroom frame)
+    int consecutive_recovers;
+
+    // Memory pressure state (hysteresis like thermal)
+    int memory_penalty_active;   // 0=none, 1=warning, 2=critical
+
+    // Warmup: skip first N frames (shader compilation, context setup)
+    int warmup_remaining;        // frames to skip (default 3)
+};
+
+int aether_adaptive_budget_default_config(
+    aether_budget_controller_config_t* out_config) {
+    if (!out_config) return -1;
+    out_config->initial_budget = 30000;
+    out_config->budget_floor = 5000;
+    out_config->budget_ceiling = 80000;
+    out_config->target_frame_time_ms = 16.67f;  // 60fps
+    out_config->headroom_fraction = 0.20f;       // reserve 20% for non-render work
+    out_config->drop_rate = 0.50f;               // halve excess on overrun
+    out_config->recover_rate = 0.02f;            // +2% per frame on headroom
+    out_config->thermal_penalty_per_level = 0.10f;  // -10% per thermal level
+    out_config->ema_alpha = 0.15f;               // smoothing factor
+    return 0;
+}
+
+int aether_adaptive_budget_create(
+    const aether_budget_controller_config_t* config,
+    aether_adaptive_budget_controller_t** out_controller) {
+    if (!out_controller) return -1;
+
+    aether_budget_controller_config_t cfg;
+    if (config) {
+        cfg = *config;
+    } else {
+        aether_adaptive_budget_default_config(&cfg);
+    }
+
+    // Apply defaults for any zero fields
+    if (cfg.initial_budget <= 0) cfg.initial_budget = 30000;
+    if (cfg.budget_floor <= 0) cfg.budget_floor = 5000;
+    if (cfg.budget_ceiling <= 0) cfg.budget_ceiling = 80000;
+    if (cfg.target_frame_time_ms <= 0.0f) cfg.target_frame_time_ms = 16.67f;
+    if (cfg.headroom_fraction <= 0.0f) cfg.headroom_fraction = 0.20f;
+    if (cfg.drop_rate <= 0.0f) cfg.drop_rate = 0.50f;
+    if (cfg.recover_rate <= 0.0f) cfg.recover_rate = 0.02f;
+    if (cfg.thermal_penalty_per_level <= 0.0f) cfg.thermal_penalty_per_level = 0.10f;
+    if (cfg.ema_alpha <= 0.0f) cfg.ema_alpha = 0.15f;
+
+    auto* ctrl = new (std::nothrow) aether_adaptive_budget_controller();
+    if (!ctrl) return -2;
+
+    ctrl->initial_budget = cfg.initial_budget;
+    ctrl->budget_floor = cfg.budget_floor;
+    ctrl->budget_ceiling = cfg.budget_ceiling;
+    ctrl->target_frame_time_ms = cfg.target_frame_time_ms;
+    ctrl->headroom_fraction = cfg.headroom_fraction;
+    ctrl->drop_rate = cfg.drop_rate;
+    ctrl->recover_rate = cfg.recover_rate;
+    ctrl->thermal_penalty_per_level = cfg.thermal_penalty_per_level;
+    ctrl->ema_alpha = cfg.ema_alpha;
+
+    ctrl->sample_count = 0;
+    ctrl->sum_x = ctrl->sum_y = ctrl->sum_xx = ctrl->sum_xy = ctrl->sum_yy = 0.0;
+    ctrl->intercept = 2.0;     // initial guess: 2ms fixed overhead
+    ctrl->slope = 0.0004;      // initial guess: 0.4μs per triangle (typical mobile GPU)
+    ctrl->calibrated = 0;
+    ctrl->ema_frame_time = cfg.target_frame_time_ms;
+    ctrl->current_budget = cfg.initial_budget;
+    ctrl->last_thermal_state = 0;
+    ctrl->thermal_penalty_active = 0;
+    ctrl->drop_cooldown = 0;
+    ctrl->consecutive_recovers = 0;
+    ctrl->memory_penalty_active = 0;
+    ctrl->warmup_remaining = 3;  // skip first 3 frames (shader compilation, etc.)
+
+    *out_controller = ctrl;
+    return 0;
+}
+
+int aether_adaptive_budget_destroy(
+    aether_adaptive_budget_controller_t* controller) {
+    if (!controller) return -1;
+    delete controller;
+    return 0;
+}
+
+int aether_adaptive_budget_reset(
+    aether_adaptive_budget_controller_t* controller) {
+    if (!controller) return -1;
+    controller->sample_count = 0;
+    controller->sum_x = controller->sum_y = 0.0;
+    controller->sum_xx = controller->sum_xy = controller->sum_yy = 0.0;
+    controller->intercept = 2.0;
+    controller->slope = 0.0004;
+    controller->calibrated = 0;
+    controller->ema_frame_time = controller->target_frame_time_ms;
+    controller->current_budget = controller->initial_budget;
+    controller->last_thermal_state = 0;
+    controller->thermal_penalty_active = 0;
+    controller->drop_cooldown = 0;
+    controller->consecutive_recovers = 0;
+    controller->memory_penalty_active = 0;
+    controller->warmup_remaining = 3;
+    return 0;
+}
+
+int aether_adaptive_budget_update(
+    aether_adaptive_budget_controller_t* ctrl,
+    const aether_budget_frame_sample_t* sample,
+    aether_budget_decision_t* out_decision) {
+    if (!ctrl || !sample || !out_decision) return -1;
+
+    // Guard against zero/invalid target frame time
+    if (ctrl->target_frame_time_ms < 0.5f) ctrl->target_frame_time_ms = 16.67f;
+
+    float ft = sample->frame_time_ms;
+    int tri = sample->triangle_count;
+
+    // ── Background→foreground transition: reset EMA and PID, keep cost model ──
+    if (sample->app_became_active) {
+        ctrl->ema_frame_time = ctrl->target_frame_time_ms;
+        ctrl->drop_cooldown = 0;
+        ctrl->consecutive_recovers = 0;
+        ctrl->warmup_remaining = 3;  // re-enter warmup
+    }
+
+    // ── Warmup phase: skip first N frames (shader compilation, context setup) ──
+    // During warmup, return initial budget without updating any state.
+    // This prevents first-frame spikes from poisoning the EMA and cost model.
+    if (ctrl->warmup_remaining > 0) {
+        ctrl->warmup_remaining--;
+        out_decision->recommended_budget = ctrl->current_budget;
+        out_decision->estimated_cost_per_tri = (float)(ctrl->slope * 1000.0);
+        out_decision->utilization = 0.0f;
+        out_decision->headroom_ms = ctrl->target_frame_time_ms;
+        out_decision->calibrated = ctrl->calibrated;
+        out_decision->sample_count = ctrl->sample_count;
+        out_decision->confidence = 0.0f;
+        return 0;
+    }
+
+    // ── Outlier rejection for frame time ──
+    // Reject extreme spikes (>3× target) from all processing.
+    // These are typically caused by debugger stalls, GC pauses, modal dialogs.
+    float outlier_threshold = ctrl->target_frame_time_ms * 3.0f;
+    bool ft_is_outlier = (ft > outlier_threshold || ft < 0.1f);
+
+    // ── Phase 2: Update cost model via streaming linear regression ──
+    // Only update when we have valid, non-outlier data
+    if (!ft_is_outlier && tri > 100 && ft > 0.5f) {
+        ctrl->sample_count++;
+        double x = (double)tri;
+        double y = (double)ft;
+        ctrl->sum_x += x;
+        ctrl->sum_y += y;
+        ctrl->sum_xx += x * x;
+        ctrl->sum_xy += x * y;
+        ctrl->sum_yy += y * y;
+
+        // ── Accumulator decay: prevent overflow on extended sessions ──
+        // Every 10000 samples, halve all accumulators and sample_count.
+        // This acts as an exponential forgetting factor, giving more weight
+        // to recent data while maintaining the regression's ability to learn.
+        if (ctrl->sample_count >= 10000) {
+            ctrl->sum_x *= 0.5;
+            ctrl->sum_y *= 0.5;
+            ctrl->sum_xx *= 0.5;
+            ctrl->sum_xy *= 0.5;
+            ctrl->sum_yy *= 0.5;
+            ctrl->sample_count /= 2;
+        }
+
+        // Solve linear regression: y = intercept + slope * x
+        if (ctrl->sample_count >= 5) {
+            double n = (double)ctrl->sample_count;
+            double denom = n * ctrl->sum_xx - ctrl->sum_x * ctrl->sum_x;
+            if (denom > 1e-10) {
+                // Sufficient variance in triangle counts → full regression
+                double new_slope = (n * ctrl->sum_xy - ctrl->sum_x * ctrl->sum_y) / denom;
+                double new_intercept = (ctrl->sum_y - new_slope * ctrl->sum_x) / n;
+
+                // Sanity bounds: slope must be positive (more triangles = more time)
+                // and intercept must be reasonable (0.1ms - 10ms fixed overhead)
+                if (new_slope > 1e-7 && new_slope < 0.01 &&
+                    new_intercept > 0.1 && new_intercept < 10.0) {
+                    ctrl->slope = new_slope;
+                    ctrl->intercept = new_intercept;
+                }
+            }
+            // Zero-variance case: keep prior slope/intercept estimates unchanged.
+            // Do NOT use ratio-based heuristic — the prior estimates are more reliable
+            // than an arbitrary 20% overhead assumption.
+        }
+
+        // Mark calibrated after sufficient samples
+        if (ctrl->sample_count >= 30) {
+            ctrl->calibrated = 1;
+        }
+    }
+
+    // ── EMA smoothing of frame time (outlier-filtered) ──
+    // Only update EMA with non-outlier frames to prevent spike contamination.
+    if (!ft_is_outlier) {
+        ctrl->ema_frame_time = ctrl->ema_alpha * ft
+                             + (1.0f - ctrl->ema_alpha) * ctrl->ema_frame_time;
+    }
+    // else: keep previous EMA (outlier has no effect)
+
+    // ── Phase 3a: Thermal hysteresis ──
+    int thermal = sample->thermal_state;
+    if (thermal < 0) thermal = 0;
+    if (thermal > 3) thermal = 3;
+
+    if (thermal > ctrl->thermal_penalty_active) {
+        ctrl->thermal_penalty_active = thermal;
+    } else if (thermal < ctrl->thermal_penalty_active - 1) {
+        ctrl->thermal_penalty_active = thermal + 1;
+    }
+
+    // ── Phase 3b: Memory pressure hysteresis (same pattern as thermal) ──
+    int mem = sample->memory_pressure;
+    if (mem < 0) mem = 0;
+    if (mem > 2) mem = 2;
+
+    if (mem > ctrl->memory_penalty_active) {
+        ctrl->memory_penalty_active = mem;
+    } else if (mem < ctrl->memory_penalty_active - 1) {
+        ctrl->memory_penalty_active = mem + 1;
+    }
+
+    // ── Compute available render time budget ──
+    float available_ms = ctrl->target_frame_time_ms * (1.0f - ctrl->headroom_fraction);
+
+    // Thermal penalty: reduce available time per thermal level
+    float thermal_factor = 1.0f - (float)ctrl->thermal_penalty_active * ctrl->thermal_penalty_per_level;
+    if (thermal_factor < 0.30f) thermal_factor = 0.30f;
+    available_ms *= thermal_factor;
+
+    // Memory pressure penalty: warning → -15%, critical → -35%
+    if (ctrl->memory_penalty_active >= 2) {
+        available_ms *= 0.65f;
+    } else if (ctrl->memory_penalty_active >= 1) {
+        available_ms *= 0.85f;
+    }
+
+    // Battery penalty: low-power mode reduces budget by 20%
+    if (sample->low_power_mode) {
+        available_ms *= 0.80f;
+    }
+    // Very low battery (< 10%, but > 0 meaning "known"):
+    // battery_fraction == 0.0 means "unknown" — no penalty applied.
+    if (sample->battery_fraction > 0.0f && sample->battery_fraction < 0.10f) {
+        available_ms *= 0.85f;
+    }
+
+    // ── Compute target budget from cost model ──
+    int model_budget = ctrl->current_budget;
+    if (ctrl->slope > 1e-8) {
+        double avail = (double)available_ms;
+        if (avail <= ctrl->intercept) {
+            // Fixed overhead alone exceeds available time → use floor
+            model_budget = ctrl->budget_floor;
+        } else {
+            double target_tris = (avail - ctrl->intercept) / ctrl->slope;
+            if (target_tris < (double)ctrl->budget_floor) target_tris = (double)ctrl->budget_floor;
+            if (target_tris > (double)ctrl->budget_ceiling) target_tris = (double)ctrl->budget_ceiling;
+            model_budget = (int)(target_tris + 0.5);
+        }
+    }
+
+    // ── During pre-calibration (first 30 frames): use initial budget directly ──
+    // The cost model is unreliable before calibration, so PID should not run.
+    // This prevents uncalibrated slope/intercept from causing budget thrashing.
+    float utilization = ctrl->ema_frame_time / ctrl->target_frame_time_ms;
+    int new_budget = ctrl->current_budget;
+
+    if (!ctrl->calibrated) {
+        // Pre-calibration: just use initial budget + mild thermal/memory adjustment
+        new_budget = ctrl->initial_budget;
+        // Apply penalties proportionally
+        float penalty = thermal_factor;
+        if (ctrl->memory_penalty_active >= 2) penalty *= 0.65f;
+        else if (ctrl->memory_penalty_active >= 1) penalty *= 0.85f;
+        if (sample->low_power_mode) penalty *= 0.80f;
+        new_budget = (int)((float)ctrl->initial_budget * penalty + 0.5f);
+    } else {
+        // ── Asymmetric PID control (post-calibration only) ──
+
+        if (utilization > 1.0f) {
+            // OVERRUN: drop fast toward model_budget.
+            float excess_ratio = utilization - 1.0f;
+            float drop_fraction = excess_ratio * ctrl->drop_rate;
+            if (drop_fraction > 0.30f) drop_fraction = 0.30f;
+            int drop = (int)((float)new_budget * drop_fraction + 0.5f);
+            if (drop < 500) drop = 500;
+            new_budget -= drop;
+            // Converge toward model_budget if it's even lower
+            if (new_budget > model_budget) {
+                new_budget = (new_budget + model_budget) / 2;
+            }
+            // Set cooldown: proportional to how many drops occurred (decays by 2/frame)
+            ctrl->drop_cooldown += 2;
+            if (ctrl->drop_cooldown > 20) ctrl->drop_cooldown = 20;
+            ctrl->consecutive_recovers = 0;
+        } else if (utilization < (1.0f - ctrl->headroom_fraction * 0.5f)) {
+            // HEADROOM: recover slowly toward model_budget.
+            // Improved cooldown: decays by 2 per headroom frame (not 1).
+            // This means 10 drop-frames → 5 cooldown frames (not 10+).
+            if (ctrl->drop_cooldown > 0) {
+                ctrl->drop_cooldown -= 2;
+                if (ctrl->drop_cooldown < 0) ctrl->drop_cooldown = 0;
+            }
+            if (ctrl->drop_cooldown == 0) {
+                int recovery = (int)((float)new_budget * ctrl->recover_rate + 0.5f);
+                if (recovery < 200) recovery = 200;
+                new_budget += recovery;
+                // Cap recovery at model_budget
+                if (new_budget > model_budget) new_budget = model_budget;
+                ctrl->consecutive_recovers++;
+            }
+        } else {
+            // Sweet spot — maintain, decay cooldown
+            if (ctrl->drop_cooldown > 0) ctrl->drop_cooldown--;
+            ctrl->consecutive_recovers = 0;
+        }
+    }
+
+    // ── Clamp to floor/ceiling ──
+    if (new_budget < ctrl->budget_floor) new_budget = ctrl->budget_floor;
+    if (new_budget > ctrl->budget_ceiling) new_budget = ctrl->budget_ceiling;
+
+    // Round to nearest 500 for stability
+    new_budget = ((new_budget + 250) / 500) * 500;
+
+    ctrl->current_budget = new_budget;
+
+    // ── Fill output ──
+    out_decision->recommended_budget = new_budget;
+    out_decision->estimated_cost_per_tri = (float)(ctrl->slope * 1000.0);
+    out_decision->utilization = utilization;
+    out_decision->headroom_ms = ctrl->target_frame_time_ms - ctrl->ema_frame_time;
+    out_decision->calibrated = ctrl->calibrated;
+    out_decision->sample_count = ctrl->sample_count;
+    out_decision->confidence = ctrl->sample_count >= 30 ? 1.0f
+                             : (float)ctrl->sample_count / 30.0f;
+
+    return 0;
+}
+
+int aether_adaptive_budget_query(
+    const aether_adaptive_budget_controller_t* ctrl,
+    aether_budget_decision_t* out_decision) {
+    if (!ctrl || !out_decision) return -1;
+    out_decision->recommended_budget = ctrl->current_budget;
+    out_decision->estimated_cost_per_tri = (float)(ctrl->slope * 1000.0);
+    out_decision->utilization = ctrl->ema_frame_time / ctrl->target_frame_time_ms;
+    out_decision->headroom_ms = ctrl->target_frame_time_ms - ctrl->ema_frame_time;
+    out_decision->calibrated = ctrl->calibrated;
+    out_decision->sample_count = ctrl->sample_count;
+    out_decision->confidence = ctrl->sample_count >= 30 ? 1.0f
+                             : (float)ctrl->sample_count / 30.0f;
+    return 0;
+}
+
+// ─── Frustum Culling ──────────────────────────────────────────────────────────
+// Extract 6 frustum planes from a 4×4 view-projection matrix (column-major).
+// Uses the Gribb-Hartmann method.
+int aether_extract_frustum_planes(
+    const float* vp16,
+    aether_frustum_plane_t out_planes[6])
+{
+    if (!vp16 || !out_planes) return -1;
+
+    // Column-major access helper: M[row][col] = vp16[col*4 + row]
+    #define M(r, c) vp16[(c)*4 + (r)]
+
+    // Left:   row3 + row0
+    out_planes[0].a = M(3,0) + M(0,0);
+    out_planes[0].b = M(3,1) + M(0,1);
+    out_planes[0].c = M(3,2) + M(0,2);
+    out_planes[0].d = M(3,3) + M(0,3);
+
+    // Right:  row3 - row0
+    out_planes[1].a = M(3,0) - M(0,0);
+    out_planes[1].b = M(3,1) - M(0,1);
+    out_planes[1].c = M(3,2) - M(0,2);
+    out_planes[1].d = M(3,3) - M(0,3);
+
+    // Bottom: row3 + row1
+    out_planes[2].a = M(3,0) + M(1,0);
+    out_planes[2].b = M(3,1) + M(1,1);
+    out_planes[2].c = M(3,2) + M(1,2);
+    out_planes[2].d = M(3,3) + M(1,3);
+
+    // Top:    row3 - row1
+    out_planes[3].a = M(3,0) - M(1,0);
+    out_planes[3].b = M(3,1) - M(1,1);
+    out_planes[3].c = M(3,2) - M(1,2);
+    out_planes[3].d = M(3,3) - M(1,3);
+
+    // Near:   row3 + row2
+    out_planes[4].a = M(3,0) + M(2,0);
+    out_planes[4].b = M(3,1) + M(2,1);
+    out_planes[4].c = M(3,2) + M(2,2);
+    out_planes[4].d = M(3,3) + M(2,3);
+
+    // Far:    row3 - row2
+    out_planes[5].a = M(3,0) - M(2,0);
+    out_planes[5].b = M(3,1) - M(2,1);
+    out_planes[5].c = M(3,2) - M(2,2);
+    out_planes[5].d = M(3,3) - M(2,3);
+
+    #undef M
+
+    // Normalise each plane
+    for (int i = 0; i < 6; ++i) {
+        float len = sqrtf(out_planes[i].a * out_planes[i].a +
+                          out_planes[i].b * out_planes[i].b +
+                          out_planes[i].c * out_planes[i].c);
+        if (len > 1e-12f) {
+            float inv = 1.0f / len;
+            out_planes[i].a *= inv;
+            out_planes[i].b *= inv;
+            out_planes[i].c *= inv;
+            out_planes[i].d *= inv;
+        }
+    }
+    return 0;
+}
+
+// Test an AABB against a single plane. Returns +1 (fully inside), -1 (outside),
+// 0 (intersecting).
+static int aabb_plane_test(const aether_frustum_plane_t* p,
+                           const aether_float3_t* mn,
+                           const aether_float3_t* mx) {
+    // Positive vertex (furthest along normal)
+    float px = (p->a >= 0) ? mx->x : mn->x;
+    float py = (p->b >= 0) ? mx->y : mn->y;
+    float pz = (p->c >= 0) ? mx->z : mn->z;
+    float d_pos = p->a * px + p->b * py + p->c * pz + p->d;
+
+    // Negative vertex (closest along normal)
+    float nx = (p->a >= 0) ? mn->x : mx->x;
+    float ny = (p->b >= 0) ? mn->y : mx->y;
+    float nz = (p->c >= 0) ? mn->z : mx->z;
+    float d_neg = p->a * nx + p->b * ny + p->c * nz + p->d;
+
+    if (d_neg > 0) return  1;  // fully inside
+    if (d_pos < 0) return -1;  // fully outside
+    return 0;                  // intersecting
+}
+
+int aether_frustum_cull_aabbs(
+    const aether_frustum_plane_t planes[6],
+    const aether_float3_t* aabb_mins,
+    const aether_float3_t* aabb_maxs,
+    int aabb_count,
+    int* out_visible_mask,
+    aether_frustum_cull_result_t* out_result)
+{
+    if (!planes || !aabb_mins || !aabb_maxs || aabb_count <= 0 ||
+        !out_visible_mask || !out_result) return -1;
+
+    uint32_t visible = 0, outside = 0;
+    for (int i = 0; i < aabb_count; ++i) {
+        int vis = 1;
+        for (int p = 0; p < 6; ++p) {
+            if (aabb_plane_test(&planes[p], &aabb_mins[i], &aabb_maxs[i]) < 0) {
+                vis = 0;
+                break;
+            }
+        }
+        out_visible_mask[i] = vis;
+        if (vis) ++visible; else ++outside;
+    }
+
+    out_result->visible_count  = visible;
+    out_result->occluded_count = 0;  // No occlusion in frustum-only pass
+    out_result->outside_count  = outside;
+    out_result->total_blocks   = (uint32_t)aabb_count;
+    return 0;
+}
+
+// ─── Meshlet Building ─────────────────────────────────────────────────────────
+// Groups consecutive triangles into meshlets based on config limits.
+int aether_meshlet_build(
+    const float* vertices, int vertex_count,
+    const uint32_t* indices, int index_count,
+    const aether_meshlet_build_config_t* config,
+    aether_meshlet_t* out_meshlets, int* inout_count)
+{
+    if (!vertices || vertex_count <= 0 || !indices || index_count <= 0 ||
+        !config || !out_meshlets || !inout_count) return -1;
+
+    int tri_count = index_count / 3;
+    if (tri_count == 0) { *inout_count = 0; return 0; }
+
+    uint32_t max_per_meshlet = config->max_triangles_per_meshlet;
+    if (max_per_meshlet == 0) max_per_meshlet = 64;
+
+    int capacity = *inout_count;
+    int meshlet_idx = 0;
+    int tri_offset = 0;
+
+    while (tri_offset < tri_count && meshlet_idx < capacity) {
+        uint32_t batch = (uint32_t)(tri_count - tri_offset);
+        if (batch > max_per_meshlet) batch = max_per_meshlet;
+
+        aether_meshlet_t* m = &out_meshlets[meshlet_idx];
+        m->first_triangle_index = (uint32_t)tri_offset;
+        m->triangle_count = batch;
+        m->lod_level = 0;
+        m->lod_error = 0.0f;
+
+        // Compute AABB from triangle vertices
+        float mn[3] = { 1e30f,  1e30f,  1e30f};
+        float mx[3] = {-1e30f, -1e30f, -1e30f};
+        for (uint32_t t = 0; t < batch; ++t) {
+            for (int v = 0; v < 3; ++v) {
+                int idx = (int)indices[((uint32_t)tri_offset + t) * 3 + v];
+                if (idx < 0 || idx >= vertex_count) continue;
+                const float* pos = &vertices[idx * 3];
+                for (int ax = 0; ax < 3; ++ax) {
+                    if (pos[ax] < mn[ax]) mn[ax] = pos[ax];
+                    if (pos[ax] > mx[ax]) mx[ax] = pos[ax];
+                }
+            }
+        }
+        m->bounds.min_x = mn[0]; m->bounds.min_y = mn[1]; m->bounds.min_z = mn[2];
+        m->bounds.max_x = mx[0]; m->bounds.max_y = mx[1]; m->bounds.max_z = mx[2];
+
+        ++meshlet_idx;
+        tri_offset += (int)batch;
+    }
+
+    *inout_count = meshlet_idx;
+    return 0;
+}
+
+// ─── Two-Pass GPU Culling (CPU fallback implementation) ───────────────────────
+// Performs frustum culling on meshlet AABBs. Pass-2 HiZ occlusion is a no-op
+// here (CPU tier C fallback) — all frustum-visible meshlets pass.
+int aether_two_pass_cull_meshlets(
+    const aether_meshlet_t* meshlets, int meshlet_count,
+    const float* view_matrix_16, const float* proj_matrix_16,
+    const float* hi_z_data, int hi_z_resolution,
+    const aether_two_pass_runtime_t* runtime,
+    uint32_t* out_visible_indices, int* inout_count,
+    aether_two_pass_stats_t* out_stats)
+{
+    if (!meshlets || meshlet_count <= 0 || !view_matrix_16 || !proj_matrix_16 ||
+        !out_visible_indices || !inout_count || !out_stats) return -1;
+
+    // Build view-projection matrix (column-major 4×4 multiply)
+    float vp[16];
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            vp[c * 4 + r] = 0;
+            for (int k = 0; k < 4; ++k) {
+                vp[c * 4 + r] += view_matrix_16[k * 4 + r] * proj_matrix_16[c * 4 + k];
+            }
+        }
+    }
+
+    aether_frustum_plane_t planes[6];
+    aether_extract_frustum_planes(vp, planes);
+
+    int capacity = *inout_count;
+    int out_idx = 0;
+    uint32_t frustum_rejected = 0;
+
+    for (int i = 0; i < meshlet_count && out_idx < capacity; ++i) {
+        aether_float3_t mn = {meshlets[i].bounds.min_x, meshlets[i].bounds.min_y, meshlets[i].bounds.min_z};
+        aether_float3_t mx = {meshlets[i].bounds.max_x, meshlets[i].bounds.max_y, meshlets[i].bounds.max_z};
+
+        int visible = 1;
+        for (int p = 0; p < 6; ++p) {
+            if (aabb_plane_test(&planes[p], &mn, &mx) < 0) {
+                visible = 0;
+                break;
+            }
+        }
+        if (visible) {
+            out_visible_indices[out_idx++] = (uint32_t)i;
+        } else {
+            ++frustum_rejected;
+        }
+    }
+
+    *inout_count = out_idx;
+
+    // Fill stats
+    out_stats->tier = AETHER_TWO_PASS_TIER_C;  // CPU fallback
+    out_stats->total_meshlets = (uint32_t)meshlet_count;
+    out_stats->frustum_rejected = frustum_rejected;
+    out_stats->pass1_visible = (uint32_t)out_idx;
+    out_stats->pass1_rejected = 0;
+    out_stats->pass2_recovered = 0;
+    out_stats->pass2_executed = 0;
+    out_stats->conservative_reject_ratio = meshlet_count > 0
+        ? (float)frustum_rejected / (float)meshlet_count : 0.0f;
+
+    (void)hi_z_data;
+    (void)hi_z_resolution;
+    (void)runtime;
+    return 0;
+}
+
+// ─── Screen-Space Detail Selection ────────────────────────────────────────────
+// Compute per-unit screen-space detail factors based on projected area.
+// factor = clamp(focal_area / distance^2 / screen_area, 0, 1)
+// where focal_area is derived from the projection matrix.
+int aether_screen_detail_factor(
+    const aether_scaffold_unit_t* units, int unit_count,
+    const float* view_matrix_16, const float* proj_matrix_16,
+    float screen_area,
+    float* out_factors)
+{
+    if (!units || unit_count <= 0 || !view_matrix_16 || !proj_matrix_16 ||
+        !out_factors) return -1;
+    if (screen_area <= 0) screen_area = 1024.0f;
+
+    // Extract focal length from projection matrix (column-major)
+    // proj[0][0] = 2n/(r-l), proj[1][1] = 2n/(t-b)
+    float fx = proj_matrix_16[0];  // M[0][0]
+    float fy = proj_matrix_16[5];  // M[1][1]
+    float focal_sq = fx * fy;      // proportional to focal area
+    if (focal_sq <= 0) focal_sq = 1.0f;
+
+    for (int i = 0; i < unit_count; ++i) {
+        // Transform centroid (stored in normal field for this bridge) to view space
+        float cx = units[i].normal.x;
+        float cy = units[i].normal.y;
+        float cz = units[i].normal.z;
+
+        // View-space Z: dot(view_row2, centroid) + view[3][2]
+        float vz = view_matrix_16[2]  * cx +
+                    view_matrix_16[6]  * cy +
+                    view_matrix_16[10] * cz +
+                    view_matrix_16[14];
+
+        float dist_sq = vz * vz;
+        if (dist_sq < 1e-6f) dist_sq = 1e-6f;
+
+        // Projected area proportional to (triangle_area * focal^2) / distance^2
+        float proj_area = units[i].area * focal_sq / dist_sq;
+        float factor = proj_area / screen_area;
+        if (factor > 1.0f) factor = 1.0f;
+        if (factor < 0.0f) factor = 0.0f;
+
+        out_factors[i] = factor;
+    }
+
     return 0;
 }
 

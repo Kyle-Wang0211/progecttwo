@@ -9,11 +9,11 @@ import CAetherNativeBridge
 /// Native bridge for the admission controller subsystem.
 /// Delegates to optimized C++ implementation when available.
 /// Wraps spam protection, token bucket, view diversity, and admission controller APIs.
-enum NativeAdmissionControllerBridge {
+public enum NativeAdmissionControllerBridge {
 
     // MARK: - Spam Protection
 
-    static func spamProtectionCreate() -> OpaquePointer? {
+    public static func spamProtectionCreate() -> OpaquePointer? {
         #if canImport(CAetherNativeBridge)
         var spam: OpaquePointer?
         let rc = aether_spam_protection_create(&spam)
@@ -23,7 +23,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func spamProtectionDestroy(_ spam: OpaquePointer) {
+    public static func spamProtectionDestroy(_ spam: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_spam_protection_destroy(spam)
         #else
@@ -31,7 +31,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func spamProtectionReset(_ spam: OpaquePointer) {
+    public static func spamProtectionReset(_ spam: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_spam_protection_reset(spam)
         #else
@@ -39,7 +39,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func spamProtectionShouldAllowUpdate(
+    public static func spamProtectionShouldAllowUpdate(
         _ spam: OpaquePointer,
         patchID: String,
         timestampMs: Int64
@@ -55,7 +55,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func spamProtectionNoveltyScale(
+    public static func spamProtectionNoveltyScale(
         _ spam: OpaquePointer,
         rawNovelty: Double
     ) -> Double {
@@ -68,7 +68,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func spamProtectionFrequencyScale(
+    public static func spamProtectionFrequencyScale(
         _ spam: OpaquePointer,
         patchID: String,
         timestampMs: Int64
@@ -86,7 +86,7 @@ enum NativeAdmissionControllerBridge {
 
     // MARK: - Token Bucket
 
-    static func tokenBucketCreate() -> OpaquePointer? {
+    public static func tokenBucketCreate() -> OpaquePointer? {
         #if canImport(CAetherNativeBridge)
         var limiter: OpaquePointer?
         let rc = aether_token_bucket_create(&limiter)
@@ -96,7 +96,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func tokenBucketDestroy(_ limiter: OpaquePointer) {
+    public static func tokenBucketDestroy(_ limiter: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_token_bucket_destroy(limiter)
         #else
@@ -104,7 +104,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func tokenBucketReset(_ limiter: OpaquePointer) {
+    public static func tokenBucketReset(_ limiter: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_token_bucket_reset(limiter)
         #else
@@ -112,7 +112,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func tokenBucketTryConsume(
+    public static func tokenBucketTryConsume(
         _ limiter: OpaquePointer,
         patchID: String,
         timestampMs: Int64
@@ -128,7 +128,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func tokenBucketAvailableTokens(
+    public static func tokenBucketAvailableTokens(
         _ limiter: OpaquePointer,
         patchID: String,
         timestampMs: Int64
@@ -146,7 +146,7 @@ enum NativeAdmissionControllerBridge {
 
     // MARK: - View Diversity
 
-    static func viewDiversityCreate() -> OpaquePointer? {
+    public static func viewDiversityCreate() -> OpaquePointer? {
         #if canImport(CAetherNativeBridge)
         var tracker: OpaquePointer?
         let rc = aether_view_diversity_create(&tracker)
@@ -156,7 +156,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func viewDiversityDestroy(_ tracker: OpaquePointer) {
+    public static func viewDiversityDestroy(_ tracker: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_view_diversity_destroy(tracker)
         #else
@@ -164,7 +164,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func viewDiversityReset(_ tracker: OpaquePointer) {
+    public static func viewDiversityReset(_ tracker: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_view_diversity_reset(tracker)
         #else
@@ -172,7 +172,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func viewDiversityAddObservation(
+    public static func viewDiversityAddObservation(
         _ tracker: OpaquePointer,
         patchID: String,
         viewAngleDeg: Double,
@@ -189,7 +189,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func viewDiversityScore(
+    public static func viewDiversityScore(
         _ tracker: OpaquePointer,
         patchID: String
     ) -> Double {
@@ -206,7 +206,7 @@ enum NativeAdmissionControllerBridge {
 
     // MARK: - Admission Controller
 
-    static func admissionControllerCreate() -> OpaquePointer? {
+    public static func admissionControllerCreate() -> OpaquePointer? {
         #if canImport(CAetherNativeBridge)
         var controller: OpaquePointer?
         let rc = aether_admission_controller_create(&controller)
@@ -216,7 +216,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func admissionControllerDestroy(_ controller: OpaquePointer) {
+    public static func admissionControllerDestroy(_ controller: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_admission_controller_destroy(controller)
         #else
@@ -224,7 +224,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func admissionControllerReset(_ controller: OpaquePointer) {
+    public static func admissionControllerReset(_ controller: OpaquePointer) {
         #if canImport(CAetherNativeBridge)
         _ = aether_admission_controller_reset(controller)
         #else
@@ -232,7 +232,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func admissionControllerCheck(
+    public static func admissionControllerCheck(
         _ controller: OpaquePointer,
         patchID: String,
         viewAngleDeg: Double,
@@ -250,7 +250,7 @@ enum NativeAdmissionControllerBridge {
         #endif
     }
 
-    static func admissionControllerCheckConfirmedSpam(
+    public static func admissionControllerCheckConfirmedSpam(
         _ controller: OpaquePointer,
         patchID: String,
         spamScore: Double,

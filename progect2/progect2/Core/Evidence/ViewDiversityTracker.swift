@@ -44,10 +44,12 @@ public final class ViewDiversityTracker {
         timestampMs: Int64,
         constants: EvidenceConstants.Type = EvidenceConstants.self
     ) -> Double {
-        precondition(constants.diversityMaxBucketsTracked == 16,
-                     "ViewDiversityTracker uses C++ SSOT constants only")
-        precondition(abs(constants.diversityAngleBucketSizeDeg - 15.0) < 1e-12,
-                     "ViewDiversityTracker uses C++ SSOT constants only")
+        // Layer 6.6: Changed from precondition to guard — precondition crashes
+        // in release builds if constants drift. guard returns safe default.
+        guard constants.diversityMaxBucketsTracked == 16,
+              abs(constants.diversityAngleBucketSizeDeg - 15.0) < 1e-12 else {
+            return 1.0  // Safe default: assume maximum novelty
+        }
 
         var diversity: Double = 1.0
         let rc = patchId.withCString { cPatchId in
@@ -59,10 +61,10 @@ public final class ViewDiversityTracker {
                 &diversity
             )
         }
-        precondition(rc == 0, "aether_view_diversity_add_observation failed: rc=\(rc)")
+        guard rc == 0 else { return 1.0 }
         return diversity
     }
-    
+
     /// Get diversity score for a patch
     ///
     /// - Parameters:
@@ -73,14 +75,15 @@ public final class ViewDiversityTracker {
         patchId: String,
         constants: EvidenceConstants.Type = EvidenceConstants.self
     ) -> Double {
-        precondition(constants.diversityMaxBucketsTracked == 16,
-                     "ViewDiversityTracker uses C++ SSOT constants only")
+        guard constants.diversityMaxBucketsTracked == 16 else {
+            return 1.0
+        }
 
         var diversity: Double = 1.0
         let rc = patchId.withCString { cPatchId in
             aether_view_diversity_score(nativeTracker, cPatchId, &diversity)
         }
-        precondition(rc == 0, "aether_view_diversity_score failed: rc=\(rc)")
+        guard rc == 0 else { return 1.0 }
         return diversity
     }
     

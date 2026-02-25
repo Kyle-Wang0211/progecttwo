@@ -1597,7 +1597,7 @@ int test_patch_display_kernel_c_api() {
     cfg.color_evidence_global_weight = 0.3;
 
     aether_patch_display_step_result_t r0{};
-    int rc = aether_patch_display_step(0.5, 0.5, 10, 0.3, 0, &cfg, &r0);
+    int rc = aether_patch_display_step(0.5, 0.5, 10, 0.3, 0, &cfg, 0.0, &r0);
     if (rc != 0) {
         std::fprintf(stderr, "patch display step #1 failed rc=%d\n", rc);
         failed++;
@@ -1610,8 +1610,8 @@ int test_patch_display_kernel_c_api() {
 
     aether_patch_display_step_result_t unlocked{};
     aether_patch_display_step_result_t locked{};
-    rc = aether_patch_display_step(0.2, 0.2, 1, 0.8, 0, &cfg, &unlocked);
-    rc |= aether_patch_display_step(0.2, 0.2, 1, 0.8, 1, &cfg, &locked);
+    rc = aether_patch_display_step(0.2, 0.2, 1, 0.8, 0, &cfg, 0.0, &unlocked);
+    rc |= aether_patch_display_step(0.2, 0.2, 1, 0.8, 1, &cfg, 0.0, &locked);
     if (rc != 0) {
         std::fprintf(stderr, "patch display step lock compare failed rc=%d\n", rc);
         failed++;
@@ -1628,7 +1628,7 @@ int test_patch_display_kernel_c_api() {
         failed++;
     }
 
-    if (aether_patch_display_step(0.0, 0.0, 0, 0.5, 0, &cfg, nullptr) == 0) {
+    if (aether_patch_display_step(0.0, 0.0, 0, 0.5, 0, &cfg, 0.0, nullptr) == 0) {
         std::fprintf(stderr, "patch display null output expected failure\n");
         failed++;
     }
@@ -4672,11 +4672,13 @@ int test_scan_state_c_api() {
         std::fprintf(stderr, "scan state READY->CAPTURING should be allowed\n");
         failed++;
     }
+    // COMPLETED→READY is now ALLOWED: enables restarting a new scan session
+    // from the completed state without recreating the entire ViewModel.
     if (aether_scan_state_can_transition(
             AETHER_SCAN_STATE_COMPLETED,
             AETHER_SCAN_STATE_READY,
-            &allowed) != 0 || allowed != 0) {
-        std::fprintf(stderr, "scan state COMPLETED->READY should be disallowed\n");
+            &allowed) != 0 || allowed != 1) {
+        std::fprintf(stderr, "scan state COMPLETED->READY should be allowed (session restart)\n");
         failed++;
     }
 
@@ -4770,6 +4772,615 @@ int test_haptic_policy_c_api() {
     return failed;
 }
 
+// ─── Device Capability & Cross-Validation Tests ──────────────────────
+
+int test_device_capability_selection_c_api() {
+    int failed = 0;
+
+    // Test 1: Basic device with no depth camera → pure-visual only
+    {
+        aether_device_capabilities_t caps = {};
+        caps.has_depth_camera = 0;
+        caps.has_scene_depth = 0;
+        caps.has_mesh_reconstruction = 0;
+        caps.has_compute_shader = 1;
+        caps.has_gpu_hiz = 1;
+        caps.has_mesh_shader = 0;
+        caps.cpu_core_count = 4;
+        caps.gpu_tier = 1;
+        caps.ram_gb = 4.0f;
+        caps.os_platform = 0;
+
+        aether_algorithm_set_result_t result = {};
+        if (aether_device_select_algorithm_set(&caps, &result) != 0) {
+            std::fprintf(stderr, "device select failed for no-depth device\n");
+            failed++;
+        }
+        // Depth algorithms should NOT be enabled
+        if (result.depth_algorithms != 0) {
+            std::fprintf(stderr, "depth algorithms should be 0 for no-depth device, got %u\n",
+                         result.depth_algorithms);
+            failed++;
+        }
+        // Pure-visual algorithms should be enabled (check ghost warmstart bit)
+        if (!(result.enabled_algorithms & AETHER_ALGO_GHOST_WARMSTART)) {
+            std::fprintf(stderr, "ghost warmstart should be enabled for all devices\n");
+            failed++;
+        }
+        // GPU algorithms should be enabled (compute shader available)
+        if (result.gpu_algorithms == 0) {
+            std::fprintf(stderr, "GPU algorithms should be enabled when compute available\n");
+            failed++;
+        }
+    }
+
+    // Test 2: Device WITH depth camera → depth algorithms enabled
+    {
+        aether_device_capabilities_t caps = {};
+        caps.has_depth_camera = 1;
+        caps.has_scene_depth = 1;
+        caps.has_mesh_reconstruction = 1;
+        caps.has_compute_shader = 1;
+        caps.has_gpu_hiz = 1;
+        caps.has_mesh_shader = 1;  // A15+ chip
+        caps.cpu_core_count = 6;
+        caps.gpu_tier = 2;
+        caps.ram_gb = 8.0f;
+        caps.os_platform = 0;
+
+        aether_algorithm_set_result_t result = {};
+        if (aether_device_select_algorithm_set(&caps, &result) != 0) {
+            std::fprintf(stderr, "device select failed for depth device\n");
+            failed++;
+        }
+        // Depth algorithms MUST be enabled
+        if (result.depth_algorithms == 0) {
+            std::fprintf(stderr, "depth algorithms should be >0 for depth device\n");
+            failed++;
+        }
+        // Tier A (mesh shader + GPU HiZ)
+        if (result.culling_tier != 0) {
+            std::fprintf(stderr, "expected tier A (0) for mesh shader device, got %d\n",
+                         result.culling_tier);
+            failed++;
+        }
+        // High-end device → continuous scoring gives high budget (40000+)
+        if (result.recommended_max_triangles < 40000 || result.recommended_max_triangles > 80000) {
+            std::fprintf(stderr, "expected 40000-80000 triangles for high-end, got %d\n",
+                         result.recommended_max_triangles);
+            failed++;
+        }
+    }
+
+    // Test 3: Low-end device → reduced budget
+    {
+        aether_device_capabilities_t caps = {};
+        caps.has_depth_camera = 0;
+        caps.has_scene_depth = 0;
+        caps.has_compute_shader = 0;
+        caps.has_gpu_hiz = 0;
+        caps.has_mesh_shader = 0;
+        caps.cpu_core_count = 2;
+        caps.gpu_tier = 0;
+        caps.ram_gb = 2.0f;
+        caps.os_platform = 1;  // Android
+
+        aether_algorithm_set_result_t result = {};
+        if (aether_device_select_algorithm_set(&caps, &result) != 0) {
+            std::fprintf(stderr, "device select failed for low-end device\n");
+            failed++;
+        }
+        // Tier C (CPU fallback)
+        if (result.culling_tier != 2) {
+            std::fprintf(stderr, "expected tier C (2) for low-end device, got %d\n",
+                         result.culling_tier);
+            failed++;
+        }
+        // Low-end → continuous scoring gives low budget (5000-15000)
+        if (result.recommended_max_triangles < 5000 || result.recommended_max_triangles > 15000) {
+            std::fprintf(stderr, "expected 5000-15000 triangles for low-end, got %d\n",
+                         result.recommended_max_triangles);
+            failed++;
+        }
+    }
+
+    // Test 4: Null pointer handling
+    {
+        aether_algorithm_set_result_t result = {};
+        if (aether_device_select_algorithm_set(nullptr, &result) != -1) {
+            std::fprintf(stderr, "should fail on null caps\n");
+            failed++;
+        }
+        aether_device_capabilities_t caps = {};
+        if (aether_device_select_algorithm_set(&caps, nullptr) != -1) {
+            std::fprintf(stderr, "should fail on null result\n");
+            failed++;
+        }
+    }
+
+    return failed;
+}
+
+int test_cross_validation_c_api() {
+    int failed = 0;
+
+    // Test 1: Values within tolerance → averaged
+    {
+        aether_cross_validation_pair_t pair = {0.80, 0.82, 0.05};
+        aether_cross_validation_result_t result = {};
+        if (aether_cross_validate(&pair, &result) != 0) {
+            std::fprintf(stderr, "cross validate failed\n");
+            failed++;
+        }
+        if (result.agreement != 1) {
+            std::fprintf(stderr, "should agree within tolerance\n");
+            failed++;
+        }
+        if (!approx(static_cast<float>(result.final_value), 0.81f, 0.001f)) {
+            std::fprintf(stderr, "averaged value should be ~0.81, got %.4f\n", result.final_value);
+            failed++;
+        }
+    }
+
+    // Test 2: Values diverged → conservative (lower) chosen
+    {
+        aether_cross_validation_pair_t pair = {0.90, 0.60, 0.05};
+        aether_cross_validation_result_t result = {};
+        if (aether_cross_validate(&pair, &result) != 0) {
+            std::fprintf(stderr, "cross validate diverge failed\n");
+            failed++;
+        }
+        if (result.agreement != 0) {
+            std::fprintf(stderr, "should disagree beyond tolerance\n");
+            failed++;
+        }
+        if (!approx(static_cast<float>(result.final_value), 0.60f, 0.001f)) {
+            std::fprintf(stderr, "conservative should be 0.60, got %.4f\n", result.final_value);
+            failed++;
+        }
+        if (result.preferred_source != 1) {
+            std::fprintf(stderr, "source B (0.60) should be preferred\n");
+            failed++;
+        }
+    }
+
+    // Test 3: Coverage cross-validation with monotonic high-water
+    {
+        double out = 0;
+        if (aether_cross_validate_coverage(0.7, 0.5, 0.6, &out) != 0) {
+            std::fprintf(stderr, "coverage cross validate failed\n");
+            failed++;
+        }
+        // conservative = min(0.7, 0.5) = 0.5, but high-water = 0.6
+        // result should be max(0.5, 0.6) = 0.6
+        if (!approx(static_cast<float>(out), 0.6f, 0.001f)) {
+            std::fprintf(stderr, "coverage should be 0.6 (high-water), got %.4f\n", out);
+            failed++;
+        }
+    }
+
+    // Test 4: Coverage where conservative exceeds high-water
+    {
+        double out = 0;
+        if (aether_cross_validate_coverage(0.8, 0.75, 0.6, &out) != 0) {
+            std::fprintf(stderr, "coverage cross validate (exceed) failed\n");
+            failed++;
+        }
+        // conservative = min(0.8, 0.75) = 0.75, exceeds high-water 0.6
+        // result should be 0.75
+        if (!approx(static_cast<float>(out), 0.75f, 0.001f)) {
+            std::fprintf(stderr, "coverage should be 0.75, got %.4f\n", out);
+            failed++;
+        }
+    }
+
+    // Test 5: Thermal budget cross-validation
+    {
+        int out = 0;
+        if (aether_cross_validate_thermal_budget(20000, 15000, &out) != 0) {
+            std::fprintf(stderr, "thermal budget cross validate failed\n");
+            failed++;
+        }
+        if (out != 15000) {
+            std::fprintf(stderr, "thermal budget should be 15000 (conservative), got %d\n", out);
+            failed++;
+        }
+    }
+
+    // Test 6: Thermal budget floor
+    {
+        int out = 0;
+        if (aether_cross_validate_thermal_budget(1000, 500, &out) != 0) {
+            std::fprintf(stderr, "thermal budget floor test failed\n");
+            failed++;
+        }
+        if (out != 3000) {
+            std::fprintf(stderr, "thermal budget should have floor of 3000, got %d\n", out);
+            failed++;
+        }
+    }
+
+    // Test 7: Null pointer handling
+    {
+        (void)0;  // pair not needed for null tests
+        if (aether_cross_validate(nullptr, nullptr) != -1) {
+            std::fprintf(stderr, "cross validate should fail on null\n");
+            failed++;
+        }
+        if (aether_cross_validate_coverage(0.5, 0.5, 0.0, nullptr) != -1) {
+            std::fprintf(stderr, "coverage validate should fail on null\n");
+            failed++;
+        }
+        if (aether_cross_validate_thermal_budget(10000, 10000, nullptr) != -1) {
+            std::fprintf(stderr, "thermal validate should fail on null\n");
+            failed++;
+        }
+    }
+
+    return failed;
+}
+
+int test_adaptive_budget_controller_c_api() {
+    int failed = 0;
+
+    // Test 1: Continuous scoring — different devices get different budgets
+    {
+        // Mid-range device
+        aether_device_capabilities_t mid = {};
+        mid.has_compute_shader = 1;
+        mid.has_gpu_hiz = 1;
+        mid.cpu_core_count = 6;
+        mid.gpu_tier = 1;
+        mid.ram_gb = 4.0f;
+
+        // High-end device
+        aether_device_capabilities_t high = {};
+        high.has_depth_camera = 1;
+        high.has_scene_depth = 1;
+        high.has_compute_shader = 1;
+        high.has_gpu_hiz = 1;
+        high.has_mesh_shader = 1;
+        high.cpu_core_count = 6;
+        high.gpu_tier = 2;
+        high.ram_gb = 8.0f;
+
+        // Low-end device
+        aether_device_capabilities_t low = {};
+        low.cpu_core_count = 2;
+        low.gpu_tier = 0;
+        low.ram_gb = 2.0f;
+
+        aether_algorithm_set_result_t mid_r = {}, high_r = {}, low_r = {};
+        aether_device_select_algorithm_set(&mid, &mid_r);
+        aether_device_select_algorithm_set(&high, &high_r);
+        aether_device_select_algorithm_set(&low, &low_r);
+
+        // Performance scores should be strictly ordered: low < mid < high
+        if (!(low_r.device_perf_score < mid_r.device_perf_score)) {
+            std::fprintf(stderr, "low score (%.3f) should be < mid score (%.3f)\n",
+                         low_r.device_perf_score, mid_r.device_perf_score);
+            failed++;
+        }
+        if (!(mid_r.device_perf_score < high_r.device_perf_score)) {
+            std::fprintf(stderr, "mid score (%.3f) should be < high score (%.3f)\n",
+                         mid_r.device_perf_score, high_r.device_perf_score);
+            failed++;
+        }
+
+        // Budgets should be strictly ordered too
+        if (!(low_r.recommended_max_triangles < mid_r.recommended_max_triangles)) {
+            std::fprintf(stderr, "low budget (%d) should be < mid budget (%d)\n",
+                         low_r.recommended_max_triangles, mid_r.recommended_max_triangles);
+            failed++;
+        }
+        if (!(mid_r.recommended_max_triangles < high_r.recommended_max_triangles)) {
+            std::fprintf(stderr, "mid budget (%d) should be < high budget (%d)\n",
+                         mid_r.recommended_max_triangles, high_r.recommended_max_triangles);
+            failed++;
+        }
+
+        // Budget should be within floor/ceiling
+        if (low_r.recommended_max_triangles < low_r.budget_floor) {
+            std::fprintf(stderr, "budget %d below floor %d\n",
+                         low_r.recommended_max_triangles, low_r.budget_floor);
+            failed++;
+        }
+        if (high_r.recommended_max_triangles > high_r.budget_ceiling) {
+            std::fprintf(stderr, "budget %d above ceiling %d\n",
+                         high_r.recommended_max_triangles, high_r.budget_ceiling);
+            failed++;
+        }
+    }
+
+    // Test 2: Adaptive controller — create, update, query, destroy lifecycle
+    {
+        aether_budget_controller_config_t config;
+        aether_adaptive_budget_default_config(&config);
+        config.initial_budget = 30000;
+        config.budget_floor = 5000;
+        config.budget_ceiling = 80000;
+
+        aether_adaptive_budget_controller_t* ctrl = nullptr;
+        if (aether_adaptive_budget_create(&config, &ctrl) != 0 || !ctrl) {
+            std::fprintf(stderr, "adaptive budget create failed\n");
+            failed++;
+            return failed;
+        }
+
+        // Query before any updates — should return initial budget
+        aether_budget_decision_t decision = {};
+        if (aether_adaptive_budget_query(ctrl, &decision) != 0) {
+            std::fprintf(stderr, "adaptive budget query failed\n");
+            failed++;
+        }
+        if (decision.recommended_budget != 30000) {
+            std::fprintf(stderr, "initial budget should be 30000, got %d\n",
+                         decision.recommended_budget);
+            failed++;
+        }
+        if (decision.calibrated != 0) {
+            std::fprintf(stderr, "should not be calibrated before any samples\n");
+            failed++;
+        }
+
+        // Simulate 60 frames with varied triangle counts (regression needs variance)
+        // Use realistic cost model: frame_time ≈ 1.5ms + 0.0003ms * triangle_count
+        // Triangle counts range from 20000 to 30000 → frame times 7.5ms to 10.5ms
+        // All well under the 16.67ms budget → controller should increase budget
+        for (int i = 0; i < 60; i++) {
+            aether_budget_frame_sample_t sample = {};
+            sample.triangle_count = 20000 + (i % 11) * 1000;  // 20k-30k varied
+            sample.frame_time_ms = 1.5f + 0.0003f * (float)sample.triangle_count;
+            sample.thermal_state = 0;       // nominal
+            sample.battery_fraction = 0.8f;
+            sample.low_power_mode = 0;
+            aether_adaptive_budget_update(ctrl, &sample, &decision);
+        }
+
+        // After 60 frames with significant headroom, budget should have INCREASED from 30000
+        // The learned model: frame_time = 1.5 + 0.0003*tris
+        // Available: 16.67 * 0.80 = 13.34ms → (13.34 - 1.5) / 0.0003 = ~39467 triangles
+        // So budget should converge toward ~39000+
+        if (decision.recommended_budget <= 30000) {
+            std::fprintf(stderr, "budget should increase with headroom, got %d\n",
+                         decision.recommended_budget);
+            failed++;
+        }
+        if (decision.calibrated != 1) {
+            std::fprintf(stderr, "should be calibrated after 60 samples\n");
+            failed++;
+        }
+        if (decision.confidence < 0.95f) {
+            std::fprintf(stderr, "confidence should be ~1.0, got %.2f\n",
+                         decision.confidence);
+            failed++;
+        }
+
+        // Test 3: Thermal throttle — budget should DROP when thermal state rises
+        int budget_before_thermal = decision.recommended_budget;
+        for (int i = 0; i < 10; i++) {
+            aether_budget_frame_sample_t sample = {};
+            sample.triangle_count = decision.recommended_budget;
+            sample.frame_time_ms = 20.0f;  // overrunning!
+            sample.thermal_state = 3;       // critical!
+            sample.battery_fraction = 0.3f;
+            sample.low_power_mode = 0;
+            aether_adaptive_budget_update(ctrl, &sample, &decision);
+        }
+        if (decision.recommended_budget >= budget_before_thermal) {
+            std::fprintf(stderr, "budget should drop under thermal+overrun, "
+                         "was %d, now %d\n",
+                         budget_before_thermal, decision.recommended_budget);
+            failed++;
+        }
+
+        // Test 4: Budget never goes below floor
+        for (int i = 0; i < 100; i++) {
+            aether_budget_frame_sample_t sample = {};
+            sample.triangle_count = 5000;
+            sample.frame_time_ms = 100.0f;  // extreme overrun
+            sample.thermal_state = 3;
+            sample.battery_fraction = 0.05f;
+            sample.low_power_mode = 1;
+            aether_adaptive_budget_update(ctrl, &sample, &decision);
+        }
+        if (decision.recommended_budget < config.budget_floor) {
+            std::fprintf(stderr, "budget %d went below floor %d\n",
+                         decision.recommended_budget, config.budget_floor);
+            failed++;
+        }
+
+        // Test 5: Reset restores initial state
+        if (aether_adaptive_budget_reset(ctrl) != 0) {
+            std::fprintf(stderr, "adaptive budget reset failed\n");
+            failed++;
+        }
+        aether_adaptive_budget_query(ctrl, &decision);
+        if (decision.recommended_budget != 30000) {
+            std::fprintf(stderr, "after reset should be 30000, got %d\n",
+                         decision.recommended_budget);
+            failed++;
+        }
+
+        aether_adaptive_budget_destroy(ctrl);
+    }
+
+    // Test 6: Null safety
+    {
+        if (aether_adaptive_budget_create(nullptr, nullptr) != -1) {
+            std::fprintf(stderr, "create should fail on null\n");
+            failed++;
+        }
+        if (aether_adaptive_budget_destroy(nullptr) != -1) {
+            std::fprintf(stderr, "destroy should fail on null\n");
+            failed++;
+        }
+        if (aether_adaptive_budget_update(nullptr, nullptr, nullptr) != -1) {
+            std::fprintf(stderr, "update should fail on null\n");
+            failed++;
+        }
+        if (aether_adaptive_budget_query(nullptr, nullptr) != -1) {
+            std::fprintf(stderr, "query should fail on null\n");
+            failed++;
+        }
+        if (aether_adaptive_budget_reset(nullptr) != -1) {
+            std::fprintf(stderr, "reset should fail on null\n");
+            failed++;
+        }
+    }
+
+    // Test 7: Outlier rejection — single spike should NOT crash the budget
+    {
+        aether_budget_controller_config_t config;
+        aether_adaptive_budget_default_config(&config);
+        config.initial_budget = 30000;
+        config.budget_floor = 5000;
+        config.budget_ceiling = 80000;
+
+        aether_adaptive_budget_controller_t* ctrl = nullptr;
+        aether_adaptive_budget_create(&config, &ctrl);
+
+        // Feed 30 normal frames to get past warmup and build some state
+        aether_budget_decision_t decision = {};
+        for (int i = 0; i < 35; i++) {
+            aether_budget_frame_sample_t s = {};
+            s.triangle_count = 20000 + (i % 5) * 2000;
+            s.frame_time_ms = 1.5f + 0.0003f * (float)s.triangle_count;
+            s.thermal_state = 0;
+            s.battery_fraction = 0.8f;
+            aether_adaptive_budget_update(ctrl, &s, &decision);
+        }
+        int budget_before_spike = decision.recommended_budget;
+
+        // Inject a massive spike (500ms — debugger stall or GC pause)
+        {
+            aether_budget_frame_sample_t spike = {};
+            spike.triangle_count = 25000;
+            spike.frame_time_ms = 500.0f;  // extreme outlier!
+            spike.thermal_state = 0;
+            spike.battery_fraction = 0.8f;
+            aether_adaptive_budget_update(ctrl, &spike, &decision);
+        }
+
+        // Budget should NOT have crashed — spike was rejected as outlier
+        // Allow at most 20% drop (some PID reaction is expected)
+        if (decision.recommended_budget < budget_before_spike * 8 / 10) {
+            std::fprintf(stderr, "outlier spike should not crash budget: was %d, now %d\n",
+                         budget_before_spike, decision.recommended_budget);
+            failed++;
+        }
+
+        aether_adaptive_budget_destroy(ctrl);
+    }
+
+    // Test 8: Memory pressure — budget should drop under memory warning
+    {
+        aether_budget_controller_config_t config;
+        aether_adaptive_budget_default_config(&config);
+        config.initial_budget = 30000;
+
+        aether_adaptive_budget_controller_t* ctrl = nullptr;
+        aether_adaptive_budget_create(&config, &ctrl);
+
+        // Feed normal frames past warmup
+        aether_budget_decision_t decision = {};
+        for (int i = 0; i < 35; i++) {
+            aether_budget_frame_sample_t s = {};
+            s.triangle_count = 20000 + (i % 5) * 2000;
+            s.frame_time_ms = 1.5f + 0.0003f * (float)s.triangle_count;
+            s.battery_fraction = 0.8f;
+            aether_adaptive_budget_update(ctrl, &s, &decision);
+        }
+        int budget_normal = decision.recommended_budget;
+
+        // Apply critical memory pressure
+        for (int i = 0; i < 10; i++) {
+            aether_budget_frame_sample_t s = {};
+            s.triangle_count = 20000;
+            s.frame_time_ms = 8.0f;
+            s.memory_pressure = 2;  // critical!
+            s.battery_fraction = 0.8f;
+            aether_adaptive_budget_update(ctrl, &s, &decision);
+        }
+
+        // Budget should have dropped under memory pressure
+        if (decision.recommended_budget >= budget_normal) {
+            std::fprintf(stderr, "memory pressure should reduce budget: normal=%d, now=%d\n",
+                         budget_normal, decision.recommended_budget);
+            failed++;
+        }
+
+        aether_adaptive_budget_destroy(ctrl);
+    }
+
+    // Test 9: Warmup phase — first 3 frames should use initial budget
+    {
+        aether_budget_controller_config_t config;
+        aether_adaptive_budget_default_config(&config);
+        config.initial_budget = 25000;
+
+        aether_adaptive_budget_controller_t* ctrl = nullptr;
+        aether_adaptive_budget_create(&config, &ctrl);
+
+        // First frame: even with extreme spike, should get initial budget
+        aether_budget_decision_t decision = {};
+        aether_budget_frame_sample_t spike = {};
+        spike.triangle_count = 10000;
+        spike.frame_time_ms = 200.0f;  // shader compilation spike!
+        spike.battery_fraction = 0.8f;
+        aether_adaptive_budget_update(ctrl, &spike, &decision);
+
+        if (decision.recommended_budget != 25000) {
+            std::fprintf(stderr, "warmup frame should return initial budget 25000, got %d\n",
+                         decision.recommended_budget);
+            failed++;
+        }
+
+        aether_adaptive_budget_destroy(ctrl);
+    }
+
+    // Test 10: Background/foreground transition — app_became_active resets EMA
+    {
+        aether_budget_controller_config_t config;
+        aether_adaptive_budget_default_config(&config);
+        config.initial_budget = 30000;
+
+        aether_adaptive_budget_controller_t* ctrl = nullptr;
+        aether_adaptive_budget_create(&config, &ctrl);
+
+        // Feed 35 normal frames
+        aether_budget_decision_t decision = {};
+        for (int i = 0; i < 35; i++) {
+            aether_budget_frame_sample_t s = {};
+            s.triangle_count = 20000 + (i % 5) * 2000;
+            s.frame_time_ms = 1.5f + 0.0003f * (float)s.triangle_count;
+            s.battery_fraction = 0.8f;
+            aether_adaptive_budget_update(ctrl, &s, &decision);
+        }
+
+        // Simulate returning from background with app_became_active
+        {
+            aether_budget_frame_sample_t s = {};
+            s.triangle_count = 10000;
+            s.frame_time_ms = 150.0f;  // background return spike
+            s.battery_fraction = 0.8f;
+            s.app_became_active = 1;
+            aether_adaptive_budget_update(ctrl, &s, &decision);
+        }
+
+        // Budget should still be reasonable (not crashed by the spike)
+        if (decision.recommended_budget < 20000) {
+            std::fprintf(stderr, "app_became_active should protect from bg spike, got %d\n",
+                         decision.recommended_budget);
+            failed++;
+        }
+
+        aether_adaptive_budget_destroy(ctrl);
+    }
+
+    return failed;
+}
+
 }  // namespace
 
 int main() {
@@ -4821,5 +5432,8 @@ int main() {
     failed += test_camera_format_policy_c_api();
     failed += test_scan_state_c_api();
     failed += test_haptic_policy_c_api();
+    failed += test_device_capability_selection_c_api();
+    failed += test_cross_validation_c_api();
+    failed += test_adaptive_budget_controller_c_api();
     return failed;
 }
