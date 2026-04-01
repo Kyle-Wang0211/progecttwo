@@ -1,0 +1,247 @@
+{
+  "rows": [
+    {
+      "checkpoint": "A",
+      "category": "3x3 房间/路径生成",
+      "method": "sequence/export count",
+      "threshold": "expected frames generated",
+      "hard_threshold": true,
+      "result": "hislam2_traj_full=600, monogs_camera_count=600",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "B",
+      "category": "队列/吞吐压力",
+      "method": "product burst evaluator",
+      "threshold": "burst metrics required",
+      "hard_threshold": true,
+      "result": "missing queue/burst metrics",
+      "status": "UNVERIFIED"
+    },
+    {
+      "checkpoint": "C",
+      "category": "帧接收率",
+      "method": "accepted frame count",
+      "threshold": ">=100",
+      "hard_threshold": true,
+      "result": "hislam2=600, monogs_camera_count=600",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "D",
+      "category": "帧选择 / keyframe 触发",
+      "method": "MonoGS RMSE + keyframe stats",
+      "threshold": "RMSE <= 0.03m and kf_count >= 10",
+      "hard_threshold": true,
+      "result": "rmse=0.9890m, kf_count=185, camera_count=600",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "E",
+      "category": "扫描中训练启动",
+      "method": "training/loss evidence",
+      "threshold": "training starts during scan",
+      "hard_threshold": true,
+      "result": "loss_steps=1366, points=7959829",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "F",
+      "category": "扫描中点数增长",
+      "method": "point growth",
+      "threshold": "points > 0 and growth evidence",
+      "hard_threshold": true,
+      "result": "final_points=7959829",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "G",
+      "category": "loss 收敛",
+      "method": "Photo-SLAM ema_loss",
+      "threshold": "final/first < 3 or steps > 0",
+      "hard_threshold": true,
+      "result": "first=0.333076, last=0.090794, steps=1366",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "H",
+      "category": "总耗时统计",
+      "method": "presence of metric logs",
+      "threshold": "timing artifacts exist",
+      "hard_threshold": false,
+      "result": "render_metric_count=216",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "I",
+      "category": "最终高斯数量",
+      "method": "Photo-SLAM point count",
+      "threshold": ">=1000000",
+      "hard_threshold": true,
+      "result": "points=7959829",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "J",
+      "category": "颜色准确性",
+      "method": "PSNR / final color PLY",
+      "threshold": "psnr_gaussian mean > 10",
+      "hard_threshold": true,
+      "result": "psnr_mean=14.7141, psnr_last=12.2161",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "K",
+      "category": "表面漂移 P95",
+      "method": "WildGS geometry eval",
+      "threshold": "K_P95_MM < 50",
+      "hard_threshold": true,
+      "result": "K_P95_MM=906.854",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "L",
+      "category": "体积/质心匹配",
+      "method": "WildGS geometry eval",
+      "threshold": "centroid <= 200mm and extents within 20% of 3m",
+      "hard_threshold": true,
+      "result": "centroid_mm=520.565, bbox=[1.2021, 0.7519, 1.1075]",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "M",
+      "category": "TSDF active block 数",
+      "method": "product TSDF export",
+      "threshold": "tsdf_active_blocks >= 30000",
+      "hard_threshold": true,
+      "result": "missing product TSDF export",
+      "status": "UNVERIFIED"
+    },
+    {
+      "checkpoint": "N",
+      "category": "tile hit rate",
+      "method": "product world-state",
+      "threshold": "tile hit metrics required",
+      "hard_threshold": true,
+      "result": "missing tile hit-rate export",
+      "status": "UNVERIFIED"
+    },
+    {
+      "checkpoint": "O",
+      "category": "integrated frame count",
+      "method": "camera_count / traj_full",
+      "threshold": ">=100 and full path reached",
+      "hard_threshold": true,
+      "result": "camera_count=600, camera_max_id=599, hislam2_traj_full=600",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "Q1",
+      "category": "Surface Adhesion",
+      "method": "world-state or WildGS geometry",
+      "threshold": "pass rate >= 0.8, <20mm, dot>0.70",
+      "hard_threshold": true,
+      "result": "pass_rate=1.0000",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "Q2",
+      "category": "Support Coverage",
+      "method": "product world-state evaluator",
+      "threshold": "pass rate >= 0.8",
+      "hard_threshold": true,
+      "result": "pass_rate=0.6666666666666666, passing_tiles=416, tiles_with_support=624",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "Q3",
+      "category": "Unique Cell Ownership",
+      "method": "product world-state evaluator",
+      "threshold": "duplicate_cells == 0",
+      "hard_threshold": true,
+      "result": "duplicate_cells=0, frames_with_duplicates=0",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "Q4",
+      "category": "No Overlap",
+      "method": "product world-state evaluator",
+      "threshold": "violating_pairs == 0 and overlap <= 1%",
+      "hard_threshold": true,
+      "result": "checked_pairs=1560, max_overlap_ratio=1.0000003170460439, violating_pairs=1560",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "Q5",
+      "category": "Grid Regularity",
+      "method": "product world-state evaluator",
+      "threshold": "regular_pair_rate >= 0.85",
+      "hard_threshold": true,
+      "result": "duplicate_uv=0, pair_total=0, regular_pair_rate=0.0, regular_pairs=0, spacing_stddev=0.0",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "P1",
+      "category": "State Non-Regression",
+      "method": "product world-state evaluator",
+      "threshold": "state_regressions == 0",
+      "hard_threshold": true,
+      "result": "state_regressions=0",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "P3",
+      "category": "Temporal Flicker",
+      "method": "product world-state evaluator",
+      "threshold": "flicker_fail_tiles == 0",
+      "hard_threshold": true,
+      "result": "candidate_tiles=6, flicker_fail_tiles=0",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "V1",
+      "category": "Coverage Monotonicity",
+      "method": "product world-state evaluator",
+      "threshold": "coverage_regressions == 0",
+      "hard_threshold": true,
+      "result": "coverage_regressions=0",
+      "status": "PASS"
+    },
+    {
+      "checkpoint": "V2",
+      "category": "Gap Consistency",
+      "method": "product world-state evaluator",
+      "threshold": "gap_stddev_mm <= 2.0",
+      "hard_threshold": true,
+      "result": "gap_count=0, gap_stddev_mm=0.0",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "P2",
+      "category": "Pose-Stable Drift",
+      "method": "WildGS geometry eval",
+      "threshold": "samples > 0 and center drift < 3mm and normal drift < 5deg",
+      "hard_threshold": true,
+      "result": "static_windows=0.0, min_gt_window_mm=4.540",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "P",
+      "category": "状态不回溯（粗粒度）",
+      "method": "aggregate P1/P2/P3",
+      "threshold": "all subchecks pass",
+      "hard_threshold": false,
+      "result": "P1=PASS, P2=FAIL, P3=PASS",
+      "status": "FAIL"
+    },
+    {
+      "checkpoint": "Q",
+      "category": "表面吸附（粗粒度）",
+      "method": "aggregate Q1-Q5",
+      "threshold": "all subchecks pass",
+      "hard_threshold": false,
+      "result": "Q1=PASS, Q2=FAIL, Q3=PASS, Q4=FAIL, Q5=FAIL",
+      "status": "FAIL"
+    }
+  ]
+}

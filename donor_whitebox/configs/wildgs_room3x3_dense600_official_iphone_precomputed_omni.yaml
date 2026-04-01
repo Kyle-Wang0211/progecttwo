@@ -1,0 +1,12 @@
+inherit_from: /root/donor_whitebox/configs/wildgs_room3x3_dense600_official_iphone.yaml
+
+scene: room3x3_dense600_official_iphone_precomputed_omni
+
+tracking:
+  use_precomputed_mono_depth: True
+  uncertainty_params:
+    activate: False
+
+mapping:
+  uncertainty_params:
+    activate: False

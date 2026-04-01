@@ -1,0 +1,240 @@
+{
+  "version": "aether_world_state_v1",
+  "meta": {
+    "scene_id": "room3x3",
+    "cell_level": 0,
+    "notes": "Product UI/world-state export example aligned to Aether true-source."
+  },
+  "frames": [
+    {
+      "frame_index": 0,
+      "timestamp_s": 0.0,
+      "coverage": 0.12,
+      "tiles": [
+        {
+          "tile_id": "tile_0001",
+          "cell_id": "spatial:123456789|bucket:478901",
+          "state": "confirmed",
+          "visible": true,
+          "center": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "corners": [
+            [
+              -0.05,
+              0.0,
+              -0.05
+            ],
+            [
+              0.05,
+              0.0,
+              -0.05
+            ],
+            [
+              0.05,
+              0.0,
+              0.05
+            ],
+            [
+              -0.05,
+              0.0,
+              0.05
+            ]
+          ],
+          "surface_center_distance_mm": 7.5,
+          "surface_normal_dot": 0.92,
+          "surface_corner_support": [
+            true,
+            true,
+            true,
+            false
+          ],
+          "u": 3,
+          "v": 4,
+          "neighbors": [
+            {
+              "tile_id": "tile_0002",
+              "gap_mm": 1.4
+            }
+          ]
+        },
+        {
+          "tile_id": "tile_0002",
+          "cell_id": "spatial:123456790|bucket:478901",
+          "state": "locked",
+          "visible": true,
+          "center": [
+            0.1,
+            0.0,
+            0.0
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "corners": [
+            [
+              0.05,
+              0.0,
+              -0.05
+            ],
+            [
+              0.15,
+              0.0,
+              -0.05
+            ],
+            [
+              0.15,
+              0.0,
+              0.05
+            ],
+            [
+              0.05,
+              0.0,
+              0.05
+            ]
+          ],
+          "surface_center_distance_mm": 6.2,
+          "surface_normal_dot": 0.95,
+          "surface_corner_support": [
+            true,
+            true,
+            true,
+            true
+          ],
+          "u": 4,
+          "v": 4,
+          "neighbors": [
+            {
+              "tile_id": "tile_0001",
+              "gap_mm": 1.4
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "frame_index": 1,
+      "timestamp_s": 0.033333,
+      "coverage": 0.14,
+      "tiles": [
+        {
+          "tile_id": "tile_0001",
+          "cell_id": "spatial:123456789|bucket:478901",
+          "state": "confirmed",
+          "visible": true,
+          "center": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "corners": [
+            [
+              -0.05,
+              0.0,
+              -0.05
+            ],
+            [
+              0.05,
+              0.0,
+              -0.05
+            ],
+            [
+              0.05,
+              0.0,
+              0.05
+            ],
+            [
+              -0.05,
+              0.0,
+              0.05
+            ]
+          ],
+          "surface_center_distance_mm": 8.0,
+          "surface_normal_dot": 0.91,
+          "surface_corner_support": [
+            true,
+            true,
+            true,
+            false
+          ],
+          "u": 3,
+          "v": 4,
+          "neighbors": [
+            {
+              "tile_id": "tile_0002",
+              "gap_mm": 1.5
+            }
+          ]
+        },
+        {
+          "tile_id": "tile_0002",
+          "cell_id": "spatial:123456790|bucket:478901",
+          "state": "locked",
+          "visible": true,
+          "center": [
+            0.1,
+            0.0,
+            0.0
+          ],
+          "normal": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "corners": [
+            [
+              0.05,
+              0.0,
+              -0.05
+            ],
+            [
+              0.15,
+              0.0,
+              -0.05
+            ],
+            [
+              0.15,
+              0.0,
+              0.05
+            ],
+            [
+              0.05,
+              0.0,
+              0.05
+            ]
+          ],
+          "surface_center_distance_mm": 6.0,
+          "surface_normal_dot": 0.94,
+          "surface_corner_support": [
+            true,
+            true,
+            true,
+            true
+          ],
+          "u": 4,
+          "v": 4,
+          "neighbors": [
+            {
+              "tile_id": "tile_0001",
+              "gap_mm": 1.5
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

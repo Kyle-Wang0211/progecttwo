@@ -1,0 +1,25 @@
+inherit_from: /root/gs_refs/WildGS-SLAM/configs/Dynamic/Wild_SLAM_iPhone/wild_slam_iphone.yaml
+
+scene: room3x3_dense600_official_iphone
+
+max_frames: 600
+fast_mode: False
+device: "cuda:0"
+gui: False
+verbose: True
+
+data:
+  input_folder: /root/donor_whitebox/outputs/wildgs_room3x3_dense600_input
+  output: /root/donor_whitebox/outputs/wildgs_runs
+
+cam:
+  H: 720
+  W: 960
+  H_out: 360
+  W_out: 480
+  fx: 831.384338
+  fy: 831.384338
+  cx: 480.0
+  cy: 360.0
+  H_edge: 0
+  W_edge: 0

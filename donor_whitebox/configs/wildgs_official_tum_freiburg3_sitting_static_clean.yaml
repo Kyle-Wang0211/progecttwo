@@ -1,0 +1,7 @@
+inherit_from: "/root/gs_refs/WildGS-SLAM.clean/configs/Dynamic/TUM_RGBD/freiburg3_sitting_halfsphere_static.yaml"
+
+scene: freiburg3_sitting_static
+
+data:
+  root_folder: "/root/gs_refs/WildGS-SLAM.clean/datasets/TUM_RGBD"
+  output: "/root/donor_whitebox/outputs/wildgs_runs/official_tum_freiburg3_sitting_static_clean"

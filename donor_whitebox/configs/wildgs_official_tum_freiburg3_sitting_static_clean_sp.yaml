@@ -1,0 +1,7 @@
+inherit_from: "/root/donor_whitebox/configs/wildgs_official_tum_freiburg3_sitting_static_clean.yaml"
+
+single_thread: True
+gui: False
+
+data:
+  output: "/root/donor_whitebox/outputs/wildgs_runs/official_tum_freiburg3_sitting_static_clean_sp"

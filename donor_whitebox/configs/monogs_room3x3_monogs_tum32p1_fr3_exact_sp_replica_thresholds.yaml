@@ -1,0 +1,25 @@
+inherit_from: "configs/mono/tum/fr3_office.yaml"
+
+Results:
+  save_dir: "/root/donor_whitebox/outputs/monogs_runs"
+  use_gui: False
+  eval_rendering: False
+  save_trj_kf_intv: 20
+
+Dataset:
+  dataset_path: "/root/donor_whitebox/outputs/monogs_room3x3_tumlike_monogs_tum32p1_fr3_exact_20260310"
+  single_thread: True
+  point_size: 0.05
+
+Training:
+  single_thread: True
+  kf_interval: 4
+  window_size: 10
+  pose_window: 5
+  edge_threshold: 4
+  kf_translation: 0.04
+  kf_min_translation: 0.02
+  kf_overlap: 0.95
+
+opt_params:
+  position_lr_init: 0.00016

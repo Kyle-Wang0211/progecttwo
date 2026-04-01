@@ -1,0 +1,10 @@
+inherit_from: "/root/donor_whitebox/configs/wildgs_official_tum_freiburg3_sitting_static_clean.yaml"
+
+scene: room3x3_tumrgbd_exact_static_r1
+single_thread: True
+gui: False
+max_frames: 600
+
+data:
+  input_folder: "/root/donor_whitebox/outputs/wildgs_room3x3_tumrgbd_exact_static_20260310"
+  output: "/root/donor_whitebox/outputs/wildgs_runs/room3x3_tumrgbd_exact_static_r1"

@@ -1,0 +1,14 @@
+inherit_from: "/root/gs_refs/MonoGS/configs/mono/tum/fr3_office.yaml"
+
+Dataset:
+  dataset_path: "/root/gs_refs/MonoGS/datasets/tum/rgbd_dataset_freiburg3_long_office_household"
+  single_thread: True
+
+Training:
+  single_thread: True
+
+Results:
+  use_gui: False
+  save_results: True
+  save_dir: "/root/donor_whitebox/outputs/monogs_official_bench/fr3_office_sp_validation_r2"
+  save_trj: True

@@ -1,0 +1,247 @@
+# White-Box Donor Map
+
+## Primary donor routing
+
+- HI-SLAM2
+  - `C-F`
+  - `G`
+  - `I`
+  - `J`
+  - `K`
+  - `L`
+  - `O`
+- WildGS-SLAM
+  - `K`
+  - `L`
+  - `Q1`
+  - `P2`
+- MonoGS
+  - `D`
+  - `O`
+- Photo-SLAM
+  - `F`
+  - `G`
+  - `I`
+  - `J`
+- Self-owned surface-cell overlay
+  - `N`
+  - `Q2-Q5`
+  - `P1`
+  - `P3`
+  - `V1-V2`
+
+## Interpretation
+
+- Algorithm white-box mainline:
+  - `HI-SLAM2` is baseline #1.
+- UI white-box mainline:
+  - `surface-cell overlay` remains product-owned because no donor repo ships the required non-overlap / ownership / flicker contract.
+
+## Current entrypoints
+
+- Dataset exporter:
+  - `/Users/kaidongwang/Documents/progecttwo/donor_whitebox/scripts/build_room_sequence.sh`
+- HI-SLAM2 baseline runner:
+  - `/Users/kaidongwang/Documents/progecttwo/donor_whitebox/scripts/run_hislam2_whitebox.sh`
+- Dense preset:
+  - `/Users/kaidongwang/Documents/progecttwo/donor_whitebox/configs/hislam2_owndata_dense.yaml`
+
+## Current findings
+
+- `Photo-SLAM.clean` latest effective shutdown on old 5090:
+  - output: `room3x3_dense600_clean_5090/1691_shutdown`
+  - final PLY: `point_cloud/iteration_1691/point_cloud.ply`
+  - vertices: `87002`
+  - I: not passed
+    - exceeds prior `77150` clean baseline
+    - still far below `1000000`
+  - J: not passed
+    - render/color evidence exists via `psnr.txt`, `dssim.txt`, `render_time.txt`
+    - latest tail samples:
+      - PSNR: `11.1265`, `10.5608`, `10.1754`, `10.8768`, `9.1118`
+      - DSSIM: `0.7197`, `0.7209`, `0.7022`, `0.7155`, `0.6686`
+- `Photo-SLAM.clean` later rerun on old 5090:
+  - output: `room3x3_dense600_clean_5090/1091_shutdown`
+  - final PLY: `point_cloud/iteration_1091/point_cloud.ply`
+  - vertices: `47596`
+  - result regressed versus `1691_shutdown`
+  - latest tail samples:
+    - PSNR: `10.8761`, `10.6619`, `10.9197`, `10.8056`, `12.1199`
+    - DSSIM: `0.7324`, `0.7205`, `0.7517`, `0.7474`, `0.7731`
+    - render_time: `0.9532`, `0.9362`, `0.9611`, `0.9493`, `0.9381`
+- `Photo-SLAM.clean` donor-faithful `tum_mono` rerun on old 5090:
+  - output: `room3x3_tumlike_clean_5090/1291_shutdown`
+  - final PLY: `point_cloud/iteration_1291/point_cloud.ply`
+  - vertices: `58806`
+  - result improved over `1091_shutdown`, but still below the current best `1691_shutdown`
+  - I: not passed
+    - `58806 < 87002 < 1000000`
+  - J: not passed
+    - trajectory outputs exist:
+      - `CameraTrajectory_TUM.txt`
+      - `KeyFrameTrajectory_TUM.txt`
+      - `CameraTrajectory_EuRoC.txt`
+      - `KeyFrameTrajectory_EuRoC.txt`
+    - latest tail samples:
+      - PSNR: `10.1760`, `8.3731`, `6.0988`, `5.8492`, `5.6849`
+      - DSSIM: `0.6028`, `0.5666`, `0.5488`, `0.5429`, `0.5215`
+      - render_time: `0.9552`, `0.9576`, `0.9611`, `0.9559`, `0.9569`
+- `Photo-SLAM.clean` donor-faithful `tum_mono` slow50 rerun on old 5090:
+  - output: `room3x3_tumlike_slow50_clean_5090/28041_shutdown`
+  - final PLY: `point_cloud/iteration_28041/point_cloud.ply`
+  - vertices: `612499`
+  - result strongly improved over prior `1691_shutdown` and `1291_shutdown`
+  - I: not passed
+    - `612499 < 1000000`
+    - but this confirms the donor path is not capped at `87002`
+  - J: not passed
+    - render/color evidence exists and improved in parts, but still not through the full white-box color audit
+    - latest tail samples:
+      - PSNR: `23.2466`, `18.5975`, `12.6135`, `15.2648`, `13.4693`
+      - DSSIM: `0.9405`, `0.9178`, `0.8268`, `0.8651`, `0.8047`
+      - render_time: `3.0360`, `3.0570`, `3.0457`, `3.0047`, `2.9947`
+- `Photo-SLAM.clean` donor-faithful `tum_mono` slow200 + unbounded rerun on old 5090:
+  - output: `room3x3_tumlike_slow200_unbounded_clean_5090_r2/68341_shutdown`
+  - final PLY: `point_cloud/iteration_68341/point_cloud.ply`
+  - vertices: `7959829`
+  - trajectory/metric outputs exist:
+    - `psnr.txt`
+    - `psnr_gaussian_splatting.txt`
+    - `dssim.txt`
+    - `render_time.txt`
+  - I: passed
+    - `7959829 > 1000000`
+    - donor path continued growing well past `1,000,000`, peaking into the multi-million range before shutdown
+  - J: passed (donor white-box level)
+    - colorized Gaussian output persisted through final shutdown and final PLY export
+    - `psnr_gaussian_splatting.txt` summary:
+      - mean: `14.6463`
+      - last: `12.2161`
+    - `dssim.txt` summary:
+      - mean: `0.7858`
+      - last: `0.6956`
+    - `render_time.txt` summary:
+      - mean: `11.9655`
+      - last: `10.5690`
+    - latest tail samples:
+      - PSNR: `13.7779`, `13.6460`, `13.7889`, `13.3318`, `12.8451`, `12.6286`, `12.2227`, `11.9814`, `11.8771`, `12.1744`
+      - DSSIM: `0.7340`, `0.7361`, `0.7433`, `0.7458`, `0.7359`, `0.7254`, `0.7082`, `0.7016`, `0.6995`, `0.6956`
+      - render_time: `10.8667`, `10.7569`, `10.6789`, `10.5530`, `10.5770`, `10.4571`, `10.5267`, `10.5810`, `10.6205`, `10.5690`
+- `HI-SLAM2.clean` on old 5090 still cannot serve as the clean baseline:
+  - latest run: `hislam2_clean_5090_run_20260309_024219.log`
+  - failure point remains `hislam2/modules/corr.py:70`
+  - error remains `CUBLAS_STATUS_INVALID_VALUE`
+- `MonoGS` patched donor-faithful `dense_init_sp` rerun on old 5090:
+  - output: `donor_whitebox_outputs/2026-03-09-08-20-46`
+  - final PLY: `point_cloud/final/point_cloud.ply`
+  - final vertices: `109923`
+  - final trajectory: `plot/trj_final.json`
+    - recovered trajectory entries: `290`
+  - final ATE: `plot/stats_final.json`
+    - RMSE: `1.2014340185`
+  - D: improved from prior reset-only runs, but not passed
+    - donor keyframe trigger / overlap logic now runs end-to-end
+    - patched single-thread donor run reaches `Initialized SLAM`, completes final export, and writes final trajectory / point cloud
+    - however, the recovered trajectory remains partial and drifts to meter-scale error
+  - O: improved from prior reset-only runs, but not passed
+    - donor now integrates far more frames than the earlier `31`-entry attempt
+    - but this run still does not cover the full `600`-frame room sequence
+  - root cause of `300`-frame ceiling:
+    - MonoGS `utils/dataset.py:TUMParser.load_poses()` hardcodes `frame_rate=32`
+    - the room3x3 TUM-like sequence is `600` frames over `12s` (~`50 fps`)
+    - donor loader only keeps frames when `t1 - t0 > 1.0 / frame_rate`
+    - this down-samples the `600`-frame input to about `300` usable frames before SLAM begins
+- `MonoGS` patched donor-faithful `dense_init_sp` slow2 rerun on old 5090:
+  - output: `donor_whitebox_outputs/2026-03-09-17-08-44`
+  - final PLY: `point_cloud/final/point_cloud.ply`
+  - final vertices: `33376`
+  - final trajectory: `plot/trj_final.json`
+    - recovered trajectory entries: `556`
+  - final ATE: `plot/stats_final.json`
+    - RMSE: `1.2015280607`
+  - D: still not passed
+    - donor keyframe trigger / overlap / window path stays up for much longer and reaches final export
+    - but trajectory quality remains meter-scale and the final map density regresses versus the earlier dense_init run
+  - O: still not passed
+    - slow2 removes the prior `~300`-frame ceiling and pushes the run to the end of the `600`-frame sequence
+    - but final `trj_final` still contains `556` entries, not a full one-entry-per-frame trajectory
+  - root cause of the apparent missing `44` frames:
+    - this is not an input loading loss
+    - `TUMParser` on the slow2 sequence parses all `600` frames
+    - the final log reaches `frame 594` before `Done`
+    - MonoGS `utils/eval_utils.py:68-113` writes `trj_final.json` by iterating `kf_ids`, not by dumping every frame
+    - so `556` reflects the final keyframe trajectory length, not a second-stage loader drop from `600`
+- `MonoGS` near-official `official_sp_slow2_kfi1` rerun on old 5090:
+  - output: `donor_whitebox_outputs/2026-03-09-18-25-29`
+  - final PLY: `point_cloud/final/point_cloud.ply`
+  - final vertices: `137817`
+  - final trajectory: `plot/trj_final.json`
+    - recovered trajectory entries: `326`
+  - final ATE: `plot/stats_final.json`
+    - RMSE: `1.1859070660`
+  - D: improved toward donor-official behavior, but not passed
+    - compared with the aggressive `dense_init_sp slow2` rerun, this near-official rerun cuts final keyframe trajectory size from `556` to `326`
+    - this is closer to the official `mono/tum` intent: fewer keyframes selected by overlap + translation gating instead of near-every-frame insertion
+    - however, trajectory quality still remains at meter-scale error, so frame selection quality is not yet good enough to mark `D` as passed
+  - O: still not passed
+    - this rerun demonstrates that `MonoGS` can stay up and export final results under near-official thresholds
+    - but final exported trajectory is still keyframe-only and remains far from a full one-entry-per-frame `600`-frame path
+  - interpretation:
+    - the slow2 time-scale fix solved the donor loader down-sampling issue
+    - the remaining gap is now in keyframe selection / backend quality, not in dataset ingestion or runtime stability
+- `MonoGS` donor-style `monogs_tum32p1 + fr3_office + kf_interval=1` recheck on old 5090:
+  - output: `donor_whitebox_outputs/2026-03-10-02-47-32`
+  - final PLY: `point_cloud/final/point_cloud.ply`
+  - final vertices: `104351`
+  - final trajectory: `plot/trj_final.json`
+    - recovered keyframe trajectory entries: `185`
+    - max exported keyframe id: `599`
+  - final ATE: `plot/stats_final.json`
+    - RMSE: `0.9890241978`
+  - final frame summary:
+    - `camera_count: 600`
+    - `camera_max_id: 599`
+    - `kf_count: 185`
+  - final KF gate summary:
+    - `bootstrap_accept: 7`
+    - `bootstrap_reject: 35`
+    - `dist_only_accept: 96`
+    - `overlap_min_accept: 81`
+    - `reject_overlap: 96`
+    - `reject_min_translation: 284`
+    - `reject_translation: 380`
+  - D: still not passed
+    - donor-style capture protocol, official `fr3_office` intrinsics, and corrected `O` accounting now run end-to-end
+    - but keyframe-trigger quality still yields roughly meter-scale drift, so `D` remains below the white-box bar
+  - O: passed under corrected accounting
+    - prior `O` failures were partly caused by using `trj_final.json` as if it were a full-frame integrated trajectory
+    - the corrected final frame summary shows the run really processed all `600` frames and reached `camera_max_id: 599`
+    - `trj_final.json` remains keyframe-only by donor design, but the integrated-frame path itself now reaches the full room sequence
+- `MonoGS` donor-style `monogs_tum32p1 + fr3_exact + kf_interval=1` rerun on old 5090:
+  - output: `donor_whitebox_outputs/2026-03-10-03-33-54`
+  - final PLY: `point_cloud/final/point_cloud.ply`
+  - final vertices: `119455`
+  - final trajectory: `plot/trj_final.json`
+    - recovered keyframe trajectory entries: `187`
+    - max exported keyframe id: `599`
+  - final ATE: `plot/stats_final.json`
+    - RMSE: `1.0441654041`
+  - final frame summary:
+    - `camera_count: 600`
+    - `camera_max_id: 599`
+    - `kf_count: 187`
+  - final KF gate summary:
+    - `bootstrap_accept: 7`
+    - `bootstrap_reject: 41`
+    - `dist_only_accept: 90`
+    - `overlap_min_accept: 89`
+    - `reject_overlap: 99`
+    - `reject_min_translation: 273`
+    - `reject_translation: 372`
+  - D: still not passed
+    - this rerun removes the last known intrinsics mismatch by exporting with the official `fr3_office` camera model itself (`fx=535.4`, `fy=539.2`, `cx=320.1`, `cy=247.6`)
+    - RMSE improves slightly from `0.9890`-`1.08` scale toward `1.0442`, but the result still remains at roughly meter-scale drift
+    - translation gates remain the dominant rejectors, so keyframe-trigger quality is still below the white-box bar
+  - O: passed under corrected accounting
+    - the exact-intrinsics rerun again confirms `camera_count: 600` and `camera_max_id: 599`
+    - this validates that the remaining gap is no longer ingestion or truncation; it is now in `D`, not `O`

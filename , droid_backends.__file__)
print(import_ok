@@ -1,0 +1,275 @@
+running install
+running bdist_egg
+running egg_info
+writing lietorch.egg-info/PKG-INFO
+writing dependency_links to lietorch.egg-info/dependency_links.txt
+writing top-level names to lietorch.egg-info/top_level.txt
+reading manifest file 'lietorch.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file 'lietorch.egg-info/SOURCES.txt'
+installing library code to build/bdist.linux-x86_64/egg
+running install_lib
+running build_py
+creating build
+creating build/lib.linux-x86_64-cpython-310
+creating build/lib.linux-x86_64-cpython-310/lietorch
+copying lietorch/__init__.py -> build/lib.linux-x86_64-cpython-310/lietorch
+copying lietorch/broadcasting.py -> build/lib.linux-x86_64-cpython-310/lietorch
+copying lietorch/gradcheck.py -> build/lib.linux-x86_64-cpython-310/lietorch
+copying lietorch/group_ops.py -> build/lib.linux-x86_64-cpython-310/lietorch
+copying lietorch/groups.py -> build/lib.linux-x86_64-cpython-310/lietorch
+copying lietorch/run_tests.py -> build/lib.linux-x86_64-cpython-310/lietorch
+running build_ext
+building 'lietorch_backends' extension
+creating /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310
+creating /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch
+creating /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src
+[1/3] /usr/bin/g++ -MMD -MF /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch.o.d -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /venv/hislam2/include -fPIC -O2 -isystem /venv/hislam2/include -march=nocona -mtune=haswell -ftree-vectorize -fPIC -fstack-protector-strong -fno-plt -O2 -ffunction-sections -pipe -isystem /venv/hislam2/include -I/venv/hislam2/targets/x86_64-linux/include -DNDEBUG -D_FORTIFY_SOURCE=2 -O2 -isystem /venv/hislam2/include -I/venv/hislam2/targets/x86_64-linux/include -fPIC -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen -I/venv/hislam2/targets/x86_64-linux/include -I/venv/hislam2/lib/python3.10/site-packages/nvidia/cuda_runtime/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/venv/hislam2/include -I/venv/hislam2/include/python3.10 -c -c /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch.cpp -o /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch.o -O2 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=lietorch_backends -std=c++17
+[2/3] /usr/bin/g++ -MMD -MF /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch_cpu.o.d -Wno-unused-result -Wsign-compare -DNDEBUG -fwrapv -O2 -Wall -fPIC -O2 -isystem /venv/hislam2/include -fPIC -O2 -isystem /venv/hislam2/include -march=nocona -mtune=haswell -ftree-vectorize -fPIC -fstack-protector-strong -fno-plt -O2 -ffunction-sections -pipe -isystem /venv/hislam2/include -I/venv/hislam2/targets/x86_64-linux/include -DNDEBUG -D_FORTIFY_SOURCE=2 -O2 -isystem /venv/hislam2/include -I/venv/hislam2/targets/x86_64-linux/include -fPIC -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen -I/venv/hislam2/targets/x86_64-linux/include -I/venv/hislam2/lib/python3.10/site-packages/nvidia/cuda_runtime/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/venv/hislam2/include -I/venv/hislam2/include/python3.10 -c -c /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp -o /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch_cpu.o -O2 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=lietorch_backends -std=c++17
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:6:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/common.h:4: warning: "EIGEN_DEFAULT_DENSE_INDEX_TYPE" redefined
+    4 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Core:19,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Dense:1,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:3:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/src/Core/util/Macros.h:33: note: this is the location of the previous definition
+   33 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE std::ptrdiff_t
+      | 
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void inv_forward_kernel(const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:75:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+   75 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void inv_backward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:89:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+   89 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void mul_forward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:104:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  104 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void mul_backward_kernel(const scalar_t*, const scalar_t*, const scalar_t*, scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:118:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  118 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:120:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  120 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void adj_forward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:136:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  136 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void adj_backward_kernel(const scalar_t*, const scalar_t*, const scalar_t*, scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:152:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  152 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void adjT_forward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:172:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  172 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void adjT_backward_kernel(const scalar_t*, const scalar_t*, const scalar_t*, scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:188:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  188 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void act_forward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:206:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  206 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:207:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  207 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void act_backward_kernel(const scalar_t*, const scalar_t*, const scalar_t*, scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:222:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  222 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:226:11: warning: typedef ‘using Transformation = class Eigen::Matrix<scalar_t, 4, 4>’ locally defined but not used [-Wunused-local-typedefs]
+  226 |     using Transformation = Eigen::Matrix<scalar_t,4,4>;
+      |           ^~~~~~~~~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void act4_forward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:275:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  275 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:276:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  276 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void act4_backward_kernel(const scalar_t*, const scalar_t*, const scalar_t*, scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:292:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  292 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:296:11: warning: typedef ‘using Transformation = class Eigen::Matrix<scalar_t, 4, 4>’ locally defined but not used [-Wunused-local-typedefs]
+  296 |     using Transformation = Eigen::Matrix<scalar_t,4,4>;
+      |           ^~~~~~~~~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void as_matrix_forward_kernel(const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:314:11: warning: typedef ‘using Tangent = class Eigen::Matrix<scalar_t, Group::K, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  314 |     using Tangent = Eigen::Matrix<scalar_t,Group::K,1>;
+      |           ^~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:315:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  315 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp: In function ‘void jleft_forward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int)’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:342:11: warning: typedef ‘using Data = class Eigen::Matrix<scalar_t, Group::N, 1>’ locally defined but not used [-Wunused-local-typedefs]
+  342 |     using Data = Eigen::Matrix<scalar_t,Group::N,1>;
+      |           ^~~~
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/dispatch.h:8,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:7:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h: In instantiation of ‘SE3<Scalar>::SE3(const Scalar*) [with Scalar = double]’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:51:25:   required from ‘void log_forward_kernel(const scalar_t*, scalar_t*, int) [with Group = SE3<double>; scalar_t = double]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:390:5:   required from here
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:224:13: warning: ‘SE3<double>::translation’ will be initialized after [-Wreorder]
+  224 |     Vector3 translation;
+      |             ^~~~~~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:223:17: warning:   ‘SO3<double> SE3<double>::so3’ [-Wreorder]
+  223 |     SO3<Scalar> so3;
+      |                 ^~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:34:23: warning:   when initialized here [-Wreorder]
+   34 |     EIGEN_DEVICE_FUNC SE3(const Scalar *data) :  translation(data), so3(data+3) {};
+      |                       ^~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h: In instantiation of ‘SE3<Scalar>::SE3(const Scalar*) [with Scalar = float]’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:51:25:   required from ‘void log_forward_kernel(const scalar_t*, scalar_t*, int) [with Group = SE3<float>; scalar_t = float]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:390:5:   required from here
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:224:13: warning: ‘SE3<float>::translation’ will be initialized after [-Wreorder]
+  224 |     Vector3 translation;
+      |             ^~~~~~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:223:17: warning:   ‘SO3<float> SE3<float>::so3’ [-Wreorder]
+  223 |     SO3<Scalar> so3;
+      |                 ^~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:34:23: warning:   when initialized here [-Wreorder]
+   34 |     EIGEN_DEVICE_FUNC SE3(const Scalar *data) :  translation(data), so3(data+3) {};
+      |                       ^~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h: In instantiation of ‘static SE3<Scalar>::Adjoint SE3<Scalar>::left_jacobian_inverse(const Tangent&) [with Scalar = double; Adjoint = Eigen::Matrix<double, 6, 6, 0, 6, 6>; Tangent = Eigen::Matrix<double, 6, 1, 0, 6, 1>]’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:67:82:   required from ‘void log_backward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int) [with Group = SE3<double>; scalar_t = double]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:405:5:   required from here
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:190:15: warning: variable ‘tau’ set but not used [-Wunused-but-set-variable]
+  190 |       Vector3 tau = tau_phi.template segment<3>(0);
+      |               ^~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h: In instantiation of ‘static SE3<Scalar>::Adjoint SE3<Scalar>::left_jacobian_inverse(const Tangent&) [with Scalar = float; Adjoint = Eigen::Matrix<float, 6, 6, 0, 6, 6>; Tangent = Eigen::Matrix<float, 6, 1, 0, 6, 1>]’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:67:82:   required from ‘void log_backward_kernel(const scalar_t*, const scalar_t*, scalar_t*, int) [with Group = SE3<float>; scalar_t = float]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:405:5:   required from here
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/se3.h:190:15: warning: variable ‘tau’ set but not used [-Wunused-but-set-variable]
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/dispatch.h:9:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h: In instantiation of ‘Sim3<Scalar>::Sim3(const RxSO3<Scalar>&, const Vector3&) [with Scalar = double; Vector3 = Eigen::Matrix<double, 3, 1>]’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:164:14:   required from ‘static Sim3<Scalar> Sim3<Scalar>::Exp(const Tangent&) [with Scalar = double; Tangent = Eigen::Matrix<double, 7, 1, 0, 7, 1>]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:24:62:   required from ‘void exp_forward_kernel(const scalar_t*, scalar_t*, int) [with Group = Sim3<double>; scalar_t = double]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:360:5:   required from here
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:213:19: warning: ‘Sim3<double>::rxso3’ will be initialized after [-Wreorder]
+  213 |     RxSO3<Scalar> rxso3;
+      |                   ^~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:212:13: warning:   ‘Sim3<double>::Vector3 Sim3<double>::translation’ [-Wreorder]
+  212 |     Vector3 translation;
+      |             ^~~~~~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:37:23: warning:   when initialized here [-Wreorder]
+   37 |     EIGEN_DEVICE_FUNC Sim3(RxSO3<Scalar> const& rxso3, Vector3 const& t)
+      |                       ^~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h: In instantiation of ‘Sim3<Scalar>::Sim3(const RxSO3<Scalar>&, const Vector3&) [with Scalar = float; Vector3 = Eigen::Matrix<float, 3, 1>]’:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:164:14:   required from ‘static Sim3<Scalar> Sim3<Scalar>::Exp(const Tangent&) [with Scalar = float; Tangent = Eigen::Matrix<float, 7, 1, 0, 7, 1>]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:24:62:   required from ‘void exp_forward_kernel(const scalar_t*, scalar_t*, int) [with Group = Sim3<float>; scalar_t = float]’
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_cpu.cpp:360:5:   required from here
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:213:19: warning: ‘Sim3<float>::rxso3’ will be initialized after [-Wreorder]
+  213 |     RxSO3<Scalar> rxso3;
+      |                   ^~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:212:13: warning:   ‘Sim3<float>::Vector3 Sim3<float>::translation’ [-Wreorder]
+  212 |     Vector3 translation;
+      |             ^~~~~~~~~~~
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/sim3.h:37:23: warning:   when initialized here [-Wreorder]
+   37 |     EIGEN_DEVICE_FUNC Sim3(RxSO3<Scalar> const& rxso3, Vector3 const& t)
+      |                       ^~~~
+[3/3] /venv/hislam2/bin/nvcc --generate-dependencies-with-compile --dependency-output /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch_gpu.o.d -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen -I/venv/hislam2/targets/x86_64-linux/include -I/venv/hislam2/lib/python3.10/site-packages/nvidia/cuda_runtime/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/venv/hislam2/include -I/venv/hislam2/include/python3.10 -c -c /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu -o /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch_gpu.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O2 -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_70,code=sm_70 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_120,code=sm_120 -gencode=arch=compute_120,code=compute_120 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=lietorch_backends -ccbin /usr/bin/gcc -std=c++17
+FAILED: /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch_gpu.o 
+/venv/hislam2/bin/nvcc --generate-dependencies-with-compile --dependency-output /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch_gpu.o.d -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include -I/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen -I/venv/hislam2/targets/x86_64-linux/include -I/venv/hislam2/lib/python3.10/site-packages/nvidia/cuda_runtime/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include -I/venv/hislam2/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/venv/hislam2/include -I/venv/hislam2/include/python3.10 -c -c /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu -o /root/gs_refs/HI-SLAM2/thirdparty/lietorch/build/temp.linux-x86_64-cpython-310/lietorch/src/lietorch_gpu.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -O2 -gencode=arch=compute_60,code=sm_60 -gencode=arch=compute_61,code=sm_61 -gencode=arch=compute_70,code=sm_70 -gencode=arch=compute_75,code=sm_75 -gencode=arch=compute_75,code=compute_75 -gencode=arch=compute_120,code=sm_120 -gencode=arch=compute_120,code=compute_120 -DTORCH_API_INCLUDE_EXTENSION_H -DTORCH_EXTENSION_NAME=lietorch_backends -ccbin /usr/bin/gcc -std=c++17
+nvcc warning : incompatible redefinition for option 'compiler-bindir', the last value of this option was used
+nvcc warning : Support for offline compilation for architectures prior to '<compute/sm/lto>_75' will be removed in a future release (Use -Wno-deprecated-gpu-targets to suppress warning).
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:5:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/common.h:4: warning: "EIGEN_DEFAULT_DENSE_INDEX_TYPE" redefined
+    4 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Core:19,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Dense:1,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:3:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/src/Core/util/Macros.h:33: note: this is the location of the previous definition
+   33 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE std::ptrdiff_t
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:5:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/common.h:4: warning: "EIGEN_DEFAULT_DENSE_INDEX_TYPE" redefined
+    4 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Core:19,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Dense:1,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:3:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/src/Core/util/Macros.h:33: note: this is the location of the previous definition
+   33 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE std::ptrdiff_t
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:5:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/common.h:4: warning: "EIGEN_DEFAULT_DENSE_INDEX_TYPE" redefined
+    4 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Core:19,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Dense:1,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:3:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/src/Core/util/Macros.h:33: note: this is the location of the previous definition
+   33 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE std::ptrdiff_t
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:5:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/common.h:4: warning: "EIGEN_DEFAULT_DENSE_INDEX_TYPE" redefined
+    4 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Core:19,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Dense:1,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:3:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/src/Core/util/Macros.h:33: note: this is the location of the previous definition
+   33 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE std::ptrdiff_t
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:5:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/common.h:4: warning: "EIGEN_DEFAULT_DENSE_INDEX_TYPE" redefined
+    4 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Core:19,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Dense:1,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:3:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/src/Core/util/Macros.h:33: note: this is the location of the previous definition
+   33 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE std::ptrdiff_t
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:5:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/include/common.h:4: warning: "EIGEN_DEFAULT_DENSE_INDEX_TYPE" redefined
+    4 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE int
+      | 
+In file included from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Core:19,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/Dense:1,
+                 from /root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu:3:
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/eigen/Eigen/src/Core/util/Macros.h:33: note: this is the location of the previous definition
+   33 | #define EIGEN_DEFAULT_DENSE_INDEX_TYPE std::ptrdiff_t
+      | 
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu(218): warning #174-D: expression has no effect
+          Eigen::Map<PointGrad>(dp + i*3) = dq * X.Matrix4x4().block<3,3>(0,0);
+                                                                          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu(218): warning #174-D: expression has no effect
+          Eigen::Map<PointGrad>(dp + i*3) = dq * X.Matrix4x4().block<3,3>(0,0);
+                                                                          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu(218): warning #174-D: expression has no effect
+          Eigen::Map<PointGrad>(dp + i*3) = dq * X.Matrix4x4().block<3,3>(0,0);
+                                                                          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu(218): warning #174-D: expression has no effect
+          Eigen::Map<PointGrad>(dp + i*3) = dq * X.Matrix4x4().block<3,3>(0,0);
+                                                                          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu(218): warning #174-D: expression has no effect
+          Eigen::Map<PointGrad>(dp + i*3) = dq * X.Matrix4x4().block<3,3>(0,0);
+                                                                          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+Catastrophic error: cannot open source file "/tmp/tmpxft_000088ac_00000000-15_lietorch_gpu.compute_120.cpp1.ii"
+
+1 catastrophic error detected in the compilation of "/root/gs_refs/HI-SLAM2/thirdparty/lietorch/lietorch/src/lietorch_gpu.cu".
+Compilation terminated.
+ninja: build stopped: subcommand failed.

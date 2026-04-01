@@ -1,0 +1,51 @@
+inherit_from: /root/gs_refs/WildGS-SLAM.clean/configs/wildgs_slam.yaml
+
+scene: room3x3_dense600_clean_from_dirtypriors_r1
+
+dataset: 'wild_slam_iphone'
+stride: 1
+max_frames: 600
+setup_seed: 43
+fast_mode: False
+device: 'cuda:0'
+gui: False
+verbose: True
+
+data:
+  input_folder: /root/donor_whitebox/outputs/wildgs_room3x3_dense600_input
+  output: /root/donor_whitebox/outputs/wildgs_runs
+
+cam:
+  H: 720
+  W: 960
+  H_out: 360
+  W_out: 480
+  fx: 831.384399
+  fy: 831.384399
+  cx: 480.0
+  cy: 360.0
+  H_edge: 0
+  W_edge: 0
+
+mono_prior:
+  depth: 'dpt2_vitl_hypersim_20'
+  feature_extractor: 'dinov2_vits14'
+
+tracking:
+  pretrained: /root/gs_refs/WildGS-SLAM.clean/pretrained/droid.pth
+  force_keyframe_every_n_frames: 9
+  use_precomputed_mono_depth: True
+  uncertainty_params:
+    activate: False
+  backend:
+    metric_depth_reg: True
+
+mapping:
+  final_refine_iters: 40000
+  deform_gaussians: True
+  uncertainty_params:
+    activate: False
+  Training:
+    alpha: 0.8
+    mapping_itr_num: 600
+    window_size: 12

@@ -1,0 +1,9 @@
+inherit_from: "configs/rgbd/replica/office0_sp.yaml"
+
+Results:
+  save_dir: "/root/donor_whitebox/outputs/monogs_runs"
+  use_gui: False
+  eval_rendering: False
+
+Dataset:
+  dataset_path: "/root/donor_whitebox/outputs/monogs_room3x3_replica_office0_20260310"

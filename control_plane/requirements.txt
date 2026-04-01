@@ -1,0 +1,6 @@
+fastapi>=0.116
+uvicorn>=0.35
+pydantic>=2.11
+requests>=2.32
+boto3>=1.37
+psycopg[binary]>=3.2

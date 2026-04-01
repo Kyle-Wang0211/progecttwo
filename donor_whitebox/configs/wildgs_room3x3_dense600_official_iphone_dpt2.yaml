@@ -1,0 +1,4 @@
+inherit_from: /root/donor_whitebox/configs/wildgs_room3x3_dense600_official_iphone.yaml
+
+mono_prior:
+  depth: dpt2_vitl_hypersim_20

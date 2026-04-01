@@ -18,3 +18,25 @@ progect2/progect2-pr9/
 docs/PHASE_PLAN_ONLINE_3DGS_OPTIMIZER.md
 docs/PHASE_PLAN_SYSTEM_LAYER_CAPTURE_INTERACTION\ 2.md
 research-frontier-algorithms-2025-2026.md
+
+# Temporary work directories
+.sync_tmp/
+.sync_tmp_wildgs_r9.yaml
+.tmp/
+.tmp_3dgs_viewer/
+.tmpdeps/
+
+# Python caches
+**/__pycache__/
+*.pyc
+
+# Runtime / generated artifacts
+background_upload_broker/runtime/
+donor_whitebox/bin/
+donor_whitebox/logs/
+donor_whitebox/outputs/
+donor_whitebox/third_party/
+third_party/
+
+# Local env / transient configs
+control_plane/.env.runtime

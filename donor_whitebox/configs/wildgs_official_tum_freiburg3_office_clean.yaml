@@ -1,0 +1,7 @@
+inherit_from: "/root/gs_refs/WildGS-SLAM.clean/configs/Static/TUM_RGBD/freiburg3_office.yaml"
+
+scene: freiburg3_office
+
+data:
+  root_folder: "/root/gs_refs/WildGS-SLAM.clean/datasets/TUM_RGBD"
+  output: "/root/donor_whitebox/outputs/wildgs_runs/official_tum_freiburg3_office_clean"

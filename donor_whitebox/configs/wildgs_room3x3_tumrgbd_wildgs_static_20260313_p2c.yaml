@@ -1,0 +1,9 @@
+inherit_from: "/root/donor_whitebox/configs/wildgs_official_tum_freiburg3_sitting_static_clean.yaml"
+
+scene: room3x3_tumrgbd_wildgs_static_20260313_p2c
+single_thread: True
+gui: False
+
+data:
+  input_folder: "/root/donor_whitebox/outputs/wildgs_room3x3_tumrgbd_wildgs_static_20260313_p2c"
+  output: "/root/donor_whitebox/outputs/wildgs_runs/room3x3_tumrgbd_wildgs_static_20260313_p2c"
