@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HI-SLAM2 Realdesk 21.92 dB Full Viewer</title>
+  <style>
+    :root {
+      --bg0: #0d1014;
+      --bg1: #171b21;
+      --bg2: #222934;
+      --ink: #f3f6fb;
+      --muted: rgba(243, 246, 251, 0.72);
+      --panel: rgba(17, 21, 28, 0.74);
+      --line: rgba(255, 255, 255, 0.12);
+      --accent: #9fd0ff;
+      --shadow: 0 18px 80px rgba(0, 0, 0, 0.32);
+      --radius: 24px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, rgba(77, 120, 180, 0.18), transparent 30%),
+        linear-gradient(180deg, var(--bg2), var(--bg1) 26%, var(--bg0));
+      color: var(--ink);
+      font-family: "Avenir Next", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      position: relative;
+    }
+
+    #viewer {
+      position: absolute;
+      inset: 0;
+    }
+
+    .overlay {
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      top: 20px;
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 18px 22px;
+      border-radius: var(--radius);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .title {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .badge {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 180px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    .status {
+      position: absolute;
+      left: 20px;
+      bottom: 20px;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 18px;
+      border-radius: 999px;
+      background: rgba(17, 21, 28, 0.72);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+      color: var(--muted);
+      font-size: 13px;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: #69d29f;
+      box-shadow: 0 0 18px rgba(105, 210, 159, 0.8);
+    }
+
+    .error {
+      color: #ffb4b4;
+      font-weight: 700;
+    }
+  </style>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./lib/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="viewer"></div>
+  <div class="overlay">
+    <div>
+      <div class="title">HI-SLAM2 Realdesk 21.92 dB Full Viewer</div>
+      <div class="subtitle">Remote source: global200_seq_out. Mean PSNR 21.9247 dB. Higher coverage than probe. Left-drag to orbit, right-drag to pan, scroll to zoom, W/A/S/D/Q/E to translate, R to reset.</div>
+    </div>
+    <div class="badge">3DGS Full Result<br/>Offline Local Viewer</div>
+  </div>
+  <div id="status" class="status"><span class="dot"></span><span>Loading Gaussian scene…</span></div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import * as GaussianSplats3D from "./lib/gaussian-splats-3d.module.js";
+
+    const statusEl = document.getElementById("status");
+    const viewerRoot = document.getElementById("viewer");
+    const initialCameraPosition = new THREE.Vector3(0.272521, 1.07134, 7.96017);
+    const initialCameraLookAt = new THREE.Vector3(0.272521, 1.07134, 1.610819);
+
+    const viewer = new GaussianSplats3D.Viewer({
+      rootElement: viewerRoot,
+      cameraUp: [0, 1, 0],
+      initialCameraPosition: initialCameraPosition.toArray(),
+      initialCameraLookAt: initialCameraLookAt.toArray(),
+      selfDrivenMode: true,
+      useBuiltInControls: true,
+      sharedMemoryForWorkers: false,
+      gpuAcceleratedSort: false,
+      integerBasedSort: false,
+      ignoreDevicePixelRatio: false,
+      sceneRevealMode: GaussianSplats3D.SceneRevealMode.Instant,
+      logLevel: GaussianSplats3D.LogLevel.None
+    });
+
+    function applyEnhancedControls() {
+      const controls = viewer.controls;
+      if (!controls) return;
+      const epsilon = 0.0001;
+      controls.minPolarAngle = epsilon;
+      controls.maxPolarAngle = Math.PI - epsilon;
+      controls.rotateSpeed = 0.9;
+      controls.zoomSpeed = 1.15;
+      controls.panSpeed = 1.2;
+      controls.screenSpacePanning = false;
+      controls.enablePan = true;
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.08;
+      controls.target.copy(initialCameraLookAt);
+      controls.update();
+      viewer.renderer.domElement.tabIndex = 0;
+    }
+
+    function translateCamera(delta) {
+      if (!viewer.controls) return;
+      viewer.camera.position.add(delta);
+      viewer.controls.target.add(delta);
+      viewer.controls.update();
+    }
+
+    function getMoveStep() {
+      if (!viewer.controls) return 0.12;
+      const distance = viewer.camera.position.distanceTo(viewer.controls.target);
+      return Math.max(0.05, distance * 0.08);
+    }
+
+    function resetCamera() {
+      viewer.camera.position.copy(initialCameraPosition);
+      if (viewer.controls) {
+        viewer.controls.target.copy(initialCameraLookAt);
+        viewer.controls.update();
+      } else {
+        viewer.camera.lookAt(initialCameraLookAt);
+      }
+    }
+
+    function handleKeyboardNavigation(event) {
+      if (!viewer.controls) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const tagName = document.activeElement?.tagName || "";
+      if (tagName === "INPUT" || tagName === "TEXTAREA") return;
+
+      const moveStep = getMoveStep();
+      const forward = new THREE.Vector3();
+      const right = new THREE.Vector3();
+      const worldUp = viewer.camera.up.clone().normalize();
+      viewer.camera.getWorldDirection(forward);
+      forward.normalize();
+      right.crossVectors(forward, worldUp).normalize();
+      const delta = new THREE.Vector3();
+
+      switch (event.key.toLowerCase()) {
+        case "w":
+          delta.copy(forward).multiplyScalar(moveStep);
+          break;
+        case "s":
+          delta.copy(forward).multiplyScalar(-moveStep);
+          break;
+        case "a":
+          delta.copy(right).multiplyScalar(-moveStep);
+          break;
+        case "d":
+          delta.copy(right).multiplyScalar(moveStep);
+          break;
+        case "q":
+          delta.copy(worldUp).multiplyScalar(moveStep);
+          break;
+        case "e":
+          delta.copy(worldUp).multiplyScalar(-moveStep);
+          break;
+        case "r":
+          resetCamera();
+          event.preventDefault();
+          return;
+        default:
+          return;
+      }
+
+      translateCamera(delta);
+      event.preventDefault();
+    }
+
+    viewer.addSplatScene("./scene/scene.ply", {
+      progressiveLoad: false,
+      showLoadingUI: true,
+      splatAlphaRemovalThreshold: 5
+    }).then(() => {
+      viewer.start();
+      applyEnhancedControls();
+      requestAnimationFrame(applyEnhancedControls);
+      window.addEventListener("keydown", handleKeyboardNavigation);
+      statusEl.innerHTML = '<span class="dot"></span><span>Full orbit unlocked. Drag to orbit, W/A/S/D/Q/E to move, R to reset.</span>';
+    }).catch((error) => {
+      console.error(error);
+      statusEl.innerHTML = '<span class="error">Viewer failed to load. Check viewer_server.log.</span>';
+    });
+  </script>
+</body>
+</html>

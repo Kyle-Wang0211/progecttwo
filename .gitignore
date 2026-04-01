@@ -1,0 +1,20 @@
+# Large untracked directories that slow down Xcode git operations
+Aether3D/
+progect2/progect2-pr7/
+progect2/progect2-pr7-ui/
+progect2/progect2-pr9/
+
+# SwiftPM build directories
+.build/
+**/.build/
+
+# macOS Finder duplicate suffix
+*\ 2*
+*\ 3*
+
+# Misc
+.DS_Store
+*.db
+docs/PHASE_PLAN_ONLINE_3DGS_OPTIMIZER.md
+docs/PHASE_PLAN_SYSTEM_LAYER_CAPTURE_INTERACTION\ 2.md
+research-frontier-algorithms-2025-2026.md
