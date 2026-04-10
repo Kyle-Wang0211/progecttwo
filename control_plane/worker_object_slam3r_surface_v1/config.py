@@ -140,7 +140,12 @@ class WorkerConfig:
         "OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_SUMMARY_FILENAME",
         "delivery_texture.json",
     )
+    delivery_preserve_geometry_default: bool = _env_flag(
+        "OBJECT_SLAM3R_SURFACE_DELIVERY_PRESERVE_GEOMETRY",
+        True,
+    )
     delivery_target_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TARGET_FACE_COUNT", 50000)
+    delivery_hard_max_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_HARD_MAX_FACE_COUNT", 180000)
     delivery_component_min_faces: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_MIN_FACES", 128)
     delivery_component_ratio_floor: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_RATIO_FLOOR", 0.01)
     delivery_texture_max_views: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MAX_VIEWS", 3)

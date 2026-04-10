@@ -53,7 +53,13 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
     except Exception:
         mesh.fix_normals()
 
-    mesh = _simplify_mesh(mesh, target_faces=max(1024, config.delivery_target_face_count))
+    simplification_applied = False
+    simplify_reason = "preserve_geometry"
+    target_faces = max(1024, config.delivery_target_face_count)
+    if _should_simplify_mesh(mesh, target_faces=target_faces):
+        mesh = _simplify_mesh(mesh, target_faces=target_faces)
+        simplification_applied = len(mesh.faces) < initial_faces
+        simplify_reason = "hard_face_cap" if initial_faces > config.delivery_hard_max_face_count else "target_budget"
 
     destination = ctx.delivery_dir / "optimized_mesh.ply"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -66,7 +72,11 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "initial_vertices": initial_vertices,
         "optimized_faces": int(len(mesh.faces)),
         "optimized_vertices": int(len(mesh.vertices)),
+        "preserve_geometry": bool(config.delivery_preserve_geometry_default),
+        "simplification_applied": simplification_applied,
+        "simplify_reason": simplify_reason,
         "target_face_count": int(config.delivery_target_face_count),
+        "hard_max_face_count": int(config.delivery_hard_max_face_count),
         "component_min_faces": int(config.delivery_component_min_faces),
         "component_ratio_floor": float(config.delivery_component_ratio_floor),
     }
@@ -102,6 +112,7 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
     glb_path = ctx.delivery_dir / "default_mesh.glb"
     glb_path.parent.mkdir(parents=True, exist_ok=True)
     textured_mesh.export(glb_path)
+    glb_size_bytes = glb_path.stat().st_size if glb_path.exists() else 0
 
     summary = {
         "optimized_mesh": str(optimized_mesh),
@@ -109,7 +120,10 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         "projection_mode": "multi_view_vertex_color_projection",
         "projected_view_count": len(projected_views),
         "observed_vertex_count": int(observed_vertex_count),
+        "face_count": int(len(textured_mesh.faces)),
         "vertex_count": int(len(textured_mesh.vertices)),
+        "glb_size_bytes": int(glb_size_bytes),
+        "glb_size_mb": round(glb_size_bytes / (1024 * 1024), 3) if glb_size_bytes > 0 else 0.0,
     }
     (ctx.delivery_dir / config.delivery_texture_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
@@ -220,6 +234,15 @@ def _simplify_mesh(mesh, *, target_faces: int):
             except Exception:
                 continue
     return mesh
+
+
+def _should_simplify_mesh(mesh, *, target_faces: int) -> bool:
+    face_count = len(mesh.faces)
+    if face_count <= target_faces:
+        return False
+    if not config.delivery_preserve_geometry_default:
+        return True
+    return face_count > config.delivery_hard_max_face_count
 
 
 def _project_vertex_colors(
