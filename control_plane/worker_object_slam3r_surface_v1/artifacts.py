@@ -57,7 +57,7 @@ def ensure_default_publish_files(ctx: JobContext) -> dict[str, Path]:
     assert ctx.default_publish_dir is not None
     poster = ctx.default_publish_dir / "poster.png"
     viewer_manifest = ctx.default_publish_dir / "viewer_manifest.json"
-    default_asset = _copy_default_surface_asset(ctx)
+    default_asset = _copy_default_delivery_asset(ctx)
     _write_poster(ctx, poster)
     return {
         "default_asset": default_asset,
@@ -80,13 +80,14 @@ def ensure_hq_publish_files(ctx: JobContext) -> dict[str, Path]:
 def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
     assert ctx.default_publish_dir is not None
     default_asset = _resolve_default_publish_asset(ctx.default_publish_dir)
+    default_kind = _artifact_kind_for_path(default_asset)
     payload: dict[str, Any] = {
         "version": "object_surface_v1",
         "default_asset": {
-            "kind": _artifact_kind_for_path(default_asset),
+            "kind": default_kind,
             "path": f"default/{default_asset.name}",
             "ready": True,
-            "representation": "surface_mesh",
+            "representation": "textured_mesh" if default_kind in {"glb", "mesh"} else "surface_mesh",
         },
         "poster": {
             "kind": "png",
@@ -95,7 +96,8 @@ def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
         "pipeline_stack": {
             "reconstruction": "slam3r",
             "surface": "sparse2dgs",
-            "rendering": "sparse2dgs_surface",
+            "mesh_extraction": "matcha",
+            "rendering": "default_mesh_glb" if default_kind == "glb" else "matcha_mesh",
             "hq": "disabled",
         },
         "camera_preset": _default_camera_preset(),
@@ -146,16 +148,41 @@ def build_hq_artifact_manifest(
     return payload
 
 
-def _copy_default_surface_asset(ctx: JobContext) -> Path:
+def _copy_default_delivery_asset(ctx: JobContext) -> Path:
     assert ctx.default_publish_dir is not None
-    source = _resolve_surface_asset(ctx)
+    source = _resolve_default_delivery_asset(ctx)
     if source is None:
-        raise RuntimeError("default_surface_asset_missing")
+        raise RuntimeError("default_delivery_asset_missing")
 
-    destination = ctx.default_publish_dir / f"default_surface{source.suffix.lower()}"
+    destination_name = "default_mesh" if _artifact_kind_for_path(source) in {"glb", "mesh"} else "default_surface"
+    destination = ctx.default_publish_dir / f"{destination_name}{source.suffix.lower()}"
     if source.resolve() != destination.resolve():
         shutil.copy2(source, destination)
     return destination
+
+
+def _resolve_default_delivery_asset(ctx: JobContext) -> Path | None:
+    mesh_asset = _resolve_matcha_mesh_asset(ctx)
+    if mesh_asset is not None:
+        return mesh_asset
+    return _resolve_surface_asset(ctx)
+
+
+def _resolve_matcha_mesh_asset(ctx: JobContext) -> Path | None:
+    if ctx.matcha_dir is None:
+        return None
+    summary = _read_json(ctx.matcha_dir / config.matcha_summary_filename) or {}
+    for key in ("default_asset", "glb_asset", "mesh_asset"):
+        candidate = summary.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            path = Path(candidate).expanduser()
+            if path.exists():
+                return path
+    for pattern in ("default_mesh.*", "tetra_mesh_binary_search_*.ply", "*.glb", "*.ply"):
+        candidates = sorted(ctx.matcha_dir.glob(pattern))
+        if candidates:
+            return candidates[-1]
+    return None
 
 
 def _resolve_surface_asset(ctx: JobContext) -> Path | None:
@@ -203,9 +230,10 @@ def _resolve_hq_asset(ctx: JobContext) -> Path | None:
 
 
 def _resolve_default_publish_asset(default_dir: Path) -> Path:
-    for candidate in sorted(default_dir.glob("default_surface.*")):
-        if candidate.is_file():
-            return candidate
+    for pattern in ("default_mesh.*", "default_surface.*"):
+        for candidate in sorted(default_dir.glob(pattern)):
+            if candidate.is_file():
+                return candidate
     raise RuntimeError("default_surface_asset_missing")
 
 

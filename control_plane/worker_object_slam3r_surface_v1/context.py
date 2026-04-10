@@ -23,6 +23,7 @@ class JobContext:
     slam3r_dir: Optional[Path] = None
     sparse2dgs_dir: Optional[Path] = None
     sparse2dgs_scene_dir: Optional[Path] = None
+    matcha_dir: Optional[Path] = None
     sugar_dir: Optional[Path] = None
     sugar_scene_dir: Optional[Path] = None
     sugar_gs_output_dir: Optional[Path] = None

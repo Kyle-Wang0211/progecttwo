@@ -10,7 +10,8 @@ from .pipeline.bridge_slam3r_scene import bridge_slam3r_scene
 from .pipeline.curate_frames import curate_frames
 from .pipeline.download_input import download_input
 from .pipeline.extract_frames import extract_frames
-from .pipeline.publish_default_surface import publish_default_surface
+from .pipeline.publish_default_mesh import publish_default_mesh
+from .pipeline.run_matcha_mesh import run_matcha_mesh
 from .pipeline.run_slam3r import run_slam3r
 from .pipeline.run_sparse2dgs_surface import run_sparse2dgs_surface
 from .runtime import ControlPlaneClient, push_runtime
@@ -294,17 +295,27 @@ def run_once(
             action=run_sparse2dgs_surface,
         )
 
+        _run_step(
+            ctx=ctx,
+            client=client,
+            stage="matcha_mesh_extract",
+            title="正在执行 MAtCha 网格提取",
+            detail="正在按 CVPR 2025 MAtCha 从稳定 surface 中提取默认 mesh。",
+            progress_fraction=0.82,
+            action=run_matcha_mesh,
+        )
+
         default_manifest_holder: dict[str, dict[str, dict[str, object]]] = {}
         _run_step(
             ctx=ctx,
             client=client,
-            stage="publish_default_surface",
-            title="正在整理默认表面成品",
-            detail="正在写出 Sparse2DGS 默认 surface、海报和 viewer manifest。",
-            progress_fraction=0.82,
+            stage="publish_default_mesh",
+            title="正在整理默认网格成品",
+            detail="正在写出默认 mesh、海报和 viewer manifest。",
+            progress_fraction=0.90,
             action=lambda current_ctx: default_manifest_holder.setdefault(
                 "manifest",
-                publish_default_surface(current_ctx, client, storage),
+                publish_default_mesh(current_ctx, client, storage),
             ),
         )
         default_manifest = default_manifest_holder["manifest"]
@@ -312,9 +323,9 @@ def run_once(
             ctx=ctx,
             client=client,
             stage="artifact_upload",
-            title="正在回传默认表面成品",
-            detail="正在上传默认成品清单并通知手机准备下载。",
-            progress_fraction=0.90,
+            title="正在回传默认网格成品",
+            detail="正在上传默认 mesh 成品清单并通知手机准备下载。",
+            progress_fraction=0.96,
             action=lambda current_ctx: client.upload_artifact_manifest(
                 current_ctx.job_id,
                 {
@@ -324,7 +335,7 @@ def run_once(
             ),
         )
 
-        client.complete(ctx.job_id, worker_id, "已完成", "默认 Sparse2DGS surface 成品已准备好")
+        client.complete(ctx.job_id, worker_id, "已完成", "默认 mesh 成品已准备好")
         print(
             f"[object_slam3r_surface_v1] job={ctx.job_id} completed",
             flush=True,

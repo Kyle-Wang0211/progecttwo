@@ -6,6 +6,7 @@ VENV_DIR="${ROOT_DIR}/venv"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 SLAM3R_DIR="${THIRD_PARTY_DIR}/SLAM3R"
 SPARSE2DGS_DIR="${THIRD_PARTY_DIR}/Sparse2DGS"
+MATCHA_DIR="${THIRD_PARTY_DIR}/MAtCha"
 SUGAR_DIR="${THIRD_PARTY_DIR}/SuGaR"
 HGS_DIR="${THIRD_PARTY_DIR}/3D-HGS"
 
@@ -25,6 +26,9 @@ if [[ ! -d "${SLAM3R_DIR}" ]]; then
 fi
 if [[ ! -d "${SPARSE2DGS_DIR}" ]]; then
   git clone https://github.com/Wuuu3511/Sparse2DGS.git "${SPARSE2DGS_DIR}"
+fi
+if [[ ! -d "${MATCHA_DIR}" ]]; then
+  git clone https://github.com/Anttwo/MAtCha.git "${MATCHA_DIR}"
 fi
 if [[ ! -d "${SUGAR_DIR}" ]]; then
   git clone https://github.com/Anttwo/SuGaR.git "${SUGAR_DIR}"
@@ -49,6 +53,7 @@ Environment bootstrap finished.
 Pinned paper stack:
   - SLAM3R (CVPR 2025): ${SLAM3R_DIR}
   - Sparse2DGS (CVPR 2025): ${SPARSE2DGS_DIR}
+  - MAtCha (CVPR 2025): ${MATCHA_DIR}
   - SuGaR (CVPR 2024): ${SUGAR_DIR}
   - 3D-HGS (CVPR 2025, optional HQ): ${HGS_DIR}
 

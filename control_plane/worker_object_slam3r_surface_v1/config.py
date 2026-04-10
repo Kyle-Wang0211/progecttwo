@@ -39,6 +39,17 @@ def _default_storage_region() -> str:
     return "auto"
 
 
+def _default_matcha_command_template() -> str:
+    script_path = (
+        _DEFAULT_REPO_ROOT
+        / "control_plane"
+        / "worker_object_slam3r_surface_v1"
+        / "scripts"
+        / "run_matcha_official.sh"
+    )
+    return f"bash {script_path} {{repo_dir}} {{scene_dir}} {{sparse2dgs_dir}} {{output_dir}}"
+
+
 _DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_LOCAL_ROOT = Path(
     os.environ.get("OBJECT_SLAM3R_SURFACE_LOCAL_ROOT")
@@ -110,6 +121,17 @@ class WorkerConfig:
     sparse2dgs_command_template: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_COMMAND", "")
     sparse2dgs_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_SUMMARY_FILENAME", "sparse2dgs_surface.json")
     sparse2dgs_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TIMEOUT_SEC", 7200)
+
+    matcha_repo: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_MATCHA_REPO",
+        str(_DEFAULT_REPO_ROOT / "third_party" / "MAtCha"),
+    )
+    matcha_command_template: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_MATCHA_COMMAND",
+        _default_matcha_command_template(),
+    )
+    matcha_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_MATCHA_SUMMARY_FILENAME", "matcha_mesh.json")
+    matcha_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_MATCHA_TIMEOUT_SEC", 7200)
 
     sugar_repo: str = os.environ.get(
         "OBJECT_SLAM3R_SURFACE_SUGAR_REPO",
