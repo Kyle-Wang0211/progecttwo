@@ -1,0 +1,142 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.environ.get(name, str(default)))
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    fallback = "1" if default else "0"
+    return os.environ.get(name, fallback).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_storage_region() -> str:
+    explicit = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_REGION")
+    if explicit:
+        return explicit
+
+    for env_name in ("CONTROL_PLANE_OBJECT_STORAGE_ENDPOINT_URL", "CONTROL_PLANE_OBJECT_STORAGE_PUBLIC_BASE_URL"):
+        raw_url = os.environ.get(env_name, "").strip()
+        if not raw_url:
+            continue
+        hostname = urlsplit(raw_url).hostname or raw_url
+        hostname = hostname.strip().lower()
+        if hostname.endswith(".digitaloceanspaces.com"):
+            parts = hostname.split(".")
+            if len(parts) >= 3:
+                if len(parts) == 3:
+                    return parts[0]
+                return parts[1]
+    return "auto"
+
+
+_DEFAULT_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_LOCAL_ROOT = Path(
+    os.environ.get("OBJECT_SLAM3R_SURFACE_LOCAL_ROOT")
+    or os.environ.get("OBJECT_FAST_PUBLISH_LOCAL_ROOT")
+    or "/tmp/aether-object-slam3r-surface"
+)
+
+
+@dataclass(frozen=True)
+class WorkerConfig:
+    control_plane_base_url: str = os.environ.get("CONTROL_PLANE_BASE_URL", "http://127.0.0.1:8080")
+    control_plane_timeout_sec: float = _env_float("CONTROL_PLANE_TIMEOUT_SEC", 15.0)
+
+    provider: str = os.environ.get("OBJECT_SLAM3R_SURFACE_PROVIDER") or os.environ.get("OBJECT_FAST_PUBLISH_PROVIDER", "unconfigured")
+    region: str = os.environ.get("OBJECT_SLAM3R_SURFACE_REGION") or os.environ.get("OBJECT_FAST_PUBLISH_REGION", "us-central")
+    instance_label: str = os.environ.get("OBJECT_SLAM3R_SURFACE_INSTANCE_LABEL", "object-slam3r-surface-v1")
+    host_fingerprint: str = os.environ.get("OBJECT_SLAM3R_SURFACE_HOST_FINGERPRINT", "")
+    gpu_model: str = os.environ.get("OBJECT_SLAM3R_SURFACE_GPU_MODEL") or os.environ.get("OBJECT_FAST_PUBLISH_GPU_MODEL", "RTX 5090")
+    gpu_count: int = _env_int("OBJECT_SLAM3R_SURFACE_GPU_COUNT", _env_int("OBJECT_FAST_PUBLISH_GPU_COUNT", 1))
+    vram_mb: int = _env_int("OBJECT_SLAM3R_SURFACE_VRAM_MB", _env_int("OBJECT_FAST_PUBLISH_VRAM_MB", 24576))
+    cpu_cores: int = _env_int("OBJECT_SLAM3R_SURFACE_CPU_CORES", _env_int("OBJECT_FAST_PUBLISH_CPU_CORES", 16))
+    ram_mb: int = _env_int("OBJECT_SLAM3R_SURFACE_RAM_MB", _env_int("OBJECT_FAST_PUBLISH_RAM_MB", 65536))
+    scheduler_tick_interval_sec: float = _env_float(
+        "OBJECT_SLAM3R_SURFACE_SCHEDULER_TICK_INTERVAL_SEC",
+        _env_float("OBJECT_FAST_PUBLISH_SCHEDULER_TICK_INTERVAL_SEC", 1.0),
+    )
+    heartbeat_interval_sec: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_HEARTBEAT_INTERVAL_SEC",
+        _env_int("OBJECT_FAST_PUBLISH_HEARTBEAT_INTERVAL_SEC", 15),
+    )
+
+    local_root: str = os.environ.get("OBJECT_SLAM3R_SURFACE_LOCAL_ROOT", str(_DEFAULT_LOCAL_ROOT))
+    local_jobs_directory: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_LOCAL_JOBS_DIR",
+        str(_DEFAULT_LOCAL_ROOT / "jobs"),
+    )
+
+    ffmpeg_bin: str = os.environ.get("OBJECT_SLAM3R_SURFACE_FFMPEG_BIN") or os.environ.get("OBJECT_FAST_PUBLISH_FFMPEG_BIN", "ffmpeg")
+    extract_fps: float = _env_float("OBJECT_SLAM3R_SURFACE_EXTRACT_FPS", _env_float("OBJECT_FAST_PUBLISH_EXTRACT_FPS", 2.0))
+    curated_max_frames: int = _env_int("OBJECT_SLAM3R_SURFACE_CURATED_MAX_FRAMES", 64)
+    curated_min_blur_score: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MIN_BLUR_SCORE", 24.0)
+    curated_dark_threshold_brightness: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_DARK_THRESHOLD_BRIGHTNESS", 60.0)
+    curated_bright_threshold_brightness: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_BRIGHT_THRESHOLD_BRIGHTNESS", 200.0)
+    curated_max_frame_similarity: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MAX_FRAME_SIMILARITY", 0.92)
+    curated_min_accept_interval_sec: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MIN_ACCEPT_INTERVAL_SEC", 0.28)
+    curated_min_surface_frames: int = _env_int("OBJECT_SLAM3R_SURFACE_CURATED_MIN_SURFACE_FRAMES", 12)
+
+    slam3r_repo: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_SLAM3R_REPO",
+        str(_DEFAULT_REPO_ROOT / "third_party" / "SLAM3R"),
+    )
+    slam3r_command_template: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SLAM3R_COMMAND", "")
+    slam3r_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SLAM3R_SUMMARY_FILENAME", "slam3r.json")
+    slam3r_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_SLAM3R_TIMEOUT_SEC", 7200)
+
+    sparse2dgs_repo: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_REPO",
+        str(_DEFAULT_REPO_ROOT / "third_party" / "Sparse2DGS"),
+    )
+    sparse2dgs_command_template: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_COMMAND", "")
+    sparse2dgs_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_SUMMARY_FILENAME", "sparse2dgs_surface.json")
+    sparse2dgs_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TIMEOUT_SEC", 7200)
+
+    sugar_repo: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_SUGAR_REPO",
+        str(_DEFAULT_REPO_ROOT / "third_party" / "SuGaR"),
+    )
+    sugar_command_template: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SUGAR_COMMAND", "")
+    sugar_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SUGAR_SUMMARY_FILENAME", "sugar_mesh.json")
+    sugar_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_SUGAR_TIMEOUT_SEC", 7200)
+
+    hgs_repo: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_HGS_REPO",
+        str(_DEFAULT_REPO_ROOT / "third_party" / "3D-HGS"),
+    )
+    hgs_command_template: str = os.environ.get("OBJECT_SLAM3R_SURFACE_HGS_COMMAND", "")
+    hgs_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_HGS_SUMMARY_FILENAME", "3dhgs.json")
+    hgs_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_HGS_TIMEOUT_SEC", 7200)
+    enable_hgs_refine_default: bool = _env_flag("OBJECT_SLAM3R_SURFACE_ENABLE_HGS_REFINE_DEFAULT", False)
+
+    default_camera_pitch_deg: float = _env_float("OBJECT_SLAM3R_SURFACE_DEFAULT_CAMERA_PITCH_DEG", 16.0)
+    default_camera_yaw_deg: float = _env_float("OBJECT_SLAM3R_SURFACE_DEFAULT_CAMERA_YAW_DEG", -26.0)
+    default_camera_distance_scale: float = _env_float("OBJECT_SLAM3R_SURFACE_DEFAULT_CAMERA_DISTANCE_SCALE", 2.4)
+
+    object_storage_endpoint_url: str = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_ENDPOINT_URL", "")
+    object_storage_region: str = _default_storage_region()
+    object_storage_bucket: str = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_BUCKET", "")
+    artifact_bucket_prefix: str = os.environ.get("CONTROL_PLANE_ARTIFACT_PREFIX", "artifacts")
+    object_storage_access_key_id: str = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_ACCESS_KEY_ID", "")
+    object_storage_secret_access_key: str = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_SECRET_ACCESS_KEY", "")
+    object_storage_session_token: str = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_SESSION_TOKEN", "")
+    object_storage_public_base_url: str = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_PUBLIC_BASE_URL", "")
+    object_storage_addressing_style: str = os.environ.get("CONTROL_PLANE_OBJECT_STORAGE_ADDRESSING_STYLE", "auto")
+    object_storage_presign_expiry_sec: int = _env_int("CONTROL_PLANE_OBJECT_STORAGE_PRESIGN_EXPIRY_SEC", 3600)
+
+    @property
+    def repo_root(self) -> Path:
+        return Path(_DEFAULT_REPO_ROOT)
+
+
+config = WorkerConfig()

@@ -125,6 +125,7 @@ LEGACY_PIPELINE_STRATEGIES = {
 
 OBJECT_FAST_PUBLISH_STRATEGY = "object_fast_publish_v1"
 OBJECT_SPLATSLAM_STRATEGY = "object_splatslam_v1"
+OBJECT_SLAM3R_SURFACE_STRATEGY = "object_slam3r_surface_v1"
 
 
 def _event_created_at(event: dict[str, Any]) -> datetime | None:
