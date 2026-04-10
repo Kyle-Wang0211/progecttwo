@@ -160,24 +160,62 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
 
 def bridge_sparse2dgs_to_sugar_inputs(ctx: JobContext) -> tuple[Path, Path]:
     assert ctx.sparse2dgs_dir is not None
+    assert ctx.sugar_dir is not None
 
     scene_dir = ctx.sparse2dgs_scene_dir
     if scene_dir is None or not scene_dir.exists():
         raise RuntimeError("sparse2dgs_scene_contract_missing")
 
     checkpoint_dir = ctx.sparse2dgs_dir
+    source_cameras = checkpoint_dir / "cameras.json"
+    source_cfg_args = checkpoint_dir / "cfg_args"
+    source_input_ply = checkpoint_dir / "input.ply"
+    source_point_cloud_root = checkpoint_dir / "point_cloud"
+    if not source_point_cloud_root.exists():
+        raise RuntimeError(f"sugar_native_checkpoint_missing:{source_point_cloud_root}")
+
+    resolved_iteration = _resolve_sparse2dgs_iteration_to_load(source_point_cloud_root)
+    source_point_cloud_ply = (
+        source_point_cloud_root
+        / f"iteration_{resolved_iteration}"
+        / "point_cloud.ply"
+    )
     required = [
-        checkpoint_dir / "cameras.json",
-        checkpoint_dir / "cfg_args",
-        checkpoint_dir / "point_cloud" / "iteration_7000" / "point_cloud.ply",
+        source_cameras,
+        source_cfg_args,
+        source_point_cloud_ply,
     ]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise RuntimeError(f"sugar_native_checkpoint_missing:{';'.join(missing)}")
 
+    compat_dir = ctx.sugar_dir / "gaussian_splatting_checkpoint"
+    if compat_dir.exists():
+        shutil.rmtree(compat_dir)
+    compat_dir.mkdir(parents=True, exist_ok=True)
+    (compat_dir / "point_cloud").mkdir(parents=True, exist_ok=True)
+
+    _link_or_copy(source_cameras, compat_dir / "cameras.json")
+    _link_or_copy(source_cfg_args, compat_dir / "cfg_args")
+    if source_input_ply.exists():
+        _link_or_copy(source_input_ply, compat_dir / "input.ply")
+
+    compat_point_cloud_dir = compat_dir / "point_cloud" / "iteration_7000"
+    compat_point_cloud_dir.mkdir(parents=True, exist_ok=True)
+    _link_or_copy(source_point_cloud_ply, compat_point_cloud_dir / "point_cloud.ply")
+
     contract = {
         "scene_dir": str(scene_dir),
-        "gs_output_dir": str(checkpoint_dir),
+        "gs_output_dir": str(compat_dir),
+        "sparse2dgs_output_dir": str(checkpoint_dir),
+        "source_iteration_to_load": int(resolved_iteration),
+        "sugar_compat_iteration_to_load": 7000,
+        "compat_files": {
+            "cameras_json": str(compat_dir / "cameras.json"),
+            "cfg_args": str(compat_dir / "cfg_args"),
+            "input_ply": str(compat_dir / "input.ply") if source_input_ply.exists() else None,
+            "point_cloud_ply": str(compat_point_cloud_dir / "point_cloud.ply"),
+        },
         "paper_stack": {
             "surface": "Sparse2DGS",
             "mesh": "SuGaR",
@@ -187,8 +225,37 @@ def bridge_sparse2dgs_to_sugar_inputs(ctx: JobContext) -> tuple[Path, Path]:
     summary_path.write_text(json.dumps(contract, indent=2, ensure_ascii=False), encoding="utf-8")
 
     ctx.sugar_scene_dir = scene_dir
-    ctx.sugar_gs_output_dir = checkpoint_dir
-    return scene_dir, checkpoint_dir
+    ctx.sugar_gs_output_dir = compat_dir
+    return scene_dir, compat_dir
+
+
+def _resolve_sparse2dgs_iteration_to_load(point_cloud_root: Path) -> int:
+    iterations: list[int] = []
+    for child in point_cloud_root.iterdir():
+        if not child.is_dir():
+            continue
+        if not child.name.startswith("iteration_"):
+            continue
+        suffix = child.name.split("iteration_", 1)[1]
+        try:
+            iteration = int(suffix)
+        except ValueError:
+            continue
+        if (child / "point_cloud.ply").exists():
+            iterations.append(iteration)
+    if not iterations:
+        raise RuntimeError(f"sparse2dgs_point_cloud_missing:{point_cloud_root}")
+    return max(iterations)
+
+
+def _link_or_copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists() or destination.is_symlink():
+        destination.unlink()
+    try:
+        destination.symlink_to(source)
+    except OSError:
+        shutil.copy2(source, destination)
 
 
 def _load_slam3r_recon_utils():
