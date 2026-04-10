@@ -1,0 +1,7 @@
+requests
+boto3
+Pillow
+numpy
+opencv-python-headless
+open3d
+trimesh

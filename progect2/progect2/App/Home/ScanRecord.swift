@@ -23,6 +23,8 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
     public let createdAt: Date
     public var thumbnailPath: String?       // Relative path: "thumbnails/{id}.jpg"
     public var artifactPath: String?        // .splat file path (future NFT mint)
+    public var pipelineKind: ScanPipelineKind?
+    public var pipelineStage: String?
     public var coveragePercentage: Double   // Final coverage [0, 1]
     public var triangleCount: Int           // Total mesh triangles
     public var durationSeconds: TimeInterval // Scan duration
@@ -33,6 +35,8 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         createdAt: Date = Date(),
         thumbnailPath: String? = nil,
         artifactPath: String? = nil,
+        pipelineKind: ScanPipelineKind? = nil,
+        pipelineStage: String? = nil,
         coveragePercentage: Double = 0.0,
         triangleCount: Int = 0,
         durationSeconds: TimeInterval = 0.0
@@ -42,6 +46,8 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         self.createdAt = createdAt
         self.thumbnailPath = thumbnailPath
         self.artifactPath = artifactPath
+        self.pipelineKind = pipelineKind
+        self.pipelineStage = pipelineStage
         self.coveragePercentage = max(0.0, min(1.0, coveragePercentage))
         self.triangleCount = max(0, triangleCount)
         self.durationSeconds = max(0, durationSeconds)
@@ -53,4 +59,9 @@ public struct ScanRecord: Identifiable, Codable, Sendable {
         formatter.dateFormat = "yyyy-MM-dd HH:mm"
         return "扫描 \(formatter.string(from: date))"
     }
+}
+
+public enum ScanPipelineKind: String, Codable, Sendable {
+    case legacyGuided = "legacy_guided"
+    case objectModeV2 = "object_mode_v2"
 }

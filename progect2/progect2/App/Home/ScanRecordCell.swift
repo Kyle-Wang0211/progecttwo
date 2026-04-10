@@ -58,6 +58,16 @@ struct ScanRecordCell: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
 
+            if let pipelineStage = record.pipelineStage, !pipelineStage.isEmpty {
+                Text(pipelineStage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.75))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.white.opacity(0.12))
+                    .clipShape(Capsule())
+            }
+
             // Relative time + coverage
             HStack(spacing: 4) {
                 Text(relativeTime)

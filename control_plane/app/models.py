@@ -86,6 +86,9 @@ class ArtifactManifest(BaseModel):
     preview: Optional[ArtifactDescriptor] = None
     metrics: Optional[ArtifactDescriptor] = None
     viewer_manifest: Optional[ArtifactDescriptor] = None
+    comparison_asset: Optional[ArtifactDescriptor] = None
+    comparison_metrics: Optional[ArtifactDescriptor] = None
+    hq_asset: Optional[ArtifactDescriptor] = None
 
 
 class JobTimelinePhase(BaseModel):

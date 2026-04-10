@@ -70,6 +70,47 @@ def _merged_capability_flags(
     return merged
 
 
+def _normalize_pipeline_strategy(value: Any) -> str:
+    strategy = str(value or "").strip().lower()
+    return strategy or "autofallback"
+
+
+LEGACY_PIPELINE_STRATEGIES = {
+    "autofallback",
+    "legacy_hislam2",
+    "official_default",
+}
+
+
+def _allowed_pipeline_strategies_for_capability_flags(capability_flags: Optional[dict[str, Any]]) -> list[str]:
+    flags = capability_flags if isinstance(capability_flags, dict) else {}
+    families = flags.get("pipeline_families")
+    if isinstance(families, list):
+        normalized = [
+            str(item).strip().lower()
+            for item in families
+            if str(item).strip()
+        ]
+        if normalized:
+            return normalized
+    return sorted(LEGACY_PIPELINE_STRATEGIES)
+
+
+def _worker_supports_pipeline_strategy(capability_flags: Optional[dict[str, Any]], strategy: Optional[str]) -> bool:
+    normalized = _normalize_pipeline_strategy(strategy)
+    return normalized in _allowed_pipeline_strategies_for_capability_flags(capability_flags)
+
+
+def _pipeline_strategy_from_events(events: list[dict[str, Any]]) -> str:
+    for event in reversed(events):
+        if event.get("event_type") != "pipeline_profile_requested":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            return _normalize_pipeline_strategy(payload.get("strategy"))
+    return "autofallback"
+
+
 def _worker_meets_scheduler_requirements(
     *,
     gpu_count: Optional[int],
@@ -84,6 +125,11 @@ def _worker_meets_scheduler_requirements(
     if int(disk_free_mb or 0) < settings.scheduler_min_worker_disk_free_mb:
         return False
     flags = capability_flags or {}
+    pipeline_families = flags.get("pipeline_families")
+    if isinstance(pipeline_families, list):
+        normalized_families = [str(item).strip().lower() for item in pipeline_families if str(item).strip()]
+        if normalized_families:
+            return True
     return all(_truthy_capability(flags.get(name)) for name in settings.scheduler_required_worker_capabilities)
 
 
@@ -400,13 +446,25 @@ class InMemoryRepository:
             row.updated_at = now
             return row
 
-    def reserve_idle_worker_for_job(self, job_id: str) -> Optional[WorkerRow]:
+    def reserve_idle_worker_for_job(
+        self,
+        job_id: str,
+        *,
+        pipeline_strategy: Optional[str] = None,
+    ) -> Optional[WorkerRow]:
         with self._lock:
             self._reconcile_terminal_worker_assignments()
             self._reconcile_stale_job_reservations()
             job = self.jobs[job_id]
             if job.assigned_worker_id:
-                return self.workers.get(job.assigned_worker_id)
+                existing_worker = self.workers.get(job.assigned_worker_id)
+                if existing_worker and _worker_supports_pipeline_strategy(
+                    existing_worker.capability_flags,
+                    pipeline_strategy,
+                ):
+                    return existing_worker
+                job.assigned_worker_id = None
+                job.updated_at = utcnow()
             stale_cutoff = utcnow() - timedelta(seconds=60)
             candidate = next(
                 (
@@ -416,6 +474,7 @@ class InMemoryRepository:
                     and worker.current_job_id is None
                     and worker.last_heartbeat_at >= stale_cutoff
                     and _worker_meets_scheduler_requirements(**self._effective_worker_snapshot(worker))
+                    and _worker_supports_pipeline_strategy(worker.capability_flags, pipeline_strategy)
                 ),
                 None,
             )
@@ -434,6 +493,7 @@ class InMemoryRepository:
         vram_mb: Optional[int] = None,
         disk_free_mb: Optional[int] = None,
         capability_flags: Optional[dict[str, Any]] = None,
+        pipeline_strategies: Optional[list[str]] = None,
     ) -> Optional[JobRow]:
         with self._lock:
             self._reconcile_terminal_worker_assignments()
@@ -464,6 +524,10 @@ class InMemoryRepository:
                     )
                     and job.input_storage_key
                     and (job.assigned_worker_id is None or job.assigned_worker_id == worker_id)
+                    and (
+                        not pipeline_strategies
+                        or _pipeline_strategy_from_events(self.job_events.get(job.job_id, [])) in pipeline_strategies
+                    )
                 ),
                 key=lambda job: (
                     0 if job.assigned_worker_id == worker_id else 1,
@@ -1122,7 +1186,12 @@ class PostgresRepository:
             raise KeyError(worker_id)
         return self._worker_row_from_record(record)
 
-    def reserve_idle_worker_for_job(self, job_id: str) -> Optional[WorkerRow]:
+    def reserve_idle_worker_for_job(
+        self,
+        job_id: str,
+        *,
+        pipeline_strategy: Optional[str] = None,
+    ) -> Optional[WorkerRow]:
         now = utcnow()
         with self._connect() as conn:
             self._reconcile_terminal_worker_assignments(conn)
@@ -1135,8 +1204,21 @@ class PostgresRepository:
                     "select * from workers where worker_id = %s",
                     (existing["assigned_worker_id"],),
                 ).fetchone()
-                conn.commit()
-                return self._worker_row_from_record(worker_record) if worker_record else None
+                if worker_record and _worker_supports_pipeline_strategy(
+                    worker_record.get("capability_flags"),
+                    pipeline_strategy,
+                ):
+                    conn.commit()
+                    return self._worker_row_from_record(worker_record)
+                conn.execute(
+                    """
+                    update jobs
+                    set assigned_worker_id = null,
+                        updated_at = %s
+                    where job_id = %s
+                    """,
+                    (now, job_id),
+                )
 
             candidate_records = conn.execute(
                 """
@@ -1157,6 +1239,10 @@ class PostgresRepository:
                     for record in candidate_records
                     if _worker_meets_scheduler_requirements(
                         **self._effective_worker_snapshot_from_record(record)
+                    )
+                    and _worker_supports_pipeline_strategy(
+                        record.get("capability_flags"),
+                        pipeline_strategy,
                     )
                 ),
                 None,
@@ -1187,6 +1273,7 @@ class PostgresRepository:
         vram_mb: Optional[int] = None,
         disk_free_mb: Optional[int] = None,
         capability_flags: Optional[dict[str, Any]] = None,
+        pipeline_strategies: Optional[list[str]] = None,
     ) -> Optional[JobRow]:
         with self._connect() as conn:
             self._reconcile_terminal_worker_assignments(conn, worker_id=worker_id)
@@ -1214,7 +1301,7 @@ class PostgresRepository:
             ):
                 conn.commit()
                 return None
-            record = conn.execute(
+            records = conn.execute(
                 """
                 select *
                 from jobs
@@ -1244,11 +1331,44 @@ class PostgresRepository:
                     case when state = 'uploading' then 0 else 1 end,
                     created_at asc
                 for update skip locked
-                limit 1
+                limit 24
                 """
                 ,
                 (min_chunk_ready_bytes, min_chunk_ready_bytes, worker_id, worker_id),
-            ).fetchone()
+            ).fetchall()
+            if not records:
+                conn.commit()
+                return None
+
+            allowed_strategies = {
+                _normalize_pipeline_strategy(item)
+                for item in (pipeline_strategies or [])
+                if _normalize_pipeline_strategy(item)
+            }
+
+            record = None
+            for candidate in records:
+                if not allowed_strategies:
+                    record = candidate
+                    break
+                strategy_record = conn.execute(
+                    """
+                    select payload
+                    from job_events
+                    where job_id = %s
+                      and event_type = 'pipeline_profile_requested'
+                    order by created_at desc
+                    limit 1
+                    """,
+                    (candidate["job_id"],),
+                ).fetchone()
+                strategy = "autofallback"
+                if strategy_record and isinstance(strategy_record.get("payload"), dict):
+                    strategy = _normalize_pipeline_strategy(strategy_record["payload"].get("strategy"))
+                if strategy in allowed_strategies:
+                    record = candidate
+                    break
+
             if record is None:
                 conn.commit()
                 return None
@@ -1378,6 +1498,24 @@ class PostgresRepository:
                     artifact.viewer_manifest.storage_key,
                     artifact.viewer_manifest.size_bytes,
                     artifact.viewer_manifest.checksum_sha256,
+                )
+            )
+        if artifact.comparison_asset:
+            rows.append(
+                (
+                    "comparison_asset",
+                    artifact.comparison_asset.storage_key,
+                    artifact.comparison_asset.size_bytes,
+                    artifact.comparison_asset.checksum_sha256,
+                )
+            )
+        if artifact.comparison_metrics:
+            rows.append(
+                (
+                    "comparison_metrics",
+                    artifact.comparison_metrics.storage_key,
+                    artifact.comparison_metrics.size_bytes,
+                    artifact.comparison_metrics.checksum_sha256,
                 )
             )
 

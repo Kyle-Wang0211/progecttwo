@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
+import json
 import logging
 import os
 import tempfile
@@ -13,6 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from .config import settings
 from .models import (
+    ArtifactDescriptor,
     ArtifactManifestRequest,
     CancelAckRequest,
     ClaimNextRequest,
@@ -115,6 +117,15 @@ DEFAULT_PIPELINE_PROFILE: dict[str, Any] = {
     **FRAME_SAMPLING_PROFILE_PRESETS["full"],
 }
 
+LEGACY_PIPELINE_STRATEGIES = {
+    "autofallback",
+    "legacy_hislam2",
+    "official_default",
+}
+
+OBJECT_FAST_PUBLISH_STRATEGY = "object_fast_publish_v1"
+OBJECT_SPLATSLAM_STRATEGY = "object_splatslam_v1"
+
 
 def _event_created_at(event: dict[str, Any]) -> datetime | None:
     payload = event.get("payload")
@@ -200,6 +211,9 @@ def _requested_pipeline_profile_payload(payload: Any) -> dict[str, Any]:
     candidate = payload if isinstance(payload, dict) else {}
     sampling_profile = _sampling_profile_from_pipeline_payload(candidate)
     preset = FRAME_SAMPLING_PROFILE_PRESETS[sampling_profile]
+    strategy = str(candidate.get("strategy") or DEFAULT_PIPELINE_PROFILE.get("strategy") or "autofallback").strip().lower()
+    if not strategy:
+        strategy = "autofallback"
     requested_title = str(
         candidate.get("requested_preset_title")
         or candidate.get("title")
@@ -211,13 +225,16 @@ def _requested_pipeline_profile_payload(payload: Any) -> dict[str, Any]:
         requested_fraction = candidate.get("frame_fraction")
     if requested_fraction in (None, ""):
         requested_fraction = preset.get("frame_fraction")
-    return {
+    profile = {
         "frame_sampling_profile": sampling_profile,
         "requested_preset_title": requested_title,
         "requested_frame_fraction": str(requested_fraction),
         **DEFAULT_PIPELINE_PROFILE,
+        **candidate,
         **preset,
+        "strategy": strategy,
     }
+    return profile
 
 
 def _pipeline_profile_for_job(job_id: str) -> dict[str, Any]:
@@ -227,6 +244,20 @@ def _pipeline_profile_for_job(job_id: str) -> dict[str, Any]:
         payload = events[-1].get("payload")
         profile.update(_requested_pipeline_profile_payload(payload))
     return profile
+
+
+def _allowed_pipeline_strategies_for_worker(capability_flags: dict[str, Any] | None) -> list[str] | None:
+    flags = capability_flags if isinstance(capability_flags, dict) else {}
+    families = flags.get("pipeline_families")
+    if isinstance(families, list):
+        normalized = [
+            str(item).strip().lower()
+            for item in families
+            if str(item).strip()
+        ]
+        if normalized:
+            return normalized
+    return sorted(LEGACY_PIPELINE_STRATEGIES)
 
 
 def _append_once_job_event(job_id: str, *, event_type: str, payload: dict[str, Any]) -> None:
@@ -876,8 +907,9 @@ def _create_upload_contract(row: JobRow, *, mobile: bool) -> tuple[dict[str, Any
 
 
 def _reserve_idle_worker_for_upload(job_id: str) -> str | None:
+    pipeline_strategy = _pipeline_profile_for_job(job_id).get("strategy")
     try:
-        worker = repo.reserve_idle_worker_for_job(job_id)
+        worker = repo.reserve_idle_worker_for_job(job_id, pipeline_strategy=pipeline_strategy)
     except Exception:
         return None
     if not worker:
@@ -1157,6 +1189,7 @@ def _runtime_metrics_for_row(row: JobRow) -> dict[str, Any]:
 
 def _status_from_row(row: JobRow) -> JobStatusResponse:
     row = _resolved_job_row(row)
+    artifact = _augment_artifact_manifest_from_viewer_manifest(row.artifact) if row.artifact else None
     return JobStatusResponse(
         job_id=row.job_id,
         state=row.state,
@@ -1173,7 +1206,7 @@ def _status_from_row(row: JobRow) -> JobStatusResponse:
         failure_detail=row.failure_detail,
         upload_completed=row.upload_completed_at is not None,
         metrics=_runtime_metrics_for_row(row),
-        artifact=row.artifact,
+        artifact=artifact,
         timeline=_timeline_for_row(row),
         assigned_worker_id=row.assigned_worker_id,
         updated_at=row.updated_at,
@@ -1207,6 +1240,8 @@ def _artifact_format_for(row: JobRow) -> str | None:
     if not artifact or not artifact.primary_artifact:
         return None
     key = (artifact.primary_artifact.storage_key or "").lower()
+    if key.endswith(".glb"):
+        return "glb"
     if key.endswith(".spz"):
         return "spz"
     if key.endswith(".splat"):
@@ -1214,14 +1249,171 @@ def _artifact_format_for(row: JobRow) -> str | None:
     return "ply"
 
 
+def _artifact_format_for_descriptor(storage_key: str | None, artifact_type: str | None = None) -> str | None:
+    key = (storage_key or "").lower()
+    if key.endswith(".glb"):
+        return "glb"
+    if key.endswith(".spz"):
+        return "spz"
+    if key.endswith(".splat"):
+        return "splat"
+    if key.endswith(".ply"):
+        return "ply"
+    if key.endswith(".png"):
+        return "png"
+    if key.endswith(".jpg") or key.endswith(".jpeg"):
+        return "jpg"
+    if key.endswith(".json"):
+        return "json"
+    normalized_type = (artifact_type or "").strip().lower()
+    if "manifest" in normalized_type:
+        return "json"
+    if "metrics" in normalized_type:
+        return "json"
+    if "png" in normalized_type:
+        return "png"
+    if "jpg" in normalized_type or "jpeg" in normalized_type:
+        return "jpg"
+    return None
+
+
 def _mobile_artifact_payload(row: JobRow) -> dict[str, Any] | None:
-    artifact = row.artifact
+    artifact = _augment_artifact_manifest_from_viewer_manifest(row.artifact) if row.artifact else None
     if not artifact or not artifact.primary_artifact or not artifact.primary_artifact.storage_key:
         return None
-    return {
-        "download_url": f"{settings.public_base_url.rstrip('/')}/v1/mobile-jobs/{row.job_id}/artifact-download",
-        "format": _artifact_format_for(row) or "ply",
-    }
+    payload = artifact.model_dump(mode="json", exclude_none=True)
+    def _decorate_descriptor(key: str) -> None:
+        descriptor = payload.get(key)
+        if not isinstance(descriptor, dict):
+            return
+        descriptor["format"] = _artifact_format_for_descriptor(
+            descriptor.get("storage_key"),
+            descriptor.get("type"),
+        ) or descriptor.get("format") or "bin"
+
+    primary_payload = dict(payload.get("primary_artifact") or {})
+    primary_payload["download_url"] = f"{settings.public_base_url.rstrip('/')}/v1/mobile-jobs/{row.job_id}/artifact-download"
+    primary_payload["format"] = _artifact_format_for(row) or primary_payload.get("format") or "ply"
+    payload["primary_artifact"] = primary_payload
+    if "hq_asset" not in payload and isinstance(payload.get("metrics"), dict):
+        payload["hq_asset"] = dict(payload["metrics"])
+    _decorate_descriptor("viewer_manifest")
+    _decorate_descriptor("comparison_asset")
+    _decorate_descriptor("comparison_metrics")
+    _decorate_descriptor("preview")
+    _decorate_descriptor("metrics")
+    _decorate_descriptor("hq_asset")
+    return payload
+
+
+def _artifact_storage_key_for_download(row: JobRow, artifact_key: str) -> str | None:
+    artifact = _augment_artifact_manifest_from_viewer_manifest(row.artifact) if row.artifact else None
+    if artifact is None:
+        return None
+    normalized_key = artifact_key.strip().lower()
+    if normalized_key == "primary_artifact" and artifact.primary_artifact:
+        return artifact.primary_artifact.storage_key
+    if normalized_key == "viewer_manifest" and artifact.viewer_manifest:
+        return artifact.viewer_manifest.storage_key
+    if normalized_key == "comparison_asset" and artifact.comparison_asset:
+        return artifact.comparison_asset.storage_key
+    if normalized_key == "comparison_metrics" and artifact.comparison_metrics:
+        return artifact.comparison_metrics.storage_key
+    if normalized_key == "preview" and artifact.preview:
+        return artifact.preview.storage_key
+    if normalized_key == "hq_asset":
+        if artifact.hq_asset:
+            return artifact.hq_asset.storage_key
+        if artifact.metrics:
+            return artifact.metrics.storage_key
+    if normalized_key == "metrics" and artifact.metrics:
+        return artifact.metrics.storage_key
+    return None
+
+
+def _derived_storage_key(reference_storage_key: str, relative_path: str) -> str:
+    reference_components = [part for part in reference_storage_key.split("/") if part]
+    if len(reference_components) < 2:
+        return relative_path
+    root_prefix = "/".join(reference_components[:-2])
+    return f"{root_prefix}/{relative_path}" if root_prefix else relative_path
+
+
+def _artifact_descriptor_from_manifest_asset(
+    *,
+    reference_storage_key: str,
+    manifest_asset: Any,
+) -> ArtifactDescriptor | None:
+    if not isinstance(manifest_asset, dict):
+        return None
+    relative_path = str(manifest_asset.get("path") or "").strip().lstrip("/")
+    if not relative_path or manifest_asset.get("ready") is False:
+        return None
+    kind = str(manifest_asset.get("kind") or "").strip().lower()
+    artifact_type = kind or _artifact_format_for_descriptor(relative_path, None) or "artifact"
+    return ArtifactDescriptor(
+        type=artifact_type,
+        storage_key=_derived_storage_key(reference_storage_key, relative_path),
+    )
+
+
+def _load_viewer_manifest_payload(storage_key: str) -> dict[str, Any] | None:
+    try:
+        body, _, _ = storage.open_download_stream(storage_key)
+    except Exception:
+        return None
+    try:
+        data = body.read()
+    finally:
+        close = getattr(body, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _augment_artifact_manifest_from_viewer_manifest(artifact):
+    if artifact is None or not artifact.viewer_manifest or not artifact.viewer_manifest.storage_key:
+        return artifact
+
+    manifest = artifact.model_copy(deep=True)
+    if manifest.hq_asset is None and manifest.metrics is not None:
+        manifest.hq_asset = manifest.metrics.model_copy(deep=True)
+    if (
+        manifest.comparison_asset is not None
+        and manifest.comparison_metrics is not None
+        and manifest.hq_asset is not None
+    ):
+        return manifest
+
+    payload = _load_viewer_manifest_payload(manifest.viewer_manifest.storage_key)
+    if not payload:
+        return manifest
+
+    if manifest.comparison_asset is None:
+        manifest.comparison_asset = _artifact_descriptor_from_manifest_asset(
+            reference_storage_key=manifest.viewer_manifest.storage_key,
+            manifest_asset=payload.get("cleaned_asset"),
+        )
+    if manifest.comparison_metrics is None:
+        manifest.comparison_metrics = _artifact_descriptor_from_manifest_asset(
+            reference_storage_key=manifest.viewer_manifest.storage_key,
+            manifest_asset=payload.get("cleanup_compare"),
+        )
+    if manifest.hq_asset is None:
+        manifest.hq_asset = _artifact_descriptor_from_manifest_asset(
+            reference_storage_key=manifest.viewer_manifest.storage_key,
+            manifest_asset=payload.get("hq_asset"),
+        )
+    if manifest.metrics is None and manifest.hq_asset is not None:
+        manifest.metrics = manifest.hq_asset.model_copy(deep=True)
+    return manifest
 
 
 def _stream_object_response(storage_key: str) -> StreamingResponse:
@@ -2135,6 +2327,17 @@ def get_mobile_job_artifact(job_id: str) -> StreamingResponse:
     return _stream_object_response(artifact.primary_artifact.storage_key)
 
 
+@app.get("/v1/mobile-jobs/{job_id}/artifact-download/{artifact_key}")
+def get_mobile_job_optional_artifact(job_id: str, artifact_key: str) -> StreamingResponse:
+    row = repo.get_job(job_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    storage_key = _artifact_storage_key_for_download(row, artifact_key)
+    if not storage_key:
+        raise HTTPException(status_code=404, detail="artifact_not_ready")
+    return _stream_object_response(storage_key)
+
+
 @app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
 def get_job(job_id: str) -> JobStatusResponse:
     row = repo.get_job(job_id)
@@ -2227,6 +2430,7 @@ def worker_heartbeat(worker_id: str, request: WorkerHeartbeatRequest) -> WorkerH
 def claim_next(worker_id: str, request: ClaimNextRequest) -> ClaimNextResponse:
     if repo.get_worker(worker_id) is None:
         raise HTTPException(status_code=404, detail="worker_not_found")
+    allowed_pipeline_strategies = _allowed_pipeline_strategies_for_worker(request.capability_flags)
     job = repo.claim_next_job(
         worker_id,
         min_chunk_ready_bytes=settings.object_storage_chunked_ingest_min_ready_bytes,
@@ -2234,6 +2438,7 @@ def claim_next(worker_id: str, request: ClaimNextRequest) -> ClaimNextResponse:
         vram_mb=request.vram_mb,
         disk_free_mb=request.disk_free_mb,
         capability_flags=request.capability_flags,
+        pipeline_strategies=allowed_pipeline_strategies,
     )
     if not job or not job.input_storage_key:
         return ClaimNextResponse(assignment=None)
@@ -2339,14 +2544,24 @@ def artifact_manifest(job_id: str, request: ArtifactManifestRequest) -> JobStatu
         return _status_from_row(row)
 
     manifest = request.manifest.model_copy(deep=True)
+    if manifest.hq_asset is None and manifest.metrics is not None:
+        manifest.hq_asset = manifest.metrics.model_copy(deep=True)
+    if manifest.metrics is None and manifest.hq_asset is not None:
+        manifest.metrics = manifest.hq_asset.model_copy(deep=True)
     if manifest.primary_artifact and manifest.primary_artifact.storage_key:
         manifest.primary_artifact.download_url = storage.build_download_url(manifest.primary_artifact.storage_key)
     if manifest.preview and manifest.preview.storage_key:
         manifest.preview.download_url = storage.build_download_url(manifest.preview.storage_key)
     if manifest.metrics and manifest.metrics.storage_key:
         manifest.metrics.download_url = storage.build_download_url(manifest.metrics.storage_key)
+    if manifest.hq_asset and manifest.hq_asset.storage_key:
+        manifest.hq_asset.download_url = storage.build_download_url(manifest.hq_asset.storage_key)
     if manifest.viewer_manifest and manifest.viewer_manifest.storage_key:
         manifest.viewer_manifest.download_url = storage.build_download_url(manifest.viewer_manifest.storage_key)
+    if manifest.comparison_asset and manifest.comparison_asset.storage_key:
+        manifest.comparison_asset.download_url = storage.build_download_url(manifest.comparison_asset.storage_key)
+    if manifest.comparison_metrics and manifest.comparison_metrics.storage_key:
+        manifest.comparison_metrics.download_url = storage.build_download_url(manifest.comparison_metrics.storage_key)
 
     row = repo.update_job(
         job_id,

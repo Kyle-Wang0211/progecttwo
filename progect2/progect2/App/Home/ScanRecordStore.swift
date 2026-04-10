@@ -104,6 +104,20 @@ public final class ScanRecordStore {
         }
     }
 
+    /// Insert or replace an existing record by id.
+    public func upsertRecord(_ record: ScanRecord) {
+        queue.sync {
+            var records = cachedRecords ?? loadRecordsUnsafe()
+            if let index = records.firstIndex(where: { $0.id == record.id }) {
+                records[index] = record
+            } else {
+                records.append(record)
+            }
+            cachedRecords = records
+            writeRecordsToDisk(records)
+        }
+    }
+
     /// Delete a scan record by ID
     ///
     /// - Parameter id: UUID of the record to delete
@@ -137,6 +151,14 @@ public final class ScanRecordStore {
     /// Get full URL for a thumbnail relative path
     public func thumbnailURL(for relativePath: String) -> URL {
         return baseDirectory.appendingPathComponent(relativePath)
+    }
+
+    /// Resolve either an absolute artifact path or a baseDirectory-relative path.
+    public func artifactURL(for path: String) -> URL {
+        if path.hasPrefix("/") {
+            return URL(fileURLWithPath: path)
+        }
+        return baseDirectory.appendingPathComponent(path)
     }
 
     // MARK: - Private Helpers
