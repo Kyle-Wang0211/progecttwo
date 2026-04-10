@@ -7,16 +7,12 @@ from typing import Any
 from .context import JobContext
 from .paths import ensure_job_layout
 from .pipeline.bridge_slam3r_scene import bridge_slam3r_scene
-from .pipeline.bridge_sparse2dgs_sugar import bridge_sparse2dgs_sugar
 from .pipeline.curate_frames import curate_frames
 from .pipeline.download_input import download_input
 from .pipeline.extract_frames import extract_frames
 from .pipeline.publish_default_surface import publish_default_surface
-from .pipeline.publish_hq import publish_hq
-from .pipeline.run_3dhgs_refine import run_3dhgs_refine
 from .pipeline.run_slam3r import run_slam3r
 from .pipeline.run_sparse2dgs_surface import run_sparse2dgs_surface
-from .pipeline.run_sugar_mesh import run_sugar_mesh
 from .runtime import ControlPlaneClient, push_runtime
 from .storage_client import ObjectStorageClient
 
@@ -81,10 +77,8 @@ class _RuntimeTracker:
 
 
 def _step_state(stage: str) -> str:
-    if stage in {"publish_default_surface", "publish_hq", "artifact_upload"}:
+    if stage in {"publish_default_surface", "artifact_upload"}:
         return "exporting"
-    if stage == "3dhgs_refine":
-        return "training_full"
     return "reconstructing"
 
 
@@ -299,24 +293,6 @@ def run_once(
             progress_fraction=0.68,
             action=run_sparse2dgs_surface,
         )
-        _run_step(
-            ctx=ctx,
-            client=client,
-            stage="sugar_contract",
-            title="正在整理 SuGaR 官方输入契约",
-            detail="正在把 Sparse2DGS 官方输出对齐为 SuGaR 所需的 scene 与 checkpoint 契约。",
-            progress_fraction=0.74,
-            action=bridge_sparse2dgs_sugar,
-        )
-        _run_step(
-            ctx=ctx,
-            client=client,
-            stage="sugar_mesh",
-            title="正在执行 SuGaR mesh 提取",
-            detail="正在按 CVPR 2024 SuGaR 导出可交付的 mesh/surface 默认成品。",
-            progress_fraction=0.82,
-            action=run_sugar_mesh,
-        )
 
         default_manifest_holder: dict[str, dict[str, dict[str, object]]] = {}
         _run_step(
@@ -324,8 +300,8 @@ def run_once(
             client=client,
             stage="publish_default_surface",
             title="正在整理默认表面成品",
-            detail="正在写出默认 mesh/surface、海报和 viewer manifest。",
-            progress_fraction=0.90,
+            detail="正在写出 Sparse2DGS 默认 surface、海报和 viewer manifest。",
+            progress_fraction=0.82,
             action=lambda current_ctx: default_manifest_holder.setdefault(
                 "manifest",
                 publish_default_surface(current_ctx, client, storage),
@@ -338,7 +314,7 @@ def run_once(
             stage="artifact_upload",
             title="正在回传默认表面成品",
             detail="正在上传默认成品清单并通知手机准备下载。",
-            progress_fraction=0.94,
+            progress_fraction=0.90,
             action=lambda current_ctx: client.upload_artifact_manifest(
                 current_ctx.job_id,
                 {
@@ -348,47 +324,7 @@ def run_once(
             ),
         )
 
-        if ctx.should_run_hq_refine:
-            _run_step(
-                ctx=ctx,
-                client=client,
-                stage="3dhgs_refine",
-                title="正在执行 3D-HGS 可选增强",
-                detail="正在按 CVPR 2025 3D-HGS 生成可选高斯增强层。",
-                progress_fraction=0.97,
-                action=run_3dhgs_refine,
-            )
-            hq_manifest_holder: dict[str, dict[str, dict[str, object]]] = {}
-            _run_step(
-                ctx=ctx,
-                client=client,
-                stage="publish_hq",
-                title="正在整理可选高斯增强结果",
-                detail="正在更新 HQ viewer manifest 并回传可选增强资产。",
-                progress_fraction=0.99,
-                action=lambda current_ctx: hq_manifest_holder.setdefault(
-                    "manifest",
-                    publish_hq(current_ctx, client, storage, default_manifest),
-                ),
-            )
-            hq_manifest = hq_manifest_holder["manifest"]
-            _run_step(
-                ctx=ctx,
-                client=client,
-                stage="artifact_upload",
-                title="正在回传可选高斯增强结果",
-                detail="正在上传 HQ 清单。",
-                progress_fraction=0.995,
-                action=lambda current_ctx: client.upload_artifact_manifest(
-                    current_ctx.job_id,
-                    {
-                        "worker_id": worker_id,
-                        "manifest": hq_manifest,
-                    },
-                ),
-            )
-
-        client.complete(ctx.job_id, worker_id, "已完成", "默认 mesh/surface 成品已准备好")
+        client.complete(ctx.job_id, worker_id, "已完成", "默认 Sparse2DGS surface 成品已准备好")
         print(
             f"[object_slam3r_surface_v1] job={ctx.job_id} completed",
             flush=True,

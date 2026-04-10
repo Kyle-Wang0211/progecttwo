@@ -34,6 +34,8 @@ def run_sparse2dgs_surface_reconstruction(ctx: JobContext) -> None:
         timeout=config.sparse2dgs_stage_timeout_sec,
     )
 
+    default_asset = _resolve_sparse2dgs_default_asset(ctx.sparse2dgs_dir)
+
     summary = {
         "paper": "Sparse2DGS",
         "paper_url": SPARSE2DGS_PAPER_URL,
@@ -42,6 +44,7 @@ def run_sparse2dgs_surface_reconstruction(ctx: JobContext) -> None:
         "scene_dir": str(ctx.sparse2dgs_scene_dir or ""),
         "slam3r_summary": str(ctx.slam3r_dir / config.slam3r_summary_filename),
         "output_dir": str(ctx.sparse2dgs_dir),
+        "default_asset": str(default_asset),
     }
     (ctx.sparse2dgs_dir / config.sparse2dgs_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
@@ -61,3 +64,27 @@ def _render_command(*, template: str, ctx: JobContext, repo_dir: Path) -> list[s
         repo_dir=str(repo_dir),
     )
     return shlex.split(rendered)
+
+
+def _resolve_sparse2dgs_default_asset(output_dir: Path) -> Path:
+    point_cloud_root = output_dir / "point_cloud"
+    if not point_cloud_root.exists():
+        raise RuntimeError(f"sparse2dgs_point_cloud_missing:{point_cloud_root}")
+
+    candidates: list[tuple[int, Path]] = []
+    for child in point_cloud_root.iterdir():
+        if not child.is_dir() or not child.name.startswith("iteration_"):
+            continue
+        try:
+            iteration = int(child.name.split("iteration_", 1)[1])
+        except ValueError:
+            continue
+        point_cloud = child / "point_cloud.ply"
+        if point_cloud.is_file():
+            candidates.append((iteration, point_cloud))
+
+    if not candidates:
+        raise RuntimeError(f"sparse2dgs_default_asset_missing:{point_cloud_root}")
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]

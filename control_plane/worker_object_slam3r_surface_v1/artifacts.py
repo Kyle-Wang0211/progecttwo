@@ -95,8 +95,8 @@ def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
         "pipeline_stack": {
             "reconstruction": "slam3r",
             "surface": "sparse2dgs",
-            "rendering": "sugar",
-            "hq": "3d-hgs",
+            "rendering": "sparse2dgs_surface",
+            "hq": "disabled",
         },
         "camera_preset": _default_camera_preset(),
     }
@@ -159,21 +159,31 @@ def _copy_default_surface_asset(ctx: JobContext) -> Path:
 
 
 def _resolve_surface_asset(ctx: JobContext) -> Path | None:
-    if ctx.sugar_dir is None:
+    if ctx.sparse2dgs_dir is None:
         return None
-    summary = _read_json(ctx.sugar_dir / config.sugar_summary_filename) or {}
-    for key in ("default_asset", "mesh_asset", "surface_asset", "glb_asset", "obj_asset"):
+    summary = _read_json(ctx.sparse2dgs_dir / config.sparse2dgs_summary_filename) or {}
+    for key in ("default_asset", "surface_asset", "mesh_asset", "ply_asset"):
         candidate = summary.get(key)
         if isinstance(candidate, str) and candidate.strip():
             path = Path(candidate).expanduser()
             if path.exists():
                 return path
-    for candidate in sorted(ctx.sugar_dir.glob("default_surface.*")):
-        if candidate.is_file():
-            return candidate
-    for candidate in sorted(ctx.sugar_dir.glob("surface.*")):
-        if candidate.is_file():
-            return candidate
+    point_cloud_root = ctx.sparse2dgs_dir / "point_cloud"
+    if point_cloud_root.exists():
+        candidates: list[tuple[int, Path]] = []
+        for child in point_cloud_root.iterdir():
+            if not child.is_dir() or not child.name.startswith("iteration_"):
+                continue
+            try:
+                iteration = int(child.name.split("iteration_", 1)[1])
+            except ValueError:
+                continue
+            point_cloud = child / "point_cloud.ply"
+            if point_cloud.is_file():
+                candidates.append((iteration, point_cloud))
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            return candidates[-1][1]
     return None
 
 
