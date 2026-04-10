@@ -89,6 +89,10 @@ class WorkerConfig:
     curated_bright_threshold_brightness: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_BRIGHT_THRESHOLD_BRIGHTNESS", 200.0)
     curated_max_frame_similarity: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MAX_FRAME_SIMILARITY", 0.92)
     curated_min_accept_interval_sec: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MIN_ACCEPT_INTERVAL_SEC", 0.28)
+    curated_min_slam_frames: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_CURATED_MIN_SLAM_FRAMES",
+        _env_int("OBJECT_SLAM3R_SURFACE_CURATED_MIN_SURFACE_FRAMES", 12),
+    )
     curated_min_surface_frames: int = _env_int("OBJECT_SLAM3R_SURFACE_CURATED_MIN_SURFACE_FRAMES", 12)
 
     slam3r_repo: str = os.environ.get(
