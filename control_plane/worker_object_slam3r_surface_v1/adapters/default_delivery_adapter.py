@@ -57,7 +57,10 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
     simplify_reason = "preserve_geometry"
     target_faces = max(1024, config.delivery_target_face_count)
     if _should_simplify_mesh(mesh, target_faces=target_faces):
-        mesh = _simplify_mesh(mesh, target_faces=target_faces)
+        mesh = _simplify_mesh(
+            mesh,
+            target_faces=_simplify_target_faces(initial_faces, target_faces=target_faces),
+        )
         simplification_applied = len(mesh.faces) < initial_faces
         simplify_reason = "hard_face_cap" if initial_faces > config.delivery_hard_max_face_count else "target_budget"
 
@@ -106,9 +109,11 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         cameras=cameras,
         poses=projected_views,
     )
-
-    textured_mesh = mesh.copy()
-    textured_mesh.visual.vertex_colors = vertex_colors
+    textured_mesh, atlas_summary = _bake_uv_textured_mesh(
+        mesh=mesh,
+        vertex_colors=vertex_colors,
+        atlas_size=max(256, int(config.delivery_texture_atlas_size)),
+    )
     glb_path = ctx.delivery_dir / "default_mesh.glb"
     glb_path.parent.mkdir(parents=True, exist_ok=True)
     textured_mesh.export(glb_path)
@@ -118,10 +123,14 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         "optimized_mesh": str(optimized_mesh),
         "default_asset": str(glb_path),
         "projection_mode": "multi_view_vertex_color_projection",
+        "texture_bake_mode": "uv_atlas_from_projected_vertex_colors",
         "projected_view_count": len(projected_views),
         "observed_vertex_count": int(observed_vertex_count),
         "face_count": int(len(textured_mesh.faces)),
         "vertex_count": int(len(textured_mesh.vertices)),
+        "atlas_size": int(atlas_summary["atlas_size"]),
+        "atlas_observed_pixel_count": int(atlas_summary["observed_pixel_count"]),
+        "atlas_coverage_ratio": float(atlas_summary["coverage_ratio"]),
         "glb_size_bytes": int(glb_size_bytes),
         "glb_size_mb": round(glb_size_bytes / (1024 * 1024), 3) if glb_size_bytes > 0 else 0.0,
     }
@@ -245,6 +254,14 @@ def _should_simplify_mesh(mesh, *, target_faces: int) -> bool:
     return face_count > config.delivery_hard_max_face_count
 
 
+def _simplify_target_faces(face_count: int, *, target_faces: int) -> int:
+    if not config.delivery_preserve_geometry_default:
+        return target_faces
+    if face_count > config.delivery_hard_max_face_count:
+        return max(target_faces, int(config.delivery_hard_max_face_count))
+    return face_count
+
+
 def _project_vertex_colors(
     *,
     mesh,
@@ -323,6 +340,101 @@ def _project_vertex_colors(
         axis=1,
     )
     return rgba, int(np.count_nonzero(observed))
+
+
+def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, atlas_size: int):
+    try:
+        import cv2
+        import trimesh
+        import xatlas
+        from PIL import Image
+        from trimesh.visual.material import SimpleMaterial
+        from trimesh.visual.texture import TextureVisuals
+    except Exception as exc:
+        raise RuntimeError(f"delivery_texture_runtime_missing:{exc}") from exc
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float32)
+    faces = np.asarray(mesh.faces, dtype=np.uint32)
+    if len(vertices) == 0 or len(faces) == 0:
+        raise RuntimeError("delivery_texture_empty_mesh")
+
+    vmapping, remapped_faces, uvs = xatlas.parametrize(vertices, faces)
+    remapped_faces = np.asarray(remapped_faces, dtype=np.int64)
+    uvs = np.asarray(uvs, dtype=np.float32)
+    vmapping = np.asarray(vmapping, dtype=np.int64)
+
+    baked_vertices = vertices[vmapping]
+    baked_normals = np.asarray(mesh.vertex_normals, dtype=np.float32)
+    if baked_normals.shape == vertices.shape:
+        baked_normals = baked_normals[vmapping]
+    else:
+        baked_normals = None
+    baked_colors = np.asarray(vertex_colors[:, :3], dtype=np.float32)[vmapping]
+
+    texture_rgb, observed_pixel_count = _rasterize_vertex_color_atlas(
+        uvs=uvs,
+        faces=remapped_faces,
+        colors=baked_colors,
+        atlas_size=atlas_size,
+    )
+
+    pil_image = Image.fromarray(texture_rgb, mode="RGB")
+    material = SimpleMaterial(image=pil_image)
+    visual = TextureVisuals(uv=uvs.astype(np.float64), image=pil_image, material=material)
+    textured_mesh = trimesh.Trimesh(
+        vertices=baked_vertices,
+        faces=remapped_faces,
+        vertex_normals=baked_normals,
+        visual=visual,
+        process=False,
+    )
+    atlas_summary = {
+        "atlas_size": atlas_size,
+        "observed_pixel_count": int(observed_pixel_count),
+        "coverage_ratio": float(observed_pixel_count / max(1, atlas_size * atlas_size)),
+    }
+    return textured_mesh, atlas_summary
+
+
+def _rasterize_vertex_color_atlas(
+    *,
+    uvs: np.ndarray,
+    faces: np.ndarray,
+    colors: np.ndarray,
+    atlas_size: int,
+) -> tuple[np.ndarray, int]:
+    import cv2
+
+    atlas = np.zeros((atlas_size, atlas_size, 3), dtype=np.uint8)
+    coverage = np.zeros((atlas_size, atlas_size), dtype=np.uint8)
+
+    uv_pixels = np.empty_like(uvs, dtype=np.float32)
+    uv_pixels[:, 0] = np.clip(uvs[:, 0], 0.0, 1.0) * float(atlas_size - 1)
+    uv_pixels[:, 1] = (1.0 - np.clip(uvs[:, 1], 0.0, 1.0)) * float(atlas_size - 1)
+
+    for face in faces:
+        tri_uv = uv_pixels[face]
+        tri_colors = colors[face]
+
+        polygon = np.rint(tri_uv).astype(np.int32)
+        polygon[:, 0] = np.clip(polygon[:, 0], 0, atlas_size - 1)
+        polygon[:, 1] = np.clip(polygon[:, 1], 0, atlas_size - 1)
+        if np.unique(polygon, axis=0).shape[0] < 3:
+            continue
+
+        face_color = np.clip(np.rint(np.mean(tri_colors, axis=0)), 0, 255).astype(np.uint8)
+        cv2.fillConvexPoly(atlas, polygon, color=tuple(int(channel) for channel in face_color.tolist()))
+        cv2.fillConvexPoly(coverage, polygon, color=255)
+
+    if np.any(coverage):
+        kernel_size = max(1, int(config.delivery_texture_fill_kernel))
+        kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+        dilated = cv2.dilate(atlas, kernel, iterations=1)
+        mask = coverage == 0
+        atlas[mask] = dilated[mask]
+
+    observed_pixel_count = int(np.count_nonzero(coverage))
+    return atlas, observed_pixel_count
 
 
 def _existing_vertex_colors(mesh) -> np.ndarray | None:

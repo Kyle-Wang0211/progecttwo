@@ -7,3 +7,5 @@ scipy
 tqdm
 matplotlib
 trimesh
+xatlas
+fast-simplification
