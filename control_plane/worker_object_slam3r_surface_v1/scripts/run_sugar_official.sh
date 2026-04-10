@@ -12,7 +12,7 @@ GS_OUTPUT_DIR="$3"
 OUTPUT_DIR="$4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-${ROOT_DIR}/venv/bin/python}"
+PYTHON_BIN="${OBJECT_SLAM3R_SURFACE_SUGAR_PYTHON_BIN:-${PYTHON_BIN:-${ROOT_DIR}/venv/bin/python}}"
 
 if [[ ! -d "${REPO_DIR}" ]]; then
   echo "sugar_repo_missing: ${REPO_DIR}" >&2
