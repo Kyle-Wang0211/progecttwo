@@ -25,6 +25,7 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
     local_pcds = np.load(preds_dir / "local_pcds.npy")
     registered_pcds = np.load(preds_dir / "registered_pcds.npy")
     rgb_imgs = np.load(preds_dir / "input_imgs.npy")
+    metadata = json.loads((preds_dir / "metadata.json").read_text(encoding="utf-8"))
 
     if local_pcds.shape[0] == 0 or registered_pcds.shape[0] == 0 or rgb_imgs.shape[0] == 0:
         raise RuntimeError("slam3r_preds_empty")
@@ -34,6 +35,7 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
     recon_utils = _load_slam3r_recon_utils()
     rotmat2qvec = _load_sparse2dgs_rotmat2qvec()
 
+    selected_frame_indices = _select_sparse2dgs_view_indices(local_pcds.shape[0], target_views=3)
     scene_root = Path(config.sparse2dgs_repo) / "DTU_Sparse" / ctx.job_id
     if scene_root.exists():
         shutil.rmtree(scene_root)
@@ -42,31 +44,69 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
     images_dir.mkdir(parents=True, exist_ok=True)
     sparse_dir.mkdir(parents=True, exist_ok=True)
 
-    width = int(rgb_imgs.shape[2])
-    height = int(rgb_imgs.shape[1])
+    source_width = int(rgb_imgs.shape[2])
+    source_height = int(rgb_imgs.shape[1])
+    width = _round_up_to_multiple(source_width, 64)
+    height = _round_up_to_multiple(source_height, 64)
+    init_winsize = int(metadata.get("init_winsize", 0))
+    kf_stride = int(metadata.get("kf_stride", 1))
+    init_ref_id = int(metadata.get("init_ref_id", 0)) * kf_stride
+    init_ids = list(range(0, init_winsize * kf_stride, kf_stride)) if init_winsize > 0 else []
     image_lines: list[str] = []
     camera_lines: list[str] = []
     points_lines: list[str] = []
     point_id = 1
+    pose_failed_indices: list[int] = []
 
     from PIL import Image
     import torch
 
+    principal_point = torch.tensor((local_pcds[0].shape[0] // 2, local_pcds[0].shape[1] // 2))
+    init_window_focal = recon_utils.estimate_focal_knowing_depth(
+        torch.tensor(local_pcds[init_ref_id : init_ref_id + 1]),
+        principal_point,
+        focal_mode="weiszfeld",
+    )
+
+    intrinsics: list[np.ndarray] = []
     for frame_idx in range(local_pcds.shape[0]):
+        if frame_idx in init_ids:
+            focal = init_window_focal
+        else:
+            focal = recon_utils.estimate_focal_knowing_depth(
+                torch.tensor(local_pcds[frame_idx : frame_idx + 1]),
+                principal_point,
+                focal_mode="weiszfeld",
+            )
+        intrinsic = np.eye(3, dtype=np.float64)
+        intrinsic[0, 0] = float(focal)
+        intrinsic[1, 1] = float(focal)
+        intrinsic[:2, 2] = principal_point.numpy().astype(np.float64)
+        intrinsics.append(intrinsic)
+
+    mean_intrinsic = np.mean(np.stack(intrinsics, axis=0), axis=0)
+
+    for frame_idx in selected_frame_indices:
         img_name = f"{frame_idx:05d}"
         image_filename = f"{img_name}.png"
         image_path = images_dir / image_filename
 
-        image = _normalize_image(rgb_imgs[frame_idx])
+        source_image = _normalize_image(rgb_imgs[frame_idx])
+        image = _resize_image_if_needed(source_image, width=width, height=height)
         Image.fromarray(image, mode="RGB").save(image_path)
 
-        local_pts = torch.from_numpy(local_pcds[frame_idx : frame_idx + 1]).float()
-        intrinsic = np.asarray(recon_utils.estimate_intrinsics(local_pts), dtype=np.float64)
+        intrinsic = intrinsics[frame_idx]
+        if width != source_width or height != source_height:
+            scale_x = float(width) / float(source_width)
+            scale_y = float(height) / float(source_height)
+            intrinsic = intrinsic.copy()
+            intrinsic[0, :] *= scale_x
+            intrinsic[1, :] *= scale_y
 
         registered_pts = torch.from_numpy(registered_pcds[frame_idx]).float()
-        c2w, success = recon_utils.estimate_camera_pose(registered_pts, intrinsic)
+        c2w, success = recon_utils.estimate_camera_pose(registered_pts, mean_intrinsic)
         if not success:
-            raise RuntimeError(f"slam3r_pose_estimation_failed:{img_name}")
+            pose_failed_indices.append(frame_idx)
         w2c = np.linalg.inv(np.asarray(c2w, dtype=np.float64))
 
         fx = float(intrinsic[0, 0])
@@ -88,7 +128,13 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         )
         image_lines.append("")
 
-        depth_values = np.asarray(local_pcds[frame_idx][..., 2], dtype=np.float64)
+        registered_frame_points = np.asarray(registered_pcds[frame_idx], dtype=np.float64).reshape(-1, 3)
+        registered_h = np.concatenate(
+            [registered_frame_points, np.ones((registered_frame_points.shape[0], 1), dtype=np.float64)],
+            axis=1,
+        )
+        camera_points = (w2c @ registered_h.T).T[:, :3]
+        depth_values = np.asarray(camera_points[:, 2], dtype=np.float64)
         valid_depths = depth_values[np.isfinite(depth_values) & (depth_values > 0)]
         if valid_depths.size == 0:
             raise RuntimeError(f"slam3r_depth_range_failed:{img_name}")
@@ -102,8 +148,8 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
             depth_max=depth_max,
         )
 
-        frame_points = np.asarray(registered_pcds[frame_idx], dtype=np.float64).reshape(-1, 3)
-        frame_colors = image.reshape(-1, 3)
+        frame_points = registered_frame_points
+        frame_colors = source_image.reshape(-1, 3)
         finite_mask = np.isfinite(frame_points).all(axis=1)
         frame_points = frame_points[finite_mask]
         frame_colors = frame_colors[finite_mask]
@@ -145,7 +191,13 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         "images_dir": str(images_dir),
         "sparse_dir": str(sparse_dir),
         "frame_count": int(local_pcds.shape[0]),
+        "selected_frame_indices": selected_frame_indices,
+        "selected_frame_count": len(selected_frame_indices),
         "point_count": int(point_id - 1),
+        "source_image_size": [source_width, source_height],
+        "exported_image_size": [width, height],
+        "pose_failed_indices": pose_failed_indices,
+        "pose_failed_count": len(pose_failed_indices),
         "paper_stack": {
             "reconstruction": "SLAM3R",
             "surface": "Sparse2DGS",
@@ -294,6 +346,45 @@ def _normalize_image(array: np.ndarray) -> np.ndarray:
     image = np.nan_to_num(image, nan=0.0, posinf=255.0, neginf=0.0)
     image = np.clip(image, 0.0, 255.0).astype(np.uint8)
     return image
+
+
+def _select_sparse2dgs_view_indices(frame_count: int, *, target_views: int) -> list[int]:
+    if frame_count < target_views:
+        raise RuntimeError(
+            f"sparse2dgs_requires_{target_views}_views_but_only_{frame_count}_available"
+        )
+    if frame_count == target_views:
+        return list(range(frame_count))
+    indices = np.linspace(0, frame_count - 1, num=target_views)
+    unique = sorted({int(round(value)) for value in indices.tolist()})
+    if len(unique) != target_views:
+        unique = []
+        for value in indices.tolist():
+            candidate = int(round(value))
+            while candidate in unique and candidate < frame_count - 1:
+                candidate += 1
+            while candidate in unique and candidate > 0:
+                candidate -= 1
+            if candidate in unique:
+                raise RuntimeError("sparse2dgs_view_selection_failed")
+            unique.append(candidate)
+        unique.sort()
+    return unique
+
+
+def _resize_image_if_needed(image: np.ndarray, *, width: int, height: int) -> np.ndarray:
+    if image.shape[1] == width and image.shape[0] == height:
+        return image
+    from PIL import Image
+
+    pil_image = Image.fromarray(image, mode="RGB")
+    return np.asarray(pil_image.resize((width, height), Image.BILINEAR), dtype=np.uint8)
+
+
+def _round_up_to_multiple(value: int, multiple: int) -> int:
+    if multiple <= 0:
+        return value
+    return int(math.ceil(float(value) / float(multiple)) * multiple)
 
 
 def _write_sparse2dgs_cam_file(

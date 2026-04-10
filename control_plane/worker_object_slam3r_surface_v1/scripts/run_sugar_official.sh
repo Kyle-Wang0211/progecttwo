@@ -35,6 +35,7 @@ PY
 export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.8}"
 export PATH="${CUDA_HOME}/bin:${PATH}"
+export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
 
 cd "${REPO_DIR}"
