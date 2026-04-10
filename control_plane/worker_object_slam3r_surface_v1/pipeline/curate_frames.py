@@ -155,7 +155,7 @@ def curate_frames(ctx: JobContext) -> None:
     for frame in deduped:
         shutil.copy2(frame.path, ctx.curated_dir / frame.path.name)
 
-    (ctx.curated_dir / "curate_frames.json").write_text(
+    (ctx.output_dir / "curate_frames.json").write_text(
         json.dumps(
             {
                 "stage": "curate_frames",
