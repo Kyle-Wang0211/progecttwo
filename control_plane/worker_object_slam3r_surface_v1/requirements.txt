@@ -3,3 +3,7 @@ boto3
 Pillow
 numpy
 opencv-python-headless
+scipy
+tqdm
+matplotlib
+trimesh

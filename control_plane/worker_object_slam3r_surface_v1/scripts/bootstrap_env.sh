@@ -37,6 +37,11 @@ python3 -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r "$(dirname "$0")/../requirements.txt"
+python -m pip install \
+  torch==2.10.0 \
+  torchvision==0.25.0 \
+  torchaudio==2.10.0 \
+  --index-url https://download.pytorch.org/whl/cu128
 
 cat <<EOF
 Environment bootstrap finished.
