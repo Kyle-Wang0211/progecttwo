@@ -216,12 +216,46 @@ def _run_step(
         ctx=ctx,
         client=client,
         tracker=tracker,
-        action=lambda: action(ctx),
+        action=lambda: action(ctx, tracker),
     )
     print(
         f"[object_slam3r_surface_v1] job={ctx.job_id} stage={stage} done",
         flush=True,
     )
+
+
+def _map_sparse2dgs_training_progress(step: int, total: int) -> float:
+    clamped_total = max(total, 1)
+    ratio = min(max(step / clamped_total, 0.0), 1.0)
+    return 0.68 + (0.82 - 0.68) * ratio
+
+
+def _make_sparse2dgs_progress_callback(
+    *,
+    client: ControlPlaneClient,
+    ctx: JobContext,
+    tracker: _RuntimeTracker,
+):
+    def callback(step: int, total: int) -> None:
+        progress_fraction = _map_sparse2dgs_training_progress(step, total)
+        detail = (
+            "正在按 CVPR 2025 Sparse2DGS 生成稳定、完整、准确的表面。"
+            f" 当前训练 {step}/{total}。"
+        )
+        _update_tracker_runtime(
+            client,
+            ctx,
+            tracker,
+            detail=detail,
+            progress_fraction=progress_fraction,
+            metrics={
+                "training_step": str(step),
+                "training_total_steps": str(total),
+                "training_progress_percent": f"{(step / max(total, 1)) * 100:.1f}",
+            },
+        )
+
+    return callback
 
 
 def run_once(
@@ -249,7 +283,7 @@ def run_once(
             title="正在准备输入素材",
             detail="正在下载录制素材并准备抽帧。",
             progress_fraction=0.12,
-            action=lambda current_ctx: download_input(current_ctx, client=client, storage=storage),
+            action=lambda current_ctx, _tracker: download_input(current_ctx, client=client, storage=storage),
         )
         _run_step(
             ctx=ctx,
@@ -258,7 +292,7 @@ def run_once(
             title="正在抽取候选帧",
             detail="正在从录制素材中提取用于论文主链的候选帧。",
             progress_fraction=0.20,
-            action=extract_frames,
+            action=lambda current_ctx, _tracker: extract_frames(current_ctx),
         )
         _run_step(
             ctx=ctx,
@@ -267,7 +301,7 @@ def run_once(
             title="正在筛选有效关键帧",
             detail="正在按统一标准筛选可供 SLAM3R 使用的关键帧。",
             progress_fraction=0.28,
-            action=curate_frames,
+            action=lambda current_ctx, _tracker: curate_frames(current_ctx),
         )
         _run_step(
             ctx=ctx,
@@ -276,7 +310,7 @@ def run_once(
             title="正在执行 SLAM3R 主干重建",
             detail="正在按 CVPR 2025 SLAM3R 生成单目视频的稠密几何主干。",
             progress_fraction=0.48,
-            action=lambda current_ctx: run_slam3r(current_ctx),
+            action=lambda current_ctx, _tracker: run_slam3r(current_ctx),
         )
         _run_step(
             ctx=ctx,
@@ -285,7 +319,7 @@ def run_once(
             title="正在整理官方场景契约",
             detail="正在把 SLAM3R 官方输出转换成 Sparse2DGS 官方可读取的 COLMAP 场景。",
             progress_fraction=0.58,
-            action=bridge_slam3r_scene,
+            action=lambda current_ctx, _tracker: bridge_slam3r_scene(current_ctx),
         )
         _run_step(
             ctx=ctx,
@@ -294,7 +328,14 @@ def run_once(
             title="正在执行 Sparse2DGS 表面重建",
             detail="正在按 CVPR 2025 Sparse2DGS 生成稳定、完整、准确的表面。",
             progress_fraction=0.68,
-            action=run_sparse2dgs_surface,
+            action=lambda current_ctx, tracker: run_sparse2dgs_surface(
+                current_ctx,
+                progress_callback=_make_sparse2dgs_progress_callback(
+                    client=client,
+                    ctx=current_ctx,
+                    tracker=tracker,
+                ),
+            ),
         )
 
         _run_step(
@@ -304,7 +345,7 @@ def run_once(
             title="正在执行 MAtCha 网格提取",
             detail="正在按 CVPR 2025 MAtCha 从稳定 surface 中提取默认 mesh。",
             progress_fraction=0.82,
-            action=run_matcha_mesh,
+            action=lambda current_ctx, _tracker: run_matcha_mesh(current_ctx),
         )
         _run_step(
             ctx=ctx,
@@ -313,7 +354,7 @@ def run_once(
             title="正在优化默认网格",
             detail="正在清理碎片、修法线并收敛到移动端友好的默认 mesh 预算。",
             progress_fraction=0.88,
-            action=run_optimize_default_mesh,
+            action=lambda current_ctx, _tracker: run_optimize_default_mesh(current_ctx),
         )
         _run_step(
             ctx=ctx,
@@ -322,7 +363,7 @@ def run_once(
             title="正在投影照片纹理",
             detail="正在把多视图照片信息投影到默认 mesh，并写出 GLB 成品。",
             progress_fraction=0.94,
-            action=run_bake_default_texture,
+            action=lambda current_ctx, _tracker: run_bake_default_texture(current_ctx),
         )
 
         default_manifest_holder: dict[str, dict[str, dict[str, object]]] = {}
@@ -333,7 +374,7 @@ def run_once(
             title="正在整理默认网格成品",
             detail="正在写出默认 mesh、海报和 viewer manifest。",
             progress_fraction=0.97,
-            action=lambda current_ctx: default_manifest_holder.setdefault(
+            action=lambda current_ctx, _tracker: default_manifest_holder.setdefault(
                 "manifest",
                 publish_default_mesh(current_ctx, client, storage),
             ),
@@ -346,7 +387,7 @@ def run_once(
             title="正在回传默认网格成品",
             detail="正在上传默认 mesh 成品清单并通知手机准备下载。",
             progress_fraction=0.99,
-            action=lambda current_ctx: client.upload_artifact_manifest(
+            action=lambda current_ctx, _tracker: client.upload_artifact_manifest(
                 current_ctx.job_id,
                 {
                     "worker_id": worker_id,
