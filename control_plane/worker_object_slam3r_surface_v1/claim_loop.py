@@ -10,8 +10,10 @@ from .pipeline.bridge_slam3r_scene import bridge_slam3r_scene
 from .pipeline.curate_frames import curate_frames
 from .pipeline.download_input import download_input
 from .pipeline.extract_frames import extract_frames
+from .pipeline.run_bake_default_texture import run_bake_default_texture
 from .pipeline.publish_default_mesh import publish_default_mesh
 from .pipeline.run_matcha_mesh import run_matcha_mesh
+from .pipeline.run_optimize_default_mesh import run_optimize_default_mesh
 from .pipeline.run_slam3r import run_slam3r
 from .pipeline.run_sparse2dgs_surface import run_sparse2dgs_surface
 from .runtime import ControlPlaneClient, push_runtime
@@ -78,7 +80,7 @@ class _RuntimeTracker:
 
 
 def _step_state(stage: str) -> str:
-    if stage in {"publish_default_surface", "artifact_upload"}:
+    if stage in {"optimize_default_mesh", "bake_default_texture", "publish_default_mesh", "artifact_upload"}:
         return "exporting"
     return "reconstructing"
 
@@ -304,6 +306,24 @@ def run_once(
             progress_fraction=0.82,
             action=run_matcha_mesh,
         )
+        _run_step(
+            ctx=ctx,
+            client=client,
+            stage="optimize_default_mesh",
+            title="正在优化默认网格",
+            detail="正在清理碎片、修法线并收敛到移动端友好的默认 mesh 预算。",
+            progress_fraction=0.88,
+            action=run_optimize_default_mesh,
+        )
+        _run_step(
+            ctx=ctx,
+            client=client,
+            stage="bake_default_texture",
+            title="正在投影照片纹理",
+            detail="正在把多视图照片信息投影到默认 mesh，并写出 GLB 成品。",
+            progress_fraction=0.94,
+            action=run_bake_default_texture,
+        )
 
         default_manifest_holder: dict[str, dict[str, dict[str, object]]] = {}
         _run_step(
@@ -312,7 +332,7 @@ def run_once(
             stage="publish_default_mesh",
             title="正在整理默认网格成品",
             detail="正在写出默认 mesh、海报和 viewer manifest。",
-            progress_fraction=0.90,
+            progress_fraction=0.97,
             action=lambda current_ctx: default_manifest_holder.setdefault(
                 "manifest",
                 publish_default_mesh(current_ctx, client, storage),
@@ -325,7 +345,7 @@ def run_once(
             stage="artifact_upload",
             title="正在回传默认网格成品",
             detail="正在上传默认 mesh 成品清单并通知手机准备下载。",
-            progress_fraction=0.96,
+            progress_fraction=0.99,
             action=lambda current_ctx: client.upload_artifact_manifest(
                 current_ctx.job_id,
                 {

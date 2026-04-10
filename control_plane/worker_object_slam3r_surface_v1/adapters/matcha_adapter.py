@@ -33,7 +33,6 @@ def run_matcha_mesh_extraction(ctx: JobContext) -> None:
     )
 
     mesh_asset = _resolve_matcha_mesh_asset(ctx.matcha_dir)
-    glb_asset = _convert_mesh_to_glb(mesh_asset, ctx.matcha_dir / "default_mesh.glb")
 
     summary = {
         "paper": "MAtCha",
@@ -44,8 +43,7 @@ def run_matcha_mesh_extraction(ctx: JobContext) -> None:
         "sparse2dgs_output_dir": str(ctx.sparse2dgs_dir),
         "output_dir": str(ctx.matcha_dir),
         "mesh_asset": str(mesh_asset),
-        "glb_asset": str(glb_asset),
-        "default_asset": str(glb_asset),
+        "default_asset": str(mesh_asset),
         "mesh_extraction": "adaptive_tetrahedralization",
     }
     (ctx.matcha_dir / config.matcha_summary_filename).write_text(
@@ -77,15 +75,3 @@ def _resolve_matcha_mesh_asset(output_dir: Path) -> Path:
         return fallback_candidates[-1]
 
     raise RuntimeError(f"matcha_mesh_asset_missing:{output_dir}")
-
-
-def _convert_mesh_to_glb(source_mesh: Path, destination_glb: Path) -> Path:
-    try:
-        import trimesh
-
-        mesh_or_scene = trimesh.load(source_mesh, force="scene")
-        destination_glb.parent.mkdir(parents=True, exist_ok=True)
-        mesh_or_scene.export(destination_glb)
-        return destination_glb
-    except Exception as exc:
-        raise RuntimeError(f"matcha_glb_export_failed:{exc}") from exc

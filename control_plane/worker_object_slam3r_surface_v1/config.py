@@ -132,6 +132,18 @@ class WorkerConfig:
     )
     matcha_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_MATCHA_SUMMARY_FILENAME", "matcha_mesh.json")
     matcha_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_MATCHA_TIMEOUT_SEC", 7200)
+    delivery_mesh_summary_filename: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_DELIVERY_MESH_SUMMARY_FILENAME",
+        "delivery_mesh.json",
+    )
+    delivery_texture_summary_filename: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_SUMMARY_FILENAME",
+        "delivery_texture.json",
+    )
+    delivery_target_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TARGET_FACE_COUNT", 50000)
+    delivery_component_min_faces: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_MIN_FACES", 128)
+    delivery_component_ratio_floor: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_RATIO_FLOOR", 0.01)
+    delivery_texture_max_views: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MAX_VIEWS", 3)
 
     sugar_repo: str = os.environ.get(
         "OBJECT_SLAM3R_SURFACE_SUGAR_REPO",

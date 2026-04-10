@@ -97,7 +97,9 @@ def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
             "reconstruction": "slam3r",
             "surface": "sparse2dgs",
             "mesh_extraction": "matcha",
-            "rendering": "default_mesh_glb" if default_kind == "glb" else "matcha_mesh",
+            "delivery_mesh": "optimized_mesh",
+            "texture_bake": "projected_vertex_color_glb" if default_kind == "glb" else "disabled",
+            "rendering": "default_mesh_glb" if default_kind == "glb" else "disabled",
             "hq": "disabled",
         },
         "camera_preset": _default_camera_preset(),
@@ -162,55 +164,19 @@ def _copy_default_delivery_asset(ctx: JobContext) -> Path:
 
 
 def _resolve_default_delivery_asset(ctx: JobContext) -> Path | None:
-    mesh_asset = _resolve_matcha_mesh_asset(ctx)
-    if mesh_asset is not None:
-        return mesh_asset
-    return _resolve_surface_asset(ctx)
-
-
-def _resolve_matcha_mesh_asset(ctx: JobContext) -> Path | None:
-    if ctx.matcha_dir is None:
+    if ctx.delivery_dir is None:
         return None
-    summary = _read_json(ctx.matcha_dir / config.matcha_summary_filename) or {}
-    for key in ("default_asset", "glb_asset", "mesh_asset"):
+    summary = _read_json(ctx.delivery_dir / config.delivery_texture_summary_filename) or {}
+    for key in ("default_asset", "glb_asset"):
         candidate = summary.get(key)
         if isinstance(candidate, str) and candidate.strip():
             path = Path(candidate).expanduser()
-            if path.exists():
+            if path.exists() and path.suffix.lower() == ".glb":
                 return path
-    for pattern in ("default_mesh.*", "tetra_mesh_binary_search_*.ply", "*.glb", "*.ply"):
-        candidates = sorted(ctx.matcha_dir.glob(pattern))
+    for pattern in ("default_mesh.glb", "*.glb"):
+        candidates = sorted(ctx.delivery_dir.glob(pattern))
         if candidates:
             return candidates[-1]
-    return None
-
-
-def _resolve_surface_asset(ctx: JobContext) -> Path | None:
-    if ctx.sparse2dgs_dir is None:
-        return None
-    summary = _read_json(ctx.sparse2dgs_dir / config.sparse2dgs_summary_filename) or {}
-    for key in ("default_asset", "surface_asset", "mesh_asset", "ply_asset"):
-        candidate = summary.get(key)
-        if isinstance(candidate, str) and candidate.strip():
-            path = Path(candidate).expanduser()
-            if path.exists():
-                return path
-    point_cloud_root = ctx.sparse2dgs_dir / "point_cloud"
-    if point_cloud_root.exists():
-        candidates: list[tuple[int, Path]] = []
-        for child in point_cloud_root.iterdir():
-            if not child.is_dir() or not child.name.startswith("iteration_"):
-                continue
-            try:
-                iteration = int(child.name.split("iteration_", 1)[1])
-            except ValueError:
-                continue
-            point_cloud = child / "point_cloud.ply"
-            if point_cloud.is_file():
-                candidates.append((iteration, point_cloud))
-        if candidates:
-            candidates.sort(key=lambda item: item[0])
-            return candidates[-1][1]
     return None
 
 
@@ -230,11 +196,11 @@ def _resolve_hq_asset(ctx: JobContext) -> Path | None:
 
 
 def _resolve_default_publish_asset(default_dir: Path) -> Path:
-    for pattern in ("default_mesh.*", "default_surface.*"):
+    for pattern in ("default_mesh.glb", "default_mesh.*"):
         for candidate in sorted(default_dir.glob(pattern)):
             if candidate.is_file():
                 return candidate
-    raise RuntimeError("default_surface_asset_missing")
+    raise RuntimeError("default_mesh_glb_missing")
 
 
 def _resolve_optional_hq_publish_asset(hq_dir: Path) -> Path | None:
