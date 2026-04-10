@@ -69,6 +69,11 @@ class WorkerConfig:
         "OBJECT_SLAM3R_SURFACE_HEARTBEAT_INTERVAL_SEC",
         _env_int("OBJECT_FAST_PUBLISH_HEARTBEAT_INTERVAL_SEC", 15),
     )
+    claim_enabled: bool = _env_flag("OBJECT_SLAM3R_SURFACE_CLAIM_ENABLED", False)
+    standby_note: str = os.environ.get(
+        "OBJECT_SLAM3R_SURFACE_STANDBY_NOTE",
+        "official repos are pinned, but native data contracts are not validated yet",
+    )
 
     local_root: str = os.environ.get("OBJECT_SLAM3R_SURFACE_LOCAL_ROOT", str(_DEFAULT_LOCAL_ROOT))
     local_jobs_directory: str = os.environ.get(

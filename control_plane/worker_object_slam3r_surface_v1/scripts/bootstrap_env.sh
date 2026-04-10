@@ -29,9 +29,9 @@ fi
 if [[ ! -d "${SUGAR_DIR}" ]]; then
   git clone https://github.com/Anttwo/SuGaR.git "${SUGAR_DIR}"
 fi
-
-# 3D-HGS official code path is intentionally env-driven until the runtime repo is pinned.
-mkdir -p "${HGS_DIR}"
+if [[ ! -d "${HGS_DIR}" ]]; then
+  git clone https://github.com/lihaolin88/3DHGS "${HGS_DIR}"
+fi
 
 python3 -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
@@ -49,4 +49,5 @@ Pinned paper stack:
 
 Next step:
   Configure OBJECT_SLAM3R_SURFACE_*_COMMAND env vars so the worker wrappers invoke the official repos directly.
+  Keep OBJECT_SLAM3R_SURFACE_CLAIM_ENABLED=0 until the native data contracts between papers are validated.
 EOF

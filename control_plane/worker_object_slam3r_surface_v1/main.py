@@ -16,9 +16,14 @@ def main() -> None:
     worker_id = registration["worker_id"]
     heartbeat_interval_sec = int(registration.get("heartbeat_interval_sec") or config.heartbeat_interval_sec)
     print(
-        f"[object_slam3r_surface_v1] worker started worker_id={worker_id} base_url={config.control_plane_base_url}",
+        f"[object_slam3r_surface_v1] worker started worker_id={worker_id} base_url={config.control_plane_base_url} claim_enabled={config.claim_enabled}",
         flush=True,
     )
+    if not config.claim_enabled:
+        print(
+            f"[object_slam3r_surface_v1] standby note: {config.standby_note}",
+            flush=True,
+        )
 
     last_heartbeat = 0.0
     while True:

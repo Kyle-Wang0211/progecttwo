@@ -43,10 +43,20 @@ class ControlPlaneClient:
 
     @staticmethod
     def capability_flags() -> dict[str, Any]:
+        pipeline_families: list[str] = ["object_slam3r_surface_v1"] if config.claim_enabled else []
         return {
-            "pipeline_families": ["object_slam3r_surface_v1"],
+            "pipeline_families": pipeline_families,
             "supports_default_surface_asset": True,
             "supports_hq_gaussian": True,
+            "standby_mode": not config.claim_enabled,
+            "standby_note": config.standby_note,
+            "official_stack": ["SLAM3R", "Sparse2DGS", "SuGaR", "3D-HGS"],
+            "official_command_templates_pinned": bool(
+                config.slam3r_command_template
+                and config.sparse2dgs_command_template
+                and config.sugar_command_template
+                and config.hgs_command_template
+            ),
         }
 
     def register(self, *, worker_id: Optional[str] = None) -> dict[str, Any]:
@@ -61,7 +71,11 @@ class ControlPlaneClient:
             "cpu_cores": config.cpu_cores,
             "ram_mb": config.ram_mb,
             "disk_free_mb": self._disk_free_mb(),
-            "software_version": "object-slam3r-surface-v1-0.2.0",
+            "software_version": (
+                "object-slam3r-surface-v1-0.2.1"
+                if config.claim_enabled
+                else "object-slam3r-surface-v1-0.2.1-standby"
+            ),
             "capability_flags": self.capability_flags(),
         }
         if worker_id:
@@ -83,6 +97,8 @@ class ControlPlaneClient:
         )
 
     def claim_next(self, worker_id: str) -> Optional[dict[str, Any]]:
+        if not config.claim_enabled:
+            return None
         payload = self._json(
             "POST",
             f"/v1/workers/{worker_id}/claim-next",
