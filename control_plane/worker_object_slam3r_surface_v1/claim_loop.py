@@ -6,6 +6,8 @@ from typing import Any
 
 from .context import JobContext
 from .paths import ensure_job_layout
+from .pipeline.bridge_slam3r_scene import bridge_slam3r_scene
+from .pipeline.bridge_sparse2dgs_sugar import bridge_sparse2dgs_sugar
 from .pipeline.curate_frames import curate_frames
 from .pipeline.download_input import download_input
 from .pipeline.extract_frames import extract_frames
@@ -282,11 +284,29 @@ def run_once(
         _run_step(
             ctx=ctx,
             client=client,
+            stage="slam3r_scene_contract",
+            title="正在整理官方场景契约",
+            detail="正在把 SLAM3R 官方输出转换成 Sparse2DGS 官方可读取的 COLMAP 场景。",
+            progress_fraction=0.58,
+            action=bridge_slam3r_scene,
+        )
+        _run_step(
+            ctx=ctx,
+            client=client,
             stage="sparse2dgs_surface",
             title="正在执行 Sparse2DGS 表面重建",
             detail="正在按 CVPR 2025 Sparse2DGS 生成稳定、完整、准确的表面。",
             progress_fraction=0.68,
             action=run_sparse2dgs_surface,
+        )
+        _run_step(
+            ctx=ctx,
+            client=client,
+            stage="sugar_contract",
+            title="正在整理 SuGaR 官方输入契约",
+            detail="正在把 Sparse2DGS 官方输出对齐为 SuGaR 所需的 scene 与 checkpoint 契约。",
+            progress_fraction=0.74,
+            action=bridge_sparse2dgs_sugar,
         )
         _run_step(
             ctx=ctx,

@@ -22,7 +22,10 @@ class JobContext:
     curated_dir: Optional[Path] = None
     slam3r_dir: Optional[Path] = None
     sparse2dgs_dir: Optional[Path] = None
+    sparse2dgs_scene_dir: Optional[Path] = None
     sugar_dir: Optional[Path] = None
+    sugar_scene_dir: Optional[Path] = None
+    sugar_gs_output_dir: Optional[Path] = None
     default_publish_dir: Optional[Path] = None
     hq_dir: Optional[Path] = None
     should_run_hq_refine: bool = False

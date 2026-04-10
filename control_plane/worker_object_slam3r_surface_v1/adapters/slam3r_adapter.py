@@ -55,6 +55,7 @@ def run_slam3r_reconstruction(
         "command": command,
         "curated_dir": str(ctx.curated_dir),
         "output_dir": str(ctx.slam3r_dir),
+        "preds_dir": str(ctx.slam3r_dir / "preds"),
     }
     (ctx.slam3r_dir / config.slam3r_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),

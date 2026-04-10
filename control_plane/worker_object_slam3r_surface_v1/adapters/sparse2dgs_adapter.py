@@ -39,6 +39,7 @@ def run_sparse2dgs_surface_reconstruction(ctx: JobContext) -> None:
         "paper_url": SPARSE2DGS_PAPER_URL,
         "repo": config.sparse2dgs_repo,
         "command": command,
+        "scene_dir": str(ctx.sparse2dgs_scene_dir or ""),
         "slam3r_summary": str(ctx.slam3r_dir / config.slam3r_summary_filename),
         "output_dir": str(ctx.sparse2dgs_dir),
     }
@@ -54,6 +55,7 @@ def _render_command(*, template: str, ctx: JobContext, repo_dir: Path) -> list[s
     rendered = template.format(
         curated_dir=str(ctx.curated_dir),
         slam3r_dir=str(ctx.slam3r_dir),
+        scene_dir=str(ctx.sparse2dgs_scene_dir or ""),
         sparse2dgs_dir=str(ctx.sparse2dgs_dir),
         output_dir=str(ctx.sparse2dgs_dir),
         repo_dir=str(repo_dir),

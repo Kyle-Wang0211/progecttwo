@@ -52,6 +52,7 @@ def _render_command(*, template: str, ctx: JobContext, repo_dir: Path) -> list[s
     if not template.strip():
         return []
     rendered = template.format(
+        scene_dir=str(ctx.sugar_scene_dir or ""),
         sugar_dir=str(ctx.sugar_dir),
         hq_dir=str(ctx.hq_dir),
         output_dir=str(ctx.hq_dir),

@@ -24,11 +24,11 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 TEST_NAME="$(basename "${OUTPUT_DIR}")"
+SAVE_DIR="$(dirname "${OUTPUT_DIR}")"
 
 cd "${REPO_DIR}"
 exec "${PYTHON_BIN}" recon.py \
   --img_dir "${CURATED_DIR}" \
-  --save_dir "${OUTPUT_DIR}" \
+  --save_dir "${SAVE_DIR}" \
   --test_name "${TEST_NAME}" \
-  --save_preds \
-  --gpu_id -1
+  --save_preds
