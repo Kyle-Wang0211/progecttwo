@@ -13,6 +13,14 @@ OUTPUT_DIR="$4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 PYTHON_BIN="${OBJECT_SLAM3R_SURFACE_MATCHA_PYTHON_BIN:-${PYTHON_BIN:-${ROOT_DIR}/venv/bin/python}}"
+PYTHON_DIR="$(cd "$(dirname "${PYTHON_BIN}")" && pwd)"
+TORCH_LIB_DIR="$("${PYTHON_BIN}" - <<'PY'
+import pathlib
+import torch
+
+print(pathlib.Path(torch.__file__).resolve().parent / "lib")
+PY
+)"
 
 if [[ ! -d "${REPO_DIR}" ]]; then
   echo "matcha_repo_missing: ${REPO_DIR}" >&2
@@ -28,11 +36,11 @@ if [[ ! -d "${MODEL_DIR}/point_cloud" || ! -f "${MODEL_DIR}/cfg_args" ]]; then
 fi
 
 mkdir -p "${OUTPUT_DIR}"
-export PYTHONPATH="${REPO_DIR}:${PYTHONPATH:-}"
+export PYTHONPATH="${REPO_DIR}:${REPO_DIR}/2d-gaussian-splatting/submodules/simple-knn:${PYTHONPATH:-}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
-export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.8}"
-export PATH="${CUDA_HOME}/bin:${PATH}"
-export LD_LIBRARY_PATH="/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}"
+export CUDA_HOME="${OBJECT_SLAM3R_SURFACE_CUDA_HOME:-/usr/local/cuda-12.8}"
+export PATH="${PYTHON_DIR}:${CUDA_HOME}/bin:${PATH}"
+export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}"
 
 cd "${REPO_DIR}"
 exec "${PYTHON_BIN}" scripts/extract_tetra_mesh.py \
