@@ -41,10 +41,12 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         for path in ctx.curated_dir.iterdir()
         if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
     )
+    frame_quality_weights = _load_curated_frame_weights(ctx, curated_frame_paths)
     selected_frame_target = max(3, min(int(config.sparse2dgs_target_views), local_pcds.shape[0]))
     selected_frame_indices = _select_sparse2dgs_view_indices(
         local_pcds.shape[0],
         target_views=selected_frame_target,
+        quality_weights=frame_quality_weights,
     )
     scene_root = Path(config.sparse2dgs_repo) / "DTU_Sparse" / ctx.job_id
     if scene_root.exists():
@@ -364,13 +366,74 @@ def _normalize_image(array: np.ndarray) -> np.ndarray:
     return image
 
 
-def _select_sparse2dgs_view_indices(frame_count: int, *, target_views: int) -> list[int]:
+def _load_curated_frame_weights(ctx: JobContext, curated_frame_paths: list[Path]) -> list[float] | None:
+    summary_path = ctx.output_dir / "curate_frames.json"
+    if not summary_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    frames = summary.get("frames")
+    if not isinstance(frames, list):
+        return None
+    by_name: dict[str, float] = {}
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        name = str(frame.get("name") or "").strip()
+        if not name:
+            continue
+        target_signal = float(frame.get("target_signal") or 0.0)
+        orb_feature_count = float(frame.get("orb_feature_count") or 0.0)
+        hard_penalty = len(frame.get("hard_reject_reasons") or [])
+        soft_penalty = len(frame.get("soft_downgrade_reasons") or [])
+        weight = 1.0
+        weight += min(target_signal, 1.0) * 2.0
+        weight += min(orb_feature_count / 1200.0, 1.5)
+        weight -= hard_penalty * 0.50
+        weight -= soft_penalty * 0.20
+        by_name[name] = max(weight, 0.05)
+    weights = [by_name.get(path.name, 1.0) for path in curated_frame_paths]
+    return weights if weights else None
+
+
+def _select_sparse2dgs_view_indices(
+    frame_count: int,
+    *,
+    target_views: int,
+    quality_weights: list[float] | None = None,
+) -> list[int]:
     if frame_count < target_views:
         raise RuntimeError(
             f"sparse2dgs_requires_{target_views}_views_but_only_{frame_count}_available"
         )
     if frame_count == target_views:
         return list(range(frame_count))
+    if quality_weights and len(quality_weights) == frame_count:
+        anchors = np.linspace(0, frame_count - 1, num=target_views).tolist()
+        search_radius = max(2, frame_count // max(target_views * 2, 1))
+        selected: list[int] = []
+        used: set[int] = set()
+        for anchor in anchors:
+            best_index: int | None = None
+            best_score = float("-inf")
+            for candidate in range(frame_count):
+                if candidate in used:
+                    continue
+                distance = abs(candidate - anchor)
+                if distance > search_radius and best_index is not None:
+                    continue
+                score = float(quality_weights[candidate]) - (distance / max(search_radius, 1)) * 0.18
+                if score > best_score:
+                    best_score = score
+                    best_index = candidate
+            if best_index is None:
+                raise RuntimeError("sparse2dgs_view_selection_failed")
+            used.add(best_index)
+            selected.append(best_index)
+        selected.sort()
+        return selected
     indices = np.linspace(0, frame_count - 1, num=target_views)
     unique = sorted({int(round(value)) for value in indices.tolist()})
     if len(unique) != target_views:

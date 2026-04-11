@@ -100,6 +100,11 @@ class WorkerConfig:
     curated_bright_threshold_brightness: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_BRIGHT_THRESHOLD_BRIGHTNESS", 200.0)
     curated_max_frame_similarity: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MAX_FRAME_SIMILARITY", 0.92)
     curated_min_accept_interval_sec: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MIN_ACCEPT_INTERVAL_SEC", 0.28)
+    curated_min_orb_features: int = _env_int("OBJECT_SLAM3R_SURFACE_CURATED_MIN_ORB_FEATURES", 500)
+    curated_warn_orb_features: int = _env_int("OBJECT_SLAM3R_SURFACE_CURATED_WARN_ORB_FEATURES", 800)
+    curated_min_target_signal: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MIN_TARGET_SIGNAL", 0.10)
+    curated_warn_target_signal: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_WARN_TARGET_SIGNAL", 0.16)
+    curated_min_global_variance: float = _env_float("OBJECT_SLAM3R_SURFACE_CURATED_MIN_GLOBAL_VARIANCE", 10.0)
     curated_min_slam_frames: int = _env_int(
         "OBJECT_SLAM3R_SURFACE_CURATED_MIN_SLAM_FRAMES",
         _env_int("OBJECT_SLAM3R_SURFACE_CURATED_MIN_SURFACE_FRAMES", 12),

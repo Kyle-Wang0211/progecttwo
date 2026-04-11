@@ -17,6 +17,10 @@ class _FrameMetrics:
     path: Path
     blur_score: float
     mean_brightness: float
+    global_variance: float
+    orb_feature_count: int
+    target_texture_score: float
+    target_contrast_score: float
     signature: bytes
 
 
@@ -57,10 +61,29 @@ def curate_frames(ctx: JobContext) -> None:
         "visual_min_accept_interval_sec",
         config.curated_min_accept_interval_sec,
     )
+    min_orb_features = ctx.pipeline_int(
+        "visual_min_orb_features",
+        config.curated_min_orb_features,
+    )
+    warn_orb_features = ctx.pipeline_int(
+        "visual_warn_orb_features",
+        config.curated_warn_orb_features,
+    )
+    min_target_signal = ctx.pipeline_float(
+        "visual_min_target_signal",
+        config.curated_min_target_signal,
+    )
+    warn_target_signal = ctx.pipeline_float(
+        "visual_warn_target_signal",
+        config.curated_warn_target_signal,
+    )
+    target_zone_anchor_x = ctx.pipeline_float("target_zone_anchor_x", 0.5)
+    target_zone_anchor_y = ctx.pipeline_float("target_zone_anchor_y", 0.64)
     client_live_selection_source = ctx.pipeline_string("client_live_selection_source", "")
     client_live_timestamps_ms = _parse_client_live_timestamps_ms(
         ctx.pipeline_string("client_live_accepted_timestamps_ms", "")
     )
+    target_zone_mode = ctx.pipeline_string("target_zone_mode", "subject")
 
     unreadable_frames: list[str] = []
     used_client_live_selection = (
@@ -76,6 +99,24 @@ def curate_frames(ctx: JobContext) -> None:
     client_live_backfill_count = 0
     client_live_rejected_count = 0
     client_live_soft_outlier_count = 0
+    hard_reject_counts = {
+        "blur": 0,
+        "dark": 0,
+        "bright": 0,
+        "occupancy": 0,
+        "unreadable": 0,
+    }
+    soft_downgrade_counts = {
+        "redundant": 0,
+        "low_texture": 0,
+        "weak_quality": 0,
+        "low_features": 0,
+    }
+    guidance_counts = {
+        "recenter": 0,
+        "new_angle": 0,
+        "coverage": 0,
+    }
 
     if used_client_live_selection:
         minimum_slam_frames = max(
@@ -94,19 +135,28 @@ def curate_frames(ctx: JobContext) -> None:
         )
         curated_unique: list[_FrameMetrics] = []
         for index in selected_indices:
-            metric = _score_frame(frame_paths[index])
+            metric = _score_frame(
+                frame_paths[index],
+                target_zone_anchor=(target_zone_anchor_x, target_zone_anchor_y),
+                target_zone_mode=target_zone_mode,
+            )
             if metric is None:
                 unreadable_frames.append(frame_paths[index].name)
                 client_live_rejected_count += 1
+                hard_reject_counts["unreadable"] += 1
                 continue
             readable_frame_count += 1
-            if not _passes_visual_thresholds(
+            hard_reasons = _hard_reject_reasons(
                 metric,
                 blur_threshold=blur_threshold,
                 dark_threshold=dark_threshold,
                 bright_threshold=bright_threshold,
-            ):
+                min_orb_features=min_orb_features,
+                min_target_signal=min_target_signal,
+            )
+            if hard_reasons:
                 client_live_soft_outlier_count += 1
+                _tally_reasons(hard_reject_counts, hard_reasons)
             else:
                 visually_valid_frame_count += 1
             curated_unique.append(metric)
@@ -120,6 +170,10 @@ def curate_frames(ctx: JobContext) -> None:
                 blur_threshold=blur_threshold,
                 dark_threshold=dark_threshold,
                 bright_threshold=bright_threshold,
+                min_orb_features=min_orb_features,
+                min_target_signal=min_target_signal,
+                target_zone_anchor=(target_zone_anchor_x, target_zone_anchor_y),
+                target_zone_mode=target_zone_mode,
                 min_frame_gap=max(1, int(math.ceil(min_accept_interval_sec * config.extract_fps))),
                 minimum_needed=minimum_slam_frames - len(curated_unique),
                 max_frames=max(1, config.curated_max_frames),
@@ -134,9 +188,14 @@ def curate_frames(ctx: JobContext) -> None:
     else:
         scored_frames: list[_FrameMetrics] = []
         for frame_path in frame_paths:
-            metric = _score_frame(frame_path)
+            metric = _score_frame(
+                frame_path,
+                target_zone_anchor=(target_zone_anchor_x, target_zone_anchor_y),
+                target_zone_mode=target_zone_mode,
+            )
             if metric is None:
                 unreadable_frames.append(frame_path.name)
+                hard_reject_counts["unreadable"] += 1
                 continue
             scored_frames.append(metric)
 
@@ -146,13 +205,27 @@ def curate_frames(ctx: JobContext) -> None:
         visually_valid = [
             frame
             for frame in scored_frames
-            if _passes_visual_thresholds(
+            if not _hard_reject_reasons(
                 frame,
                 blur_threshold=blur_threshold,
                 dark_threshold=dark_threshold,
                 bright_threshold=bright_threshold,
+                min_orb_features=min_orb_features,
+                min_target_signal=min_target_signal,
             )
         ]
+        for frame in scored_frames:
+            _tally_reasons(
+                hard_reject_counts,
+                _hard_reject_reasons(
+                    frame,
+                    blur_threshold=blur_threshold,
+                    dark_threshold=dark_threshold,
+                    bright_threshold=bright_threshold,
+                    min_orb_features=min_orb_features,
+                    min_target_signal=min_target_signal,
+                ),
+            )
         if not visually_valid:
             visually_valid = scored_frames
 
@@ -195,6 +268,29 @@ def curate_frames(ctx: JobContext) -> None:
     for frame in deduped:
         shutil.copy2(frame.path, ctx.curated_dir / frame.path.name)
 
+    for index, frame in enumerate(deduped):
+        similarity = _similarity(frame.signature, deduped[index - 1].signature) if index > 0 else 0.0
+        _tally_reasons(
+            soft_downgrade_counts,
+            _soft_downgrade_reasons(
+                frame,
+                similarity=similarity,
+                max_similarity=max_similarity,
+                warn_orb_features=warn_orb_features,
+                warn_target_signal=warn_target_signal,
+                min_global_variance=config.curated_min_global_variance,
+            ),
+        )
+        _tally_reasons(
+            guidance_counts,
+            _guidance_flags(
+                frame,
+                similarity=similarity,
+                max_similarity=max_similarity,
+                warn_target_signal=warn_target_signal,
+            ),
+        )
+
     (ctx.output_dir / "curate_frames.json").write_text(
         json.dumps(
             {
@@ -210,12 +306,34 @@ def curate_frames(ctx: JobContext) -> None:
                 "client_live_backfill_count": client_live_backfill_count,
                 "client_live_rejected_count": client_live_rejected_count,
                 "client_live_soft_outlier_count": client_live_soft_outlier_count,
+                "client_live_runtime_summary": {
+                    "total_samples": ctx.pipeline_int("client_live_total_samples", 0),
+                    "hard_reject_blur_count": ctx.pipeline_int("client_live_hard_reject_blur_count", 0),
+                    "hard_reject_dark_count": ctx.pipeline_int("client_live_hard_reject_dark_count", 0),
+                    "hard_reject_bright_count": ctx.pipeline_int("client_live_hard_reject_bright_count", 0),
+                    "hard_reject_occupancy_count": ctx.pipeline_int("client_live_hard_reject_occupancy_count", 0),
+                    "soft_redundant_count": ctx.pipeline_int("client_live_soft_redundant_count", 0),
+                    "soft_low_texture_count": ctx.pipeline_int("client_live_soft_low_texture_count", 0),
+                    "soft_weak_quality_count": ctx.pipeline_int("client_live_soft_weak_quality_count", 0),
+                    "guidance_recenter_count": ctx.pipeline_int("client_live_guidance_recenter_count", 0),
+                    "guidance_new_angle_count": ctx.pipeline_int("client_live_guidance_new_angle_count", 0),
+                    "guidance_coverage_count": ctx.pipeline_int("client_live_guidance_coverage_count", 0),
+                },
+                "policy_counts": {
+                    "hard_reject": hard_reject_counts,
+                    "soft_downgrade": soft_downgrade_counts,
+                    "guidance_only": guidance_counts,
+                },
                 "thresholds": {
                     "blur_threshold_laplacian": blur_threshold,
                     "dark_threshold_brightness": dark_threshold,
                     "bright_threshold_brightness": bright_threshold,
                     "max_frame_similarity": max_similarity,
                     "min_accept_interval_sec": min_accept_interval_sec,
+                    "min_orb_features": min_orb_features,
+                    "warn_orb_features": warn_orb_features,
+                    "min_target_signal": min_target_signal,
+                    "warn_target_signal": warn_target_signal,
                 },
                 "client_live_accepted_frames": ctx.pipeline_int("client_live_accepted_frames", 0),
                 "frames": [
@@ -223,9 +341,36 @@ def curate_frames(ctx: JobContext) -> None:
                         "name": frame.path.name,
                         "blur_score": round(frame.blur_score, 3),
                         "mean_brightness": round(frame.mean_brightness, 3),
+                        "global_variance": round(frame.global_variance, 3),
+                        "orb_feature_count": frame.orb_feature_count,
+                        "target_texture_score": round(frame.target_texture_score, 4),
+                        "target_contrast_score": round(frame.target_contrast_score, 4),
+                        "target_signal": round(_target_signal(frame), 4),
                         "similarity_to_previous_accepted": round(
                             _similarity(frame.signature, deduped[index - 1].signature) if index > 0 else 0.0,
                             4,
+                        ),
+                        "hard_reject_reasons": _hard_reject_reasons(
+                            frame,
+                            blur_threshold=blur_threshold,
+                            dark_threshold=dark_threshold,
+                            bright_threshold=bright_threshold,
+                            min_orb_features=min_orb_features,
+                            min_target_signal=min_target_signal,
+                        ),
+                        "soft_downgrade_reasons": _soft_downgrade_reasons(
+                            frame,
+                            similarity=_similarity(frame.signature, deduped[index - 1].signature) if index > 0 else 0.0,
+                            max_similarity=max_similarity,
+                            warn_orb_features=warn_orb_features,
+                            warn_target_signal=warn_target_signal,
+                            min_global_variance=config.curated_min_global_variance,
+                        ),
+                        "guidance_only_flags": _guidance_flags(
+                            frame,
+                            similarity=_similarity(frame.signature, deduped[index - 1].signature) if index > 0 else 0.0,
+                            max_similarity=max_similarity,
+                            warn_target_signal=warn_target_signal,
                         ),
                     }
                     for index, frame in enumerate(deduped)
@@ -238,29 +383,96 @@ def curate_frames(ctx: JobContext) -> None:
     )
 
 
-def _score_frame(frame_path: Path) -> _FrameMetrics | None:
+def _score_frame(
+    frame_path: Path,
+    *,
+    target_zone_anchor: tuple[float, float],
+    target_zone_mode: str,
+) -> _FrameMetrics | None:
     image = cv2.imread(str(frame_path), cv2.IMREAD_GRAYSCALE)
     if image is None:
         return None
+    target_texture_score, target_contrast_score = _target_zone_metrics(
+        image,
+        target_zone_anchor=target_zone_anchor,
+        target_zone_mode=target_zone_mode,
+    )
+    orb_feature_count = _orb_feature_count(image)
     return _FrameMetrics(
         path=frame_path,
         blur_score=float(cv2.Laplacian(image, cv2.CV_64F).var()),
         mean_brightness=float(image.mean()),
+        global_variance=float(image.var()),
+        orb_feature_count=orb_feature_count,
+        target_texture_score=target_texture_score,
+        target_contrast_score=target_contrast_score,
         signature=_signature(image),
     )
 
 
-def _passes_visual_thresholds(
+def _target_signal(frame: _FrameMetrics) -> float:
+    return frame.target_texture_score * 0.55 + frame.target_contrast_score * 0.45
+
+
+def _hard_reject_reasons(
     frame: _FrameMetrics,
     *,
     blur_threshold: float,
     dark_threshold: float,
     bright_threshold: float,
-) -> bool:
-    return (
-        frame.blur_score >= blur_threshold
-        and dark_threshold <= frame.mean_brightness <= bright_threshold
-    )
+    min_orb_features: int,
+    min_target_signal: float,
+) -> list[str]:
+    reasons: list[str] = []
+    if frame.blur_score < blur_threshold:
+        reasons.append("blur")
+    if frame.mean_brightness < dark_threshold:
+        reasons.append("dark")
+    if frame.mean_brightness > bright_threshold:
+        reasons.append("bright")
+    if frame.orb_feature_count < min_orb_features:
+        reasons.append("low_features")
+    if _target_signal(frame) < min_target_signal:
+        reasons.append("occupancy")
+    return reasons
+
+
+def _soft_downgrade_reasons(
+    frame: _FrameMetrics,
+    *,
+    similarity: float,
+    max_similarity: float,
+    warn_orb_features: int,
+    warn_target_signal: float,
+    min_global_variance: float,
+) -> list[str]:
+    reasons: list[str] = []
+    if similarity > max_similarity:
+        reasons.append("redundant")
+    if frame.orb_feature_count < warn_orb_features:
+        reasons.append("low_features")
+    if frame.global_variance < min_global_variance:
+        reasons.append("low_texture")
+    if _target_signal(frame) < warn_target_signal:
+        reasons.append("weak_quality")
+    return reasons
+
+
+def _guidance_flags(
+    frame: _FrameMetrics,
+    *,
+    similarity: float,
+    max_similarity: float,
+    warn_target_signal: float,
+) -> list[str]:
+    flags: list[str] = []
+    if _target_signal(frame) < warn_target_signal:
+        flags.append("recenter")
+    if similarity > max_similarity:
+        flags.append("new_angle")
+    else:
+        flags.append("coverage")
+    return flags
 
 
 def _signature(image: "cv2.typing.MatLike") -> bytes:
@@ -273,6 +485,113 @@ def _similarity(lhs: bytes, rhs: bytes) -> float:
         return 0.0
     difference = sum(abs(a - b) for a, b in zip(lhs, rhs)) / (255.0 * len(lhs))
     return float(max(0.0, min(1.0, 1.0 - difference)))
+
+
+def _tally_reasons(counter: dict[str, int], reasons: list[str]) -> None:
+    for reason in reasons:
+        if reason in counter:
+            counter[reason] += 1
+
+
+def _orb_feature_count(image: "cv2.typing.MatLike") -> int:
+    detector = cv2.ORB_create(nfeatures=max(config.curated_warn_orb_features, 1000))
+    keypoints = detector.detect(image, None)
+    return int(len(keypoints))
+
+
+def _target_zone_metrics(
+    image: "cv2.typing.MatLike",
+    *,
+    target_zone_anchor: tuple[float, float],
+    target_zone_mode: str,
+) -> tuple[float, float]:
+    height, width = image.shape[:2]
+    zone_width_fraction = 0.24 if target_zone_mode == "subject" else 0.38
+    zone_height_fraction = 0.28 if target_zone_mode == "subject" else 0.34
+    rect = _normalized_rect(
+        anchor=target_zone_anchor,
+        width_fraction=zone_width_fraction,
+        height_fraction=zone_height_fraction,
+        image_width=width,
+        image_height=height,
+    )
+    ring_rect = _expanded_rect(
+        rect,
+        padding=3 if target_zone_mode == "subject" else 4,
+        max_width=width,
+        max_height=height,
+    )
+    zone_values = _pixel_values(image, rect)
+    ring_values = _pixel_values(image, ring_rect, excluding=rect)
+    zone_variance = _variance(zone_values)
+    zone_mean = _mean(zone_values)
+    ring_mean = _mean(ring_values)
+    texture_score = min(zone_variance / 420.0, 1.0)
+    contrast_score = min(abs(zone_mean - ring_mean) / 28.0, 1.0)
+    return float(texture_score), float(contrast_score)
+
+
+def _normalized_rect(
+    *,
+    anchor: tuple[float, float],
+    width_fraction: float,
+    height_fraction: float,
+    image_width: int,
+    image_height: int,
+) -> tuple[int, int, int, int]:
+    width = max(4, int(round(float(image_width) * width_fraction)))
+    height = max(4, int(round(float(image_height) * height_fraction)))
+    center_x = int(round(anchor[0] * float(image_width)))
+    center_y = int(round(anchor[1] * float(image_height)))
+    x = min(max(center_x - width // 2, 0), max(image_width - width, 0))
+    y = min(max(center_y - height // 2, 0), max(image_height - height, 0))
+    return x, y, width, height
+
+
+def _expanded_rect(
+    rect: tuple[int, int, int, int],
+    *,
+    padding: int,
+    max_width: int,
+    max_height: int,
+) -> tuple[int, int, int, int]:
+    x, y, width, height = rect
+    min_x = max(x - padding, 0)
+    min_y = max(y - padding, 0)
+    max_x = min(x + width + padding, max_width)
+    max_y = min(y + height + padding, max_height)
+    return min_x, min_y, max(max_x - min_x, 1), max(max_y - min_y, 1)
+
+
+def _pixel_values(
+    image: "cv2.typing.MatLike",
+    rect: tuple[int, int, int, int],
+    *,
+    excluding: tuple[int, int, int, int] | None = None,
+) -> list[float]:
+    x, y, width, height = rect
+    values: list[float] = []
+    for row in range(y, y + height):
+        for col in range(x, x + width):
+            if excluding is not None:
+                ex, ey, ew, eh = excluding
+                if ex <= col < ex + ew and ey <= row < ey + eh:
+                    continue
+            values.append(float(image[row, col]))
+    return values
+
+
+def _mean(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return float(sum(values) / len(values))
+
+
+def _variance(values: list[float]) -> float:
+    if len(values) <= 1:
+        return 0.0
+    mean_value = _mean(values)
+    return float(sum((value - mean_value) ** 2 for value in values) / len(values))
 
 
 def _novelty_filter(
@@ -364,6 +683,10 @@ def _supplement_client_selected_frames(
     blur_threshold: float,
     dark_threshold: float,
     bright_threshold: float,
+    min_orb_features: int,
+    min_target_signal: float,
+    target_zone_anchor: tuple[float, float],
+    target_zone_mode: str,
     min_frame_gap: int,
     minimum_needed: int,
     max_frames: int,
@@ -397,17 +720,23 @@ def _supplement_client_selected_frames(
             continue
         if any(abs(candidate - accepted_index) < min_frame_gap for accepted_index in accepted_indices):
             continue
-        metric = _score_frame(frame_paths[candidate])
+        metric = _score_frame(
+            frame_paths[candidate],
+            target_zone_anchor=target_zone_anchor,
+            target_zone_mode=target_zone_mode,
+        )
         if metric is None:
             unreadable_frames.append(frame_paths[candidate].name)
             continue
         if metric.path.name in already_selected_names:
             continue
-        if not _passes_visual_thresholds(
+        if _hard_reject_reasons(
             metric,
             blur_threshold=blur_threshold,
             dark_threshold=dark_threshold,
             bright_threshold=bright_threshold,
+            min_orb_features=min_orb_features,
+            min_target_signal=min_target_signal,
         ):
             continue
 
