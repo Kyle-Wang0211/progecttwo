@@ -127,6 +127,10 @@ class WorkerConfig:
     sparse2dgs_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_SUMMARY_FILENAME", "sparse2dgs_surface.json")
     sparse2dgs_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TIMEOUT_SEC", 7200)
     sparse2dgs_target_views: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TARGET_VIEWS", 24)
+    sparse2dgs_contract_max_image_size: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_CONTRACT_MAX_IMAGE_SIZE",
+        1024,
+    )
 
     matcha_repo: str = os.environ.get(
         "OBJECT_SLAM3R_SURFACE_MATCHA_REPO",
@@ -168,6 +172,10 @@ class WorkerConfig:
         250000,
     )
     delivery_enforce_watertight: bool = _env_flag("OBJECT_SLAM3R_SURFACE_DELIVERY_ENFORCE_WATERTIGHT", False)
+    delivery_enable_voxel_watertight_fallback: bool = _env_flag(
+        "OBJECT_SLAM3R_SURFACE_DELIVERY_ENABLE_VOXEL_WATERTIGHT_FALLBACK",
+        False,
+    )
     delivery_watertight_voxel_resolution: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_WATERTIGHT_VOXEL_RESOLUTION", 192)
     delivery_watertight_voxel_min_resolution: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_WATERTIGHT_VOXEL_MIN_RESOLUTION", 64)
     delivery_taubin_iterations: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_ITERATIONS", 8)

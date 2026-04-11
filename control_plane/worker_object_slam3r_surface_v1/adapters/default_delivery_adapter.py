@@ -279,7 +279,7 @@ def _repair_mesh_topology(mesh):
         "hole_fill_iterations": 0,
         "holes_repaired": False,
         "voxel_fallback_used": False,
-        "closure_strategy": "native_repair" if aggressive_repair_allowed else "conservative_open_mesh",
+        "closure_strategy": "boundary_preserving_native_repair" if aggressive_repair_allowed else "boundary_preserving_open_mesh",
         "aggressive_repair_allowed": bool(aggressive_repair_allowed),
     }
     try:
@@ -311,7 +311,7 @@ def _repair_mesh_topology(mesh):
             pass
         summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
         if not summary["watertight_after"]:
-            summary["closure_strategy"] = "best_effort_open_mesh"
+            summary["closure_strategy"] = "boundary_preserving_open_mesh"
         return mesh, summary
 
     for _ in range(max(1, int(config.delivery_hole_fill_iterations))):
@@ -347,7 +347,7 @@ def _repair_mesh_topology(mesh):
         if bool(getattr(mesh, "is_watertight", False)):
             break
 
-    if not bool(getattr(mesh, "is_watertight", False)):
+    if config.delivery_enforce_watertight and config.delivery_enable_voxel_watertight_fallback and not bool(getattr(mesh, "is_watertight", False)):
         voxel_mesh = _voxelize_watertight_mesh(mesh)
         if voxel_mesh is not None and _is_reasonable_watertight_fallback(mesh, voxel_mesh):
             mesh = voxel_mesh
@@ -356,7 +356,7 @@ def _repair_mesh_topology(mesh):
 
     summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
     if not summary["watertight_after"]:
-        summary["closure_strategy"] = "best_effort_open_mesh"
+        summary["closure_strategy"] = "boundary_preserving_open_mesh"
     return mesh, summary
 
 
@@ -410,18 +410,76 @@ def _smooth_mesh(mesh):
     iterations = max(0, int(config.delivery_taubin_iterations))
     if iterations <= 0:
         return mesh
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    if faces.ndim != 2 or faces.shape[1] != 3 or len(vertices) == 0:
+        return mesh
+    boundary_mask = _boundary_vertex_mask(faces, vertex_count=len(vertices))
+    movable_indices = np.flatnonzero(~boundary_mask)
+    if movable_indices.size == 0:
+        return mesh
+    neighbors = _vertex_neighbors(faces, vertex_count=len(vertices))
+    current = vertices.copy()
+    lamb = float(config.delivery_taubin_lambda)
+    nu = float(config.delivery_taubin_nu)
     try:
-        from trimesh import smoothing
-
-        smoothing.filter_taubin(
-            mesh,
-            lamb=float(config.delivery_taubin_lambda),
-            nu=float(config.delivery_taubin_nu),
-            iterations=iterations,
-        )
+        for _ in range(iterations):
+            current = _boundary_preserving_laplacian_pass(
+                current,
+                neighbors=neighbors,
+                movable_indices=movable_indices,
+                factor=lamb,
+            )
+            current = _boundary_preserving_laplacian_pass(
+                current,
+                neighbors=neighbors,
+                movable_indices=movable_indices,
+                factor=nu,
+            )
     except Exception:
         return mesh
+    mesh.vertices = current
     return mesh
+
+
+def _boundary_vertex_mask(faces: np.ndarray, *, vertex_count: int) -> np.ndarray:
+    edges = np.sort(
+        np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]),
+        axis=1,
+    )
+    unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_edges = unique_edges[counts == 1]
+    mask = np.zeros(vertex_count, dtype=bool)
+    if boundary_edges.size > 0:
+        mask[np.unique(boundary_edges.reshape(-1))] = True
+    return mask
+
+
+def _vertex_neighbors(faces: np.ndarray, *, vertex_count: int) -> list[np.ndarray]:
+    adjacency: list[set[int]] = [set() for _ in range(vertex_count)]
+    for face in faces.tolist():
+        a, b, c = int(face[0]), int(face[1]), int(face[2])
+        adjacency[a].update((b, c))
+        adjacency[b].update((a, c))
+        adjacency[c].update((a, b))
+    return [np.asarray(sorted(neighbors), dtype=np.int64) for neighbors in adjacency]
+
+
+def _boundary_preserving_laplacian_pass(
+    vertices: np.ndarray,
+    *,
+    neighbors: list[np.ndarray],
+    movable_indices: np.ndarray,
+    factor: float,
+) -> np.ndarray:
+    updated = vertices.copy()
+    for index in movable_indices.tolist():
+        neighbor_indices = neighbors[index]
+        if neighbor_indices.size < 2:
+            continue
+        centroid = vertices[neighbor_indices].mean(axis=0)
+        updated[index] = vertices[index] + factor * (centroid - vertices[index])
+    return updated
 
 
 def _simplify_mesh(mesh, *, target_faces: int):

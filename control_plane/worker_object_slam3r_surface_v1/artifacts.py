@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from .config import config
 from .context import JobContext
@@ -102,7 +105,7 @@ def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
             "rendering": "default_mesh_glb" if default_kind == "glb" else "disabled",
             "hq": "disabled",
         },
-        "camera_preset": _default_camera_preset(),
+        "camera_preset": _default_camera_preset(ctx),
     }
 
     hq_asset = _resolve_optional_hq_publish_asset(ctx.hq_dir) if ctx.hq_dir is not None else None
@@ -221,10 +224,33 @@ def _artifact_kind_for_path(path: Path) -> str:
     return "binary"
 
 
-def _default_camera_preset() -> dict[str, Any]:
-    return {
+def _default_camera_preset(ctx: JobContext) -> dict[str, Any]:
+    payload = {
         "pitch_degrees": config.default_camera_pitch_deg,
         "yaw_degrees": config.default_camera_yaw_deg,
         "distance_scale": config.default_camera_distance_scale,
-        "up": [0.0, 1.0, 0.0],
+        "up": _resolve_capture_up_vector(ctx),
     }
+    source = ctx.pipeline_string("capture_gravity_source", "").strip()
+    if source:
+        payload["up_source"] = source
+    confidence = ctx.pipeline_float("capture_gravity_confidence", -1.0)
+    if confidence >= 0.0:
+        payload["up_confidence"] = max(0.0, min(1.0, float(confidence)))
+    return payload
+
+
+def _resolve_capture_up_vector(ctx: JobContext) -> list[float]:
+    vector = np.asarray(
+        [
+            ctx.pipeline_float("capture_gravity_up_x", 0.0),
+            ctx.pipeline_float("capture_gravity_up_y", 1.0),
+            ctx.pipeline_float("capture_gravity_up_z", 0.0),
+        ],
+        dtype=np.float64,
+    )
+    norm = float(np.linalg.norm(vector))
+    if not math.isfinite(norm) or norm <= 1e-6:
+        return [0.0, 1.0, 0.0]
+    normalized = vector / norm
+    return [float(normalized[0]), float(normalized[1]), float(normalized[2])]

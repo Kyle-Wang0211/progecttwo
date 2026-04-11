@@ -56,10 +56,13 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
     images_dir.mkdir(parents=True, exist_ok=True)
     sparse_dir.mkdir(parents=True, exist_ok=True)
 
-    source_width = int(rgb_imgs.shape[2])
-    source_height = int(rgb_imgs.shape[1])
-    width = _round_up_to_multiple(source_width, 64)
-    height = _round_up_to_multiple(source_height, 64)
+    predictor_source_width = int(rgb_imgs.shape[2])
+    predictor_source_height = int(rgb_imgs.shape[1])
+    source_width, source_height, width, height, bridge_image_source = _resolve_bridge_export_dimensions(
+        curated_frame_paths=curated_frame_paths,
+        fallback_width=predictor_source_width,
+        fallback_height=predictor_source_height,
+    )
     init_winsize = int(metadata.get("init_winsize", 0))
     kf_stride = int(metadata.get("kf_stride", 1))
     init_ref_id = int(metadata.get("init_ref_id", 0)) * kf_stride
@@ -103,14 +106,20 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         image_filename = f"{img_name}.png"
         image_path = images_dir / image_filename
 
-        source_image = _normalize_image(rgb_imgs[frame_idx])
-        image = _resize_image_if_needed(source_image, width=width, height=height)
-        Image.fromarray(image, mode="RGB").save(image_path)
+        predictor_image = _normalize_image(rgb_imgs[frame_idx])
+        curated_path = curated_frame_paths[frame_idx] if 0 <= frame_idx < len(curated_frame_paths) else None
+        export_image = _load_bridge_export_image(
+            curated_path=curated_path,
+            fallback_image=predictor_image,
+            width=width,
+            height=height,
+        )
+        Image.fromarray(export_image, mode="RGB").save(image_path)
 
         intrinsic = intrinsics[frame_idx]
-        if width != source_width or height != source_height:
-            scale_x = float(width) / float(source_width)
-            scale_y = float(height) / float(source_height)
+        if width != predictor_source_width or height != predictor_source_height:
+            scale_x = float(width) / float(predictor_source_width)
+            scale_y = float(height) / float(predictor_source_height)
             intrinsic = intrinsic.copy()
             intrinsic[0, :] *= scale_x
             intrinsic[1, :] *= scale_y
@@ -161,7 +170,7 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         )
 
         frame_points = registered_frame_points
-        frame_colors = source_image.reshape(-1, 3)
+        frame_colors = predictor_image.reshape(-1, 3)
         finite_mask = np.isfinite(frame_points).all(axis=1)
         frame_points = frame_points[finite_mask]
         frame_colors = frame_colors[finite_mask]
@@ -213,7 +222,9 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         ],
         "point_count": int(point_id - 1),
         "source_image_size": [source_width, source_height],
+        "predictor_image_size": [predictor_source_width, predictor_source_height],
         "exported_image_size": [width, height],
+        "bridge_image_source": bridge_image_source,
         "pose_failed_indices": pose_failed_indices,
         "pose_failed_count": len(pose_failed_indices),
         "paper_stack": {
@@ -458,6 +469,65 @@ def _resize_image_if_needed(image: np.ndarray, *, width: int, height: int) -> np
 
     pil_image = Image.fromarray(image, mode="RGB")
     return np.asarray(pil_image.resize((width, height), Image.BILINEAR), dtype=np.uint8)
+
+
+def _load_bridge_export_image(
+    *,
+    curated_path: Path | None,
+    fallback_image: np.ndarray,
+    width: int,
+    height: int,
+) -> np.ndarray:
+    from PIL import Image
+
+    if curated_path is not None and curated_path.exists():
+        try:
+            with Image.open(curated_path) as image:
+                return np.asarray(
+                    image.convert("RGB").resize((width, height), Image.BILINEAR),
+                    dtype=np.uint8,
+                )
+        except Exception:
+            pass
+    return _resize_image_if_needed(fallback_image, width=width, height=height)
+
+
+def _resolve_bridge_export_dimensions(
+    *,
+    curated_frame_paths: list[Path],
+    fallback_width: int,
+    fallback_height: int,
+) -> tuple[int, int, int, int, str]:
+    source_width = fallback_width
+    source_height = fallback_height
+    image_source = "slam3r_lowres_contract"
+    for curated_path in curated_frame_paths:
+        image_size = _read_image_size(curated_path)
+        if image_size is None:
+            continue
+        source_width, source_height = image_size
+        image_source = "curated_original_resized"
+        break
+
+    max_dim = max(256, int(config.sparse2dgs_contract_max_image_size))
+    longest_side = max(source_width, source_height)
+    scale = min(1.0, float(max_dim) / float(longest_side)) if longest_side > 0 else 1.0
+    export_width = max(64, _round_up_to_multiple(int(round(source_width * scale)), 64))
+    export_height = max(64, _round_up_to_multiple(int(round(source_height * scale)), 64))
+    return source_width, source_height, export_width, export_height, image_source
+
+
+def _read_image_size(path: Path) -> tuple[int, int] | None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            width, height = image.size
+        if width <= 0 or height <= 0:
+            return None
+        return int(width), int(height)
+    except Exception:
+        return None
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:
