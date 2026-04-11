@@ -62,34 +62,7 @@ def curate_frames(ctx: JobContext) -> None:
         ctx.pipeline_string("client_live_accepted_timestamps_ms", "")
     )
 
-    scored_frames: list[_FrameMetrics] = []
     unreadable_frames: list[str] = []
-    for frame_path in frame_paths:
-        image = cv2.imread(str(frame_path), cv2.IMREAD_GRAYSCALE)
-        if image is None:
-            unreadable_frames.append(frame_path.name)
-            continue
-        scored_frames.append(
-            _FrameMetrics(
-                path=frame_path,
-                blur_score=float(cv2.Laplacian(image, cv2.CV_64F).var()),
-                mean_brightness=float(image.mean()),
-                signature=_signature(image),
-            )
-        )
-
-    if not scored_frames:
-        raise RuntimeError("curate_frames_no_readable_images")
-
-    visually_valid = [
-        frame
-        for frame in scored_frames
-        if frame.blur_score >= blur_threshold
-        and dark_threshold <= frame.mean_brightness <= bright_threshold
-    ]
-    if not visually_valid:
-        visually_valid = scored_frames
-
     used_client_live_selection = (
         client_live_selection_source == "visual_realtime" and bool(client_live_timestamps_ms)
     )
@@ -97,14 +70,89 @@ def curate_frames(ctx: JobContext) -> None:
     if client_live_selection_source == "visual_realtime" and not client_live_timestamps_ms:
         raise RuntimeError("curate_frames_missing_client_live_timestamps")
 
+    minimum_slam_frames = max(4, config.curated_min_slam_frames)
+    readable_frame_count = 0
+    visually_valid_frame_count = 0
+    client_live_backfill_count = 0
+
     if used_client_live_selection:
-        curated_unique = _select_frames_from_timestamps(
-            frames=scored_frames,
+        minimum_slam_frames = max(
+            4,
+            min(
+                minimum_slam_frames,
+                len(client_live_timestamps_ms),
+                len(frame_paths),
+            ),
+        )
+        selected_indices = _select_frame_indices_from_timestamps(
+            frame_count=len(frame_paths),
             timestamps_ms=client_live_timestamps_ms,
             fps=config.extract_fps,
             max_frames=max(1, config.curated_max_frames),
         )
+        curated_unique: list[_FrameMetrics] = []
+        selected_index_set: set[int] = set()
+        for index in selected_indices:
+            selected_index_set.add(index)
+            metric = _score_frame(frame_paths[index])
+            if metric is None:
+                unreadable_frames.append(frame_paths[index].name)
+                continue
+            readable_frame_count += 1
+            if _passes_visual_thresholds(
+                metric,
+                blur_threshold=blur_threshold,
+                dark_threshold=dark_threshold,
+                bright_threshold=bright_threshold,
+            ):
+                visually_valid_frame_count += 1
+            curated_unique.append(metric)
+
+        if len(curated_unique) < minimum_slam_frames:
+            supplemented = _supplement_client_selected_frames(
+                frame_paths=frame_paths,
+                selected_indices=selected_indices,
+                already_selected_names={frame.path.name for frame in curated_unique},
+                unreadable_frames=unreadable_frames,
+                blur_threshold=blur_threshold,
+                dark_threshold=dark_threshold,
+                bright_threshold=bright_threshold,
+                min_frame_gap=max(1, int(math.ceil(min_accept_interval_sec * config.extract_fps))),
+                minimum_needed=minimum_slam_frames - len(curated_unique),
+                max_frames=max(1, config.curated_max_frames),
+            )
+            client_live_backfill_count = len(supplemented)
+            curated_unique.extend(supplemented)
+            readable_frame_count += len(supplemented)
+            visually_valid_frame_count += len(supplemented)
+
+        if len(curated_unique) < minimum_slam_frames:
+            raise RuntimeError("curate_frames_insufficient_client_selected_frames")
     else:
+        scored_frames: list[_FrameMetrics] = []
+        for frame_path in frame_paths:
+            metric = _score_frame(frame_path)
+            if metric is None:
+                unreadable_frames.append(frame_path.name)
+                continue
+            scored_frames.append(metric)
+
+        if not scored_frames:
+            raise RuntimeError("curate_frames_no_readable_images")
+
+        visually_valid = [
+            frame
+            for frame in scored_frames
+            if _passes_visual_thresholds(
+                frame,
+                blur_threshold=blur_threshold,
+                dark_threshold=dark_threshold,
+                bright_threshold=bright_threshold,
+            )
+        ]
+        if not visually_valid:
+            visually_valid = scored_frames
+
         curated_unique = _novelty_filter(
             frames=visually_valid,
             max_similarity=max_similarity,
@@ -119,6 +167,8 @@ def curate_frames(ctx: JobContext) -> None:
             first_frame = visually_valid[0]
             if curated_unique[0].path.name != first_frame.path.name:
                 curated_unique.insert(0, first_frame)
+        readable_frame_count = len(scored_frames)
+        visually_valid_frame_count = len(visually_valid)
 
     seen: set[str] = set()
     deduped: list[_FrameMetrics] = []
@@ -129,19 +179,6 @@ def curate_frames(ctx: JobContext) -> None:
         deduped.append(frame)
         if len(deduped) >= config.curated_max_frames:
             break
-
-    minimum_slam_frames = max(4, config.curated_min_slam_frames)
-    if used_client_live_selection:
-        minimum_slam_frames = max(
-            4,
-            min(
-                minimum_slam_frames,
-                len(client_live_timestamps_ms),
-                len(scored_frames),
-            ),
-        )
-    if used_client_live_selection and len(deduped) < minimum_slam_frames:
-        raise RuntimeError("curate_frames_insufficient_client_selected_frames")
 
     if not used_client_live_selection and len(deduped) < minimum_slam_frames:
         for frame in visually_valid:
@@ -163,10 +200,11 @@ def curate_frames(ctx: JobContext) -> None:
                 "selection_source": "client_live_timestamps" if used_client_live_selection else "server_visual_curation",
                 "target_zone_mode": ctx.pipeline_string("target_zone_mode", "subject"),
                 "input_frame_count": len(frame_paths),
-                "readable_frame_count": len(scored_frames),
-                "visually_valid_frame_count": len(visually_valid),
+                "readable_frame_count": readable_frame_count,
+                "visually_valid_frame_count": visually_valid_frame_count,
                 "curated_frame_count": len(deduped),
                 "client_live_timestamp_count": len(client_live_timestamps_ms),
+                "client_live_backfill_count": client_live_backfill_count,
                 "thresholds": {
                     "blur_threshold_laplacian": blur_threshold,
                     "dark_threshold_brightness": dark_threshold,
@@ -192,6 +230,31 @@ def curate_frames(ctx: JobContext) -> None:
             indent=2,
         ),
         encoding="utf-8",
+    )
+
+
+def _score_frame(frame_path: Path) -> _FrameMetrics | None:
+    image = cv2.imread(str(frame_path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        return None
+    return _FrameMetrics(
+        path=frame_path,
+        blur_score=float(cv2.Laplacian(image, cv2.CV_64F).var()),
+        mean_brightness=float(image.mean()),
+        signature=_signature(image),
+    )
+
+
+def _passes_visual_thresholds(
+    frame: _FrameMetrics,
+    *,
+    blur_threshold: float,
+    dark_threshold: float,
+    bright_threshold: float,
+) -> bool:
+    return (
+        frame.blur_score >= blur_threshold
+        and dark_threshold <= frame.mean_brightness <= bright_threshold
     )
 
 
@@ -257,20 +320,18 @@ def _parse_client_live_timestamps_ms(raw: str) -> list[int]:
     return values
 
 
-def _select_frames_from_timestamps(
+def _select_frame_indices_from_timestamps(
     *,
-    frames: list[_FrameMetrics],
+    frame_count: int,
     timestamps_ms: list[int],
     fps: float,
     max_frames: int,
-) -> list[_FrameMetrics]:
-    if not frames or fps <= 0:
+) -> list[int]:
+    if frame_count <= 0 or fps <= 0:
         return []
 
-    selected: list[_FrameMetrics] = []
+    selected: list[int] = []
     seen_indices: set[int] = set()
-    frame_count = len(frames)
-
     for timestamp_ms in timestamps_ms:
         frame_index = int(round((timestamp_ms / 1000.0) * fps))
         frame_index = max(0, min(frame_count - 1, frame_index))
@@ -282,13 +343,77 @@ def _select_frames_from_timestamps(
         )
         if resolved_index is None:
             continue
-        frame = frames[resolved_index]
         seen_indices.add(resolved_index)
-        selected.append(frame)
+        selected.append(resolved_index)
         if len(selected) >= max_frames:
             break
-
     return selected
+
+
+def _supplement_client_selected_frames(
+    *,
+    frame_paths: list[Path],
+    selected_indices: list[int],
+    already_selected_names: set[str],
+    unreadable_frames: list[str],
+    blur_threshold: float,
+    dark_threshold: float,
+    bright_threshold: float,
+    min_frame_gap: int,
+    minimum_needed: int,
+    max_frames: int,
+) -> list[_FrameMetrics]:
+    if minimum_needed <= 0:
+        return []
+
+    frame_count = len(frame_paths)
+    used_indices = set(selected_indices)
+    accepted: list[_FrameMetrics] = []
+    accepted_indices: list[int] = list(selected_indices)
+    candidate_indices: list[int] = []
+    seen_candidates: set[int] = set()
+
+    search_radius = max(4, min(18, min_frame_gap * 3))
+    for base_index in selected_indices:
+        for radius in range(1, search_radius + 1):
+            for candidate in (base_index - radius, base_index + radius):
+                if candidate < 0 or candidate >= frame_count or candidate in seen_candidates:
+                    continue
+                seen_candidates.add(candidate)
+                candidate_indices.append(candidate)
+
+    for candidate in range(frame_count):
+        if candidate in seen_candidates:
+            continue
+        candidate_indices.append(candidate)
+
+    for candidate in candidate_indices:
+        if candidate in used_indices:
+            continue
+        if any(abs(candidate - accepted_index) < min_frame_gap for accepted_index in accepted_indices):
+            continue
+        metric = _score_frame(frame_paths[candidate])
+        if metric is None:
+            unreadable_frames.append(frame_paths[candidate].name)
+            continue
+        if metric.path.name in already_selected_names:
+            continue
+        if not _passes_visual_thresholds(
+            metric,
+            blur_threshold=blur_threshold,
+            dark_threshold=dark_threshold,
+            bright_threshold=bright_threshold,
+        ):
+            continue
+
+        accepted.append(metric)
+        accepted_indices.append(candidate)
+        used_indices.add(candidate)
+        already_selected_names.add(metric.path.name)
+        if len(accepted) >= minimum_needed or (len(accepted_indices) >= max_frames):
+            break
+
+    return accepted
 
 
 def _nearest_unused_index(
