@@ -47,6 +47,7 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
 
     mesh = _drop_small_components(mesh)
     mesh = _drop_degenerate_faces(mesh)
+    mesh = _smooth_mesh(mesh)
 
     try:
         mesh.fix_normals(multibody=True)
@@ -102,7 +103,10 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
     if not cameras or not poses:
         raise RuntimeError("delivery_texture_contract_missing")
 
-    projected_views = poses[: max(1, min(len(poses), config.delivery_texture_max_views))]
+    projected_views = _sample_projected_views(
+        poses,
+        max_views=max(1, int(config.delivery_texture_max_views)),
+    )
     vertex_colors, observed_vertex_count = _project_vertex_colors(
         mesh=mesh,
         images_dir=ctx.sparse2dgs_scene_dir / "images",
@@ -226,6 +230,24 @@ def _drop_degenerate_faces(mesh):
     return mesh
 
 
+def _smooth_mesh(mesh):
+    iterations = max(0, int(config.delivery_taubin_iterations))
+    if iterations <= 0:
+        return mesh
+    try:
+        from trimesh import smoothing
+
+        smoothing.filter_taubin(
+            mesh,
+            lamb=float(config.delivery_taubin_lambda),
+            nu=float(config.delivery_taubin_nu),
+            iterations=iterations,
+        )
+    except Exception:
+        return mesh
+    return mesh
+
+
 def _simplify_mesh(mesh, *, target_faces: int):
     if len(mesh.faces) <= target_faces:
         return mesh
@@ -342,6 +364,33 @@ def _project_vertex_colors(
     return rgba, int(np.count_nonzero(observed))
 
 
+def _sample_projected_views(poses: list[_ImagePose], *, max_views: int) -> list[_ImagePose]:
+    if not poses:
+        return []
+    if len(poses) <= max_views:
+        return poses
+    if max_views <= 1:
+        return [poses[len(poses) // 2]]
+
+    indices = np.linspace(0, len(poses) - 1, num=max_views, dtype=np.int64)
+    deduped: list[_ImagePose] = []
+    seen: set[int] = set()
+    for index in indices.tolist():
+        if index in seen:
+            continue
+        seen.add(index)
+        deduped.append(poses[index])
+    if len(deduped) < max_views:
+        for index, pose in enumerate(poses):
+            if index in seen:
+                continue
+            deduped.append(pose)
+            seen.add(index)
+            if len(deduped) >= max_views:
+                break
+    return deduped
+
+
 def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, atlas_size: int):
     try:
         import cv2
@@ -415,16 +464,43 @@ def _rasterize_vertex_color_atlas(
     for face in faces:
         tri_uv = uv_pixels[face]
         tri_colors = colors[face]
-
-        polygon = np.rint(tri_uv).astype(np.int32)
-        polygon[:, 0] = np.clip(polygon[:, 0], 0, atlas_size - 1)
-        polygon[:, 1] = np.clip(polygon[:, 1], 0, atlas_size - 1)
-        if np.unique(polygon, axis=0).shape[0] < 3:
+        min_x = max(0, int(np.floor(np.min(tri_uv[:, 0]))))
+        max_x = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 0]))))
+        min_y = max(0, int(np.floor(np.min(tri_uv[:, 1]))))
+        max_y = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 1]))))
+        if min_x >= max_x or min_y >= max_y:
+            continue
+        triangle_area = _edge_function(tri_uv[0], tri_uv[1], tri_uv[2])
+        if abs(triangle_area) < 1e-5:
             continue
 
-        face_color = np.clip(np.rint(np.mean(tri_colors, axis=0)), 0, 255).astype(np.uint8)
-        cv2.fillConvexPoly(atlas, polygon, color=tuple(int(channel) for channel in face_color.tolist()))
-        cv2.fillConvexPoly(coverage, polygon, color=255)
+        xs = np.arange(min_x, max_x + 1, dtype=np.float32) + 0.5
+        ys = np.arange(min_y, max_y + 1, dtype=np.float32) + 0.5
+        grid_x, grid_y = np.meshgrid(xs, ys)
+        points = np.stack([grid_x, grid_y], axis=-1)
+
+        w0 = _edge_function(tri_uv[1], tri_uv[2], points)
+        w1 = _edge_function(tri_uv[2], tri_uv[0], points)
+        w2 = _edge_function(tri_uv[0], tri_uv[1], points)
+        if triangle_area < 0:
+            inside = (w0 <= 0) & (w1 <= 0) & (w2 <= 0)
+        else:
+            inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+        if not np.any(inside):
+            continue
+
+        w0 = w0 / triangle_area
+        w1 = w1 / triangle_area
+        w2 = w2 / triangle_area
+        interpolated = (
+            w0[..., None] * tri_colors[0][None, None, :]
+            + w1[..., None] * tri_colors[1][None, None, :]
+            + w2[..., None] * tri_colors[2][None, None, :]
+        )
+        patch = atlas[min_y : max_y + 1, min_x : max_x + 1]
+        patch_coverage = coverage[min_y : max_y + 1, min_x : max_x + 1]
+        patch[inside] = np.clip(np.rint(interpolated[inside]), 0, 255).astype(np.uint8)
+        patch_coverage[inside] = 255
 
     if np.any(coverage):
         kernel_size = max(1, int(config.delivery_texture_fill_kernel))
@@ -435,6 +511,10 @@ def _rasterize_vertex_color_atlas(
 
     observed_pixel_count = int(np.count_nonzero(coverage))
     return atlas, observed_pixel_count
+
+
+def _edge_function(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    return (c[..., 0] - a[0]) * (b[1] - a[1]) - (c[..., 1] - a[1]) * (b[0] - a[0])
 
 
 def _existing_vertex_colors(mesh) -> np.ndarray | None:

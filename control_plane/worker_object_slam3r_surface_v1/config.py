@@ -144,13 +144,16 @@ class WorkerConfig:
         "OBJECT_SLAM3R_SURFACE_DELIVERY_PRESERVE_GEOMETRY",
         True,
     )
-    delivery_target_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TARGET_FACE_COUNT", 50000)
-    delivery_hard_max_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_HARD_MAX_FACE_COUNT", 80000)
+    delivery_target_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TARGET_FACE_COUNT", 120000)
+    delivery_hard_max_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_HARD_MAX_FACE_COUNT", 160000)
     delivery_component_min_faces: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_MIN_FACES", 128)
     delivery_component_ratio_floor: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_RATIO_FLOOR", 0.01)
-    delivery_texture_max_views: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MAX_VIEWS", 3)
-    delivery_texture_atlas_size: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_ATLAS_SIZE", 1024)
+    delivery_texture_max_views: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MAX_VIEWS", 8)
+    delivery_texture_atlas_size: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_ATLAS_SIZE", 2048)
     delivery_texture_fill_kernel: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_FILL_KERNEL", 5)
+    delivery_taubin_iterations: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_ITERATIONS", 8)
+    delivery_taubin_lambda: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_LAMBDA", 0.45)
+    delivery_taubin_nu: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_NU", -0.5)
 
     sugar_repo: str = os.environ.get(
         "OBJECT_SLAM3R_SURFACE_SUGAR_REPO",
