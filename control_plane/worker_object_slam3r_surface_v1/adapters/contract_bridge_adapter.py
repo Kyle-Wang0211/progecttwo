@@ -17,6 +17,7 @@ from ..context import JobContext
 def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
     assert ctx.slam3r_dir is not None
     assert ctx.sparse2dgs_dir is not None
+    assert ctx.curated_dir is not None
 
     preds_dir = ctx.slam3r_dir / "preds"
     if not preds_dir.exists():
@@ -35,7 +36,16 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
     recon_utils = _load_slam3r_recon_utils()
     rotmat2qvec = _load_sparse2dgs_rotmat2qvec()
 
-    selected_frame_indices = _select_sparse2dgs_view_indices(local_pcds.shape[0], target_views=3)
+    curated_frame_paths = sorted(
+        path
+        for path in ctx.curated_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
+    selected_frame_target = max(3, min(int(config.sparse2dgs_target_views), local_pcds.shape[0]))
+    selected_frame_indices = _select_sparse2dgs_view_indices(
+        local_pcds.shape[0],
+        target_views=selected_frame_target,
+    )
     scene_root = Path(config.sparse2dgs_repo) / "DTU_Sparse" / ctx.job_id
     if scene_root.exists():
         shutil.rmtree(scene_root)
@@ -191,8 +201,14 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         "images_dir": str(images_dir),
         "sparse_dir": str(sparse_dir),
         "frame_count": int(local_pcds.shape[0]),
+        "selected_frame_target": int(selected_frame_target),
         "selected_frame_indices": selected_frame_indices,
         "selected_frame_count": len(selected_frame_indices),
+        "selected_curated_filenames": [
+            curated_frame_paths[index].name
+            for index in selected_frame_indices
+            if 0 <= index < len(curated_frame_paths)
+        ],
         "point_count": int(point_id - 1),
         "source_image_size": [source_width, source_height],
         "exported_image_size": [width, height],

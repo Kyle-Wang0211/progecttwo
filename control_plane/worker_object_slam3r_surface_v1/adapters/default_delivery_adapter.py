@@ -98,11 +98,15 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "watertight_after": bool(topology_summary["watertight_after"]),
         "hole_fill_iterations": int(topology_summary["hole_fill_iterations"]),
         "holes_repaired": bool(topology_summary["holes_repaired"]),
+        "voxel_fallback_used": bool(topology_summary.get("voxel_fallback_used", False)),
+        "watertight_gate_passed": bool(topology_summary["watertight_after"]),
     }
     (ctx.delivery_dir / config.delivery_mesh_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    if config.delivery_enforce_watertight and not topology_summary["watertight_after"]:
+        raise RuntimeError("delivery_mesh_not_watertight")
     return destination
 
 
@@ -122,7 +126,8 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         poses,
         max_views=max(1, int(config.delivery_texture_max_views)),
     )
-    loaded_views = _load_projection_views(
+    loaded_views = _load_delivery_projection_views(
+        ctx=ctx,
         images_dir=ctx.sparse2dgs_scene_dir / "images",
         cameras=cameras,
         poses=projected_views,
@@ -147,6 +152,7 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         "default_asset": str(glb_path),
         "projection_mode": "per_texel_best_view_photo_projection",
         "texture_bake_mode": "uv_atlas_from_visible_photo_projection",
+        "projection_source": "curated_center_crop_highres",
         "projected_view_count": len(loaded_views),
         "observed_vertex_count": int(observed_vertex_count),
         "face_count": int(len(textured_mesh.faces)),
@@ -257,6 +263,7 @@ def _repair_mesh_topology(mesh):
         "watertight_after": bool(getattr(mesh, "is_watertight", False)),
         "hole_fill_iterations": 0,
         "holes_repaired": False,
+        "voxel_fallback_used": False,
     }
     try:
         import trimesh
@@ -300,8 +307,34 @@ def _repair_mesh_topology(mesh):
         if bool(getattr(mesh, "is_watertight", False)):
             break
 
+    if not bool(getattr(mesh, "is_watertight", False)):
+        voxel_mesh = _voxelize_watertight_mesh(mesh)
+        if voxel_mesh is not None:
+            mesh = voxel_mesh
+            summary["voxel_fallback_used"] = True
+
     summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
     return mesh, summary
+
+
+def _voxelize_watertight_mesh(mesh):
+    try:
+        bounds = np.asarray(mesh.bounds, dtype=np.float64)
+        extent = bounds[1] - bounds[0]
+        max_extent = float(np.max(extent))
+        if not math.isfinite(max_extent) or max_extent <= 1e-6:
+            return None
+        voxel_resolution = max(48, int(config.delivery_watertight_voxel_resolution))
+        pitch = max(max_extent / float(voxel_resolution), 1e-4)
+        voxel_grid = mesh.voxelized(pitch)
+        voxel_grid = voxel_grid.fill()
+        watertight_mesh = voxel_grid.marching_cubes
+        if watertight_mesh is None or len(watertight_mesh.faces) == 0:
+            return None
+        watertight_mesh.remove_unreferenced_vertices()
+        return watertight_mesh
+    except Exception:
+        return None
 
 
 def _smooth_mesh(mesh):
@@ -455,6 +488,46 @@ def _sample_projected_views(poses: list[_ImagePose], *, max_views: int) -> list[
     return deduped
 
 
+def _load_delivery_projection_views(
+    *,
+    ctx: JobContext,
+    images_dir: Path,
+    cameras: dict[int, _Camera],
+    poses: list[_ImagePose],
+) -> list[_ProjectionView]:
+    projection_views: list[_ProjectionView] = []
+    loaded_pose_names: set[str] = set()
+    curated_paths = _sorted_curated_frame_paths(ctx)
+
+    for pose in poses:
+        camera = cameras.get(pose.camera_id)
+        if camera is None:
+            continue
+        curated_path = _resolve_curated_projection_path(curated_paths, pose.name)
+        if curated_path is None:
+            continue
+        projection_view = _load_curated_projection_view(
+            curated_path=curated_path,
+            camera=camera,
+            pose=pose,
+        )
+        if projection_view is None:
+            continue
+        projection_views.append(projection_view)
+        loaded_pose_names.add(pose.name)
+
+    missing_poses = [pose for pose in poses if pose.name not in loaded_pose_names]
+    if missing_poses:
+        projection_views.extend(
+            _load_projection_views(
+                images_dir=images_dir,
+                cameras=cameras,
+                poses=missing_poses,
+            )
+        )
+    return projection_views
+
+
 def _load_projection_views(
     *,
     images_dir: Path,
@@ -486,6 +559,80 @@ def _load_projection_views(
             )
         )
     return projection_views
+
+
+def _sorted_curated_frame_paths(ctx: JobContext) -> list[Path]:
+    if ctx.curated_dir is None or not ctx.curated_dir.exists():
+        return []
+    return sorted(
+        path
+        for path in ctx.curated_dir.iterdir()
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
+
+
+def _resolve_curated_projection_path(curated_paths: list[Path], pose_name: str) -> Path | None:
+    stem = Path(pose_name).stem
+    try:
+        frame_index = int(stem)
+    except ValueError:
+        return None
+    if frame_index < 0 or frame_index >= len(curated_paths):
+        return None
+    return curated_paths[frame_index]
+
+
+def _load_curated_projection_view(
+    *,
+    curated_path: Path,
+    camera: _Camera,
+    pose: _ImagePose,
+) -> _ProjectionView | None:
+    from PIL import Image
+
+    if not curated_path.exists():
+        return None
+
+    image = np.asarray(Image.open(curated_path).convert("RGB"), dtype=np.float64)
+    square = _center_crop_square(image)
+    target_size = max(256, int(config.delivery_projection_image_size))
+    output_size = min(square.shape[0], target_size)
+    if output_size <= 0:
+        return None
+    if square.shape[0] != output_size:
+        square = np.asarray(
+            Image.fromarray(square.astype(np.uint8), mode="RGB").resize((output_size, output_size), Image.BILINEAR),
+            dtype=np.float64,
+        )
+
+    scale = float(output_size) / max(float(camera.width), 1.0)
+    scaled_camera = _Camera(
+        width=int(output_size),
+        height=int(output_size),
+        fx=float(camera.fx * scale),
+        fy=float(camera.fy * scale),
+        cx=float(camera.cx * scale),
+        cy=float(camera.cy * scale),
+    )
+    rotation = _qvec_to_rotmat(pose.qvec)
+    translation = np.asarray(pose.tvec, dtype=np.float64)
+    center = -(rotation.T @ translation)
+    return _ProjectionView(
+        pose=pose,
+        camera=scaled_camera,
+        image=square,
+        rotation=rotation,
+        translation=translation,
+        center=center,
+    )
+
+
+def _center_crop_square(image: np.ndarray) -> np.ndarray:
+    height, width = image.shape[:2]
+    side = min(height, width)
+    top = max(0, (height - side) // 2)
+    left = max(0, (width - side) // 2)
+    return np.ascontiguousarray(image[top : top + side, left : left + side])
 
 
 def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, projection_views: list[_ProjectionView], atlas_size: int):
