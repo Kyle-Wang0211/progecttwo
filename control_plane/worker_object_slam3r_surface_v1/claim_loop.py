@@ -389,10 +389,8 @@ def run_once(
             progress_fraction=0.99,
             action=lambda current_ctx, _tracker: client.upload_artifact_manifest(
                 current_ctx.job_id,
-                {
-                    "worker_id": worker_id,
-                    "manifest": default_manifest,
-                },
+                default_manifest,
+                worker_id=current_ctx.worker_id,
             ),
         )
 

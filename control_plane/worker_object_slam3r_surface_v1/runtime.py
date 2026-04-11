@@ -116,8 +116,21 @@ class ControlPlaneClient:
     def runtime(self, job_id: str, payload: dict[str, Any]) -> None:
         self._json("POST", f"/v1/jobs/{job_id}/runtime", payload)
 
-    def upload_artifact_manifest(self, job_id: str, payload: dict[str, Any]) -> None:
-        self._json("POST", f"/v1/jobs/{job_id}/artifact-manifest", payload)
+    def upload_artifact_manifest(
+        self,
+        job_id: str,
+        payload: dict[str, Any],
+        *,
+        worker_id: str,
+    ) -> None:
+        self._json(
+            "POST",
+            f"/v1/jobs/{job_id}/artifact-manifest",
+            {
+                "worker_id": worker_id,
+                "manifest": payload,
+            },
+        )
 
     def complete(self, job_id: str, worker_id: str, title: str, detail: str) -> None:
         self._json(
