@@ -75,6 +75,7 @@ def curate_frames(ctx: JobContext) -> None:
     visually_valid_frame_count = 0
     client_live_backfill_count = 0
     client_live_rejected_count = 0
+    client_live_soft_outlier_count = 0
 
     if used_client_live_selection:
         minimum_slam_frames = max(
@@ -96,6 +97,7 @@ def curate_frames(ctx: JobContext) -> None:
             metric = _score_frame(frame_paths[index])
             if metric is None:
                 unreadable_frames.append(frame_paths[index].name)
+                client_live_rejected_count += 1
                 continue
             readable_frame_count += 1
             if not _passes_visual_thresholds(
@@ -104,9 +106,9 @@ def curate_frames(ctx: JobContext) -> None:
                 dark_threshold=dark_threshold,
                 bright_threshold=bright_threshold,
             ):
-                client_live_rejected_count += 1
-                continue
-            visually_valid_frame_count += 1
+                client_live_soft_outlier_count += 1
+            else:
+                visually_valid_frame_count += 1
             curated_unique.append(metric)
 
         if len(curated_unique) < minimum_slam_frames:
@@ -207,6 +209,7 @@ def curate_frames(ctx: JobContext) -> None:
                 "client_live_timestamp_count": len(client_live_timestamps_ms),
                 "client_live_backfill_count": client_live_backfill_count,
                 "client_live_rejected_count": client_live_rejected_count,
+                "client_live_soft_outlier_count": client_live_soft_outlier_count,
                 "thresholds": {
                     "blur_threshold_laplacian": blur_threshold,
                     "dark_threshold_brightness": dark_threshold,
@@ -416,6 +419,8 @@ def _supplement_client_selected_frames(
             break
 
     return accepted
+
+
 
 
 def _nearest_unused_index(
