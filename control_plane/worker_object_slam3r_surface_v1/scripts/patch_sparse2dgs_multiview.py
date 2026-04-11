@@ -76,6 +76,41 @@ def patch_loss_utils_py(path: Path) -> bool:
     return True
 
 
+def patch_gaussian_model_py(path: Path) -> bool:
+    text = path.read_text()
+    if "object_slam3r_surface_multiview_update_points" in text:
+        return False
+
+    old = (
+        "            view_index = self.view_indexs[i].squeeze() > 0.5 # 3n\n"
+        "            selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)\n"
+        "            selected_pts_mask_all = selected_pts_mask[None, :].repeat(3, 1).reshape(-1)# n -> 3n\n"
+        "            selected_pts_mask_all = torch.logical_and(selected_pts_mask_all, view_index.cuda())\n"
+    )
+    new = (
+        "            # object_slam3r_surface_multiview_update_points: upstream assumes exactly 3 views.\n"
+        "            view_index = self.view_indexs[i].squeeze() > 0.5\n"
+        "            selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)\n"
+        "            point_count = max(int(selected_pts_mask.shape[0]), 1)\n"
+        "            total_count = int(view_index.shape[0])\n"
+        "            repeat_count = max(total_count // point_count, 1)\n"
+        "            selected_pts_mask_all = selected_pts_mask[None, :].repeat(repeat_count, 1).reshape(-1)\n"
+        "            if selected_pts_mask_all.shape[0] < total_count:\n"
+        "                pad = total_count - selected_pts_mask_all.shape[0]\n"
+        "                selected_pts_mask_all = torch.cat([\n"
+        "                    selected_pts_mask_all,\n"
+        "                    torch.zeros(pad, device=selected_pts_mask.device, dtype=torch.bool),\n"
+        "                ])\n"
+        "            elif selected_pts_mask_all.shape[0] > total_count:\n"
+        "                selected_pts_mask_all = selected_pts_mask_all[:total_count]\n"
+        "            selected_pts_mask_all = torch.logical_and(selected_pts_mask_all, view_index.cuda())\n"
+    )
+    if old not in text:
+        raise RuntimeError(f"expected Sparse2DGS gaussian_model.py pattern not found in {path}")
+    path.write_text(text.replace(old, new))
+    return True
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print("usage: patch_sparse2dgs_multiview.py <repo_dir>", file=sys.stderr)
@@ -84,13 +119,15 @@ def main() -> int:
     repo_dir = Path(sys.argv[1]).resolve()
     train_py = repo_dir / "train.py"
     loss_utils_py = repo_dir / "utils" / "loss_utils.py"
-    if not train_py.is_file() or not loss_utils_py.is_file():
+    gaussian_model_py = repo_dir / "scene" / "gaussian_model.py"
+    if not train_py.is_file() or not loss_utils_py.is_file() or not gaussian_model_py.is_file():
         print(f"sparse2dgs_patch_target_missing: {repo_dir}", file=sys.stderr)
         return 2
 
     changed = False
     changed |= patch_train_py(train_py)
     changed |= patch_loss_utils_py(loss_utils_py)
+    changed |= patch_gaussian_model_py(gaussian_model_py)
     print("sparse2dgs_multiview_patch=applied" if changed else "sparse2dgs_multiview_patch=already_applied")
     return 0
 

@@ -37,10 +37,12 @@ def run_sparse2dgs_surface_reconstruction(
     if not command:
         raise RuntimeError("sparse2dgs_command_not_configured")
 
+    log_path = ctx.sparse2dgs_dir / "sparse2dgs_train.log"
     _run_sparse2dgs_command(
         command,
         cwd=str(Path(config.sparse2dgs_repo)),
         timeout=config.sparse2dgs_stage_timeout_sec,
+        log_path=log_path,
         progress_callback=progress_callback,
     )
 
@@ -55,6 +57,7 @@ def run_sparse2dgs_surface_reconstruction(
         "slam3r_summary": str(ctx.slam3r_dir / config.slam3r_summary_filename),
         "output_dir": str(ctx.sparse2dgs_dir),
         "default_asset": str(default_asset),
+        "train_log": str(log_path),
     }
     (ctx.sparse2dgs_dir / config.sparse2dgs_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
@@ -105,70 +108,118 @@ def _run_sparse2dgs_command(
     *,
     cwd: str,
     timeout: int,
+    log_path: Path,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> None:
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=False,
-        bufsize=0,
-        env=env,
-    )
+    with log_path.open("w", encoding="utf-8") as log_handle:
+        _write_sparse2dgs_log_header(log_handle, command=command, cwd=cwd, timeout=timeout)
 
-    assert process.stdout is not None
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ)
-    start_time = time.monotonic()
-    trailing = ""
-    last_reported: list[tuple[int, int] | None] = [None]
-
-    try:
-        while True:
-            if time.monotonic() - start_time > timeout:
-                process.kill()
-                raise subprocess.TimeoutExpired(command, timeout)
-
-            events = selector.select(timeout=1.0)
-            if not events:
-                if process.poll() is not None:
-                    break
-                continue
-
-            for key, _ in events:
-                chunk = os.read(key.fd, 8192)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-
-                decoded = chunk.decode("utf-8", errors="replace")
-                sys.stdout.write(decoded)
-                sys.stdout.flush()
-                trailing = _consume_sparse2dgs_output(
-                    trailing + decoded,
-                    progress_callback=progress_callback,
-                    last_reported=last_reported,
-                )
-
-            if process.poll() is not None and not selector.get_map():
-                break
-    finally:
-        selector.close()
-
-    if trailing:
-        _emit_sparse2dgs_progress(
-            trailing,
-            progress_callback=progress_callback,
-            last_reported=last_reported,
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=False,
+            bufsize=0,
+            env=env,
         )
 
-    return_code = process.wait()
-    if return_code != 0:
-        raise subprocess.CalledProcessError(return_code, command)
+        assert process.stdout is not None
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        start_time = time.monotonic()
+        trailing = ""
+        last_reported: list[tuple[int, int] | None] = [None]
+
+        try:
+            while True:
+                if time.monotonic() - start_time > timeout:
+                    process.kill()
+                    _write_sparse2dgs_log_footer(
+                        log_handle,
+                        status="timeout",
+                        elapsed_sec=time.monotonic() - start_time,
+                    )
+                    raise subprocess.TimeoutExpired(command, timeout)
+
+                events = selector.select(timeout=1.0)
+                if not events:
+                    if process.poll() is not None:
+                        break
+                    continue
+
+                for key, _ in events:
+                    chunk = os.read(key.fd, 8192)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+
+                    decoded = chunk.decode("utf-8", errors="replace")
+                    sys.stdout.write(decoded)
+                    sys.stdout.flush()
+                    log_handle.write(decoded)
+                    log_handle.flush()
+                    trailing = _consume_sparse2dgs_output(
+                        trailing + decoded,
+                        progress_callback=progress_callback,
+                        last_reported=last_reported,
+                    )
+
+                if process.poll() is not None and not selector.get_map():
+                    break
+        finally:
+            selector.close()
+
+        if trailing:
+            _emit_sparse2dgs_progress(
+                trailing,
+                progress_callback=progress_callback,
+                last_reported=last_reported,
+            )
+
+        return_code = process.wait()
+        elapsed_sec = time.monotonic() - start_time
+        _write_sparse2dgs_log_footer(
+            log_handle,
+            status="ok" if return_code == 0 else "failed",
+            elapsed_sec=elapsed_sec,
+            return_code=return_code,
+        )
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, command)
+
+
+def _write_sparse2dgs_log_header(
+    log_handle,
+    *,
+    command: list[str],
+    cwd: str,
+    timeout: int,
+) -> None:
+    log_handle.write(f"[sparse2dgs] cwd={cwd}\n")
+    log_handle.write(f"[sparse2dgs] timeout_sec={timeout}\n")
+    log_handle.write(f"[sparse2dgs] command={shlex.join(command)}\n")
+    log_handle.write("[sparse2dgs] --- begin combined stdout/stderr ---\n")
+    log_handle.flush()
+
+
+def _write_sparse2dgs_log_footer(
+    log_handle,
+    *,
+    status: str,
+    elapsed_sec: float,
+    return_code: int | None = None,
+) -> None:
+    log_handle.write("\n[sparse2dgs] --- end combined stdout/stderr ---\n")
+    log_handle.write(f"[sparse2dgs] status={status}\n")
+    if return_code is not None:
+        log_handle.write(f"[sparse2dgs] return_code={return_code}\n")
+    log_handle.write(f"[sparse2dgs] elapsed_sec={elapsed_sec:.2f}\n")
+    log_handle.flush()
 
 
 def _consume_sparse2dgs_output(
