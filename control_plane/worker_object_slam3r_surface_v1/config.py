@@ -163,6 +163,10 @@ class WorkerConfig:
         -0.15,
     )
     delivery_hole_fill_iterations: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_HOLE_FILL_ITERATIONS", 3)
+    delivery_aggressive_repair_face_cap: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_DELIVERY_AGGRESSIVE_REPAIR_FACE_CAP",
+        250000,
+    )
     delivery_enforce_watertight: bool = _env_flag("OBJECT_SLAM3R_SURFACE_DELIVERY_ENFORCE_WATERTIGHT", False)
     delivery_watertight_voxel_resolution: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_WATERTIGHT_VOXEL_RESOLUTION", 192)
     delivery_watertight_voxel_min_resolution: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_WATERTIGHT_VOXEL_MIN_RESOLUTION", 64)

@@ -83,6 +83,10 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "hole_fill_iterations": int(topology_summary["hole_fill_iterations"]) + int(final_topology_summary["hole_fill_iterations"]),
         "holes_repaired": bool(topology_summary["holes_repaired"] or final_topology_summary["holes_repaired"]),
         "voxel_fallback_used": bool(topology_summary.get("voxel_fallback_used", False) or final_topology_summary.get("voxel_fallback_used", False)),
+        "aggressive_repair_allowed": bool(
+            topology_summary.get("aggressive_repair_allowed", True)
+            and final_topology_summary.get("aggressive_repair_allowed", True)
+        ),
         "closure_strategy": str(final_topology_summary.get("closure_strategy", topology_summary.get("closure_strategy", "native_repair"))),
     }
 
@@ -109,6 +113,7 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "hole_fill_iterations": int(topology_summary["hole_fill_iterations"]),
         "holes_repaired": bool(topology_summary["holes_repaired"]),
         "voxel_fallback_used": bool(topology_summary.get("voxel_fallback_used", False)),
+        "aggressive_repair_allowed": bool(topology_summary.get("aggressive_repair_allowed", True)),
         "watertight_gate_passed": bool(topology_summary["watertight_after"]),
         "closure_strategy": str(topology_summary.get("closure_strategy", "native_repair")),
     }
@@ -267,13 +272,15 @@ def _drop_degenerate_faces(mesh):
 
 
 def _repair_mesh_topology(mesh):
+    aggressive_repair_allowed = len(mesh.faces) <= int(config.delivery_aggressive_repair_face_cap)
     summary = {
         "watertight_before": bool(getattr(mesh, "is_watertight", False)),
         "watertight_after": bool(getattr(mesh, "is_watertight", False)),
         "hole_fill_iterations": 0,
         "holes_repaired": False,
         "voxel_fallback_used": False,
-        "closure_strategy": "native_repair",
+        "closure_strategy": "native_repair" if aggressive_repair_allowed else "conservative_open_mesh",
+        "aggressive_repair_allowed": bool(aggressive_repair_allowed),
     }
     try:
         import trimesh
@@ -282,6 +289,29 @@ def _repair_mesh_topology(mesh):
 
     repair = getattr(trimesh, "repair", None)
     if repair is None:
+        return mesh, summary
+
+    if not aggressive_repair_allowed:
+        try:
+            if hasattr(repair, "fix_winding"):
+                repair.fix_winding(mesh)
+        except Exception:
+            pass
+        try:
+            if hasattr(repair, "fix_inversion"):
+                try:
+                    repair.fix_inversion(mesh, multibody=True)
+                except TypeError:
+                    repair.fix_inversion(mesh)
+        except Exception:
+            pass
+        try:
+            mesh.remove_unreferenced_vertices()
+        except Exception:
+            pass
+        summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
+        if not summary["watertight_after"]:
+            summary["closure_strategy"] = "best_effort_open_mesh"
         return mesh, summary
 
     for _ in range(max(1, int(config.delivery_hole_fill_iterations))):
@@ -319,24 +349,14 @@ def _repair_mesh_topology(mesh):
 
     if not bool(getattr(mesh, "is_watertight", False)):
         voxel_mesh = _voxelize_watertight_mesh(mesh)
-        if voxel_mesh is not None:
+        if voxel_mesh is not None and _is_reasonable_watertight_fallback(mesh, voxel_mesh):
             mesh = voxel_mesh
             summary["voxel_fallback_used"] = True
             summary["closure_strategy"] = "voxel_fill"
 
-    if not bool(getattr(mesh, "is_watertight", False)):
-        hull_mesh = _convex_hull_mesh(mesh)
-        if hull_mesh is not None:
-            mesh = hull_mesh
-            summary["closure_strategy"] = "convex_hull"
-
-    if not bool(getattr(mesh, "is_watertight", False)):
-        box_mesh = _bounding_box_mesh(mesh)
-        if box_mesh is not None:
-            mesh = box_mesh
-            summary["closure_strategy"] = "bounding_box"
-
     summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
+    if not summary["watertight_after"]:
+        summary["closure_strategy"] = "best_effort_open_mesh"
     return mesh, summary
 
 
@@ -369,32 +389,21 @@ def _voxelize_watertight_mesh(mesh):
     return None
 
 
-def _convex_hull_mesh(mesh):
+def _is_reasonable_watertight_fallback(source_mesh, candidate_mesh) -> bool:
     try:
-        hull = mesh.convex_hull
-        if hull is None or len(hull.faces) == 0:
-            return None
-        hull.remove_unreferenced_vertices()
-        return hull
+        source_faces = int(len(source_mesh.faces))
+        candidate_faces = int(len(candidate_mesh.faces))
     except Exception:
-        return None
+        return False
+    if source_faces <= 0 or candidate_faces <= 0:
+        return False
+    if not bool(getattr(candidate_mesh, "is_watertight", False)):
+        return False
 
-
-def _bounding_box_mesh(mesh):
-    try:
-        import trimesh
-
-        bounds = np.asarray(mesh.bounds, dtype=np.float64)
-        extent = bounds[1] - bounds[0]
-        if np.any(~np.isfinite(extent)) or float(np.max(extent)) <= 1e-8:
-            return None
-        transform = np.eye(4, dtype=np.float64)
-        transform[:3, 3] = np.mean(bounds, axis=0)
-        box = trimesh.creation.box(extents=extent, transform=transform)
-        box.remove_unreferenced_vertices()
-        return box
-    except Exception:
-        return None
+    # Reject "successful" closures that collapse a detailed mesh into a tiny hull-like shell.
+    min_faces = 2048 if source_faces >= 50_000 else 256
+    min_ratio = 0.02 if source_faces >= 50_000 else 0.005
+    return candidate_faces >= max(min_faces, int(source_faces * min_ratio))
 
 
 def _smooth_mesh(mesh):
