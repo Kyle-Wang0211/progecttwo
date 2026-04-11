@@ -82,7 +82,6 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "watertight_after": bool(final_topology_summary["watertight_after"]),
         "hole_fill_iterations": int(topology_summary["hole_fill_iterations"]) + int(final_topology_summary["hole_fill_iterations"]),
         "holes_repaired": bool(topology_summary["holes_repaired"] or final_topology_summary["holes_repaired"]),
-        "voxel_fallback_used": bool(topology_summary.get("voxel_fallback_used", False) or final_topology_summary.get("voxel_fallback_used", False)),
         "aggressive_repair_allowed": bool(
             topology_summary.get("aggressive_repair_allowed", True)
             and final_topology_summary.get("aggressive_repair_allowed", True)
@@ -112,9 +111,8 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "watertight_after": bool(topology_summary["watertight_after"]),
         "hole_fill_iterations": int(topology_summary["hole_fill_iterations"]),
         "holes_repaired": bool(topology_summary["holes_repaired"]),
-        "voxel_fallback_used": bool(topology_summary.get("voxel_fallback_used", False)),
         "aggressive_repair_allowed": bool(topology_summary.get("aggressive_repair_allowed", True)),
-        "watertight_gate_passed": bool(topology_summary["watertight_after"]),
+        "open_surface_ready": bool(len(mesh.faces) > 0),
         "closure_strategy": str(topology_summary.get("closure_strategy", "native_repair")),
     }
     (ctx.delivery_dir / config.delivery_mesh_summary_filename).write_text(
@@ -137,7 +135,8 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         raise RuntimeError("delivery_texture_contract_missing")
 
     projected_views = _sample_projected_views(
-        poses,
+        ctx=ctx,
+        poses=poses,
         max_views=max(1, int(config.delivery_texture_max_views)),
     )
     loaded_views = _load_delivery_projection_views(
@@ -166,7 +165,7 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         "default_asset": str(glb_path),
         "projection_mode": "per_texel_best_view_photo_projection",
         "texture_bake_mode": "uv_atlas_from_visible_photo_projection",
-        "projection_source": "curated_center_crop_highres",
+        "projection_source": "curated_resized_highres",
         "projected_view_count": len(loaded_views),
         "observed_vertex_count": int(observed_vertex_count),
         "face_count": int(len(textured_mesh.faces)),
@@ -278,9 +277,9 @@ def _repair_mesh_topology(mesh):
         "watertight_after": bool(getattr(mesh, "is_watertight", False)),
         "hole_fill_iterations": 0,
         "holes_repaired": False,
-        "voxel_fallback_used": False,
         "closure_strategy": "boundary_preserving_native_repair" if aggressive_repair_allowed else "boundary_preserving_open_mesh",
         "aggressive_repair_allowed": bool(aggressive_repair_allowed),
+        "small_hole_patches": 0,
     }
     try:
         import trimesh
@@ -340,6 +339,11 @@ def _repair_mesh_topology(mesh):
                 summary["holes_repaired"] = bool(summary["holes_repaired"] or repaired)
         except Exception:
             pass
+        patched_mesh, patched_count = _patch_small_boundary_loops(mesh)
+        if patched_count > 0:
+            mesh = patched_mesh
+            summary["small_hole_patches"] += int(patched_count)
+            summary["holes_repaired"] = True
         try:
             mesh.remove_unreferenced_vertices()
         except Exception:
@@ -347,63 +351,140 @@ def _repair_mesh_topology(mesh):
         if bool(getattr(mesh, "is_watertight", False)):
             break
 
-    if config.delivery_enforce_watertight and config.delivery_enable_voxel_watertight_fallback and not bool(getattr(mesh, "is_watertight", False)):
-        voxel_mesh = _voxelize_watertight_mesh(mesh)
-        if voxel_mesh is not None and _is_reasonable_watertight_fallback(mesh, voxel_mesh):
-            mesh = voxel_mesh
-            summary["voxel_fallback_used"] = True
-            summary["closure_strategy"] = "voxel_fill"
-
     summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
     if not summary["watertight_after"]:
         summary["closure_strategy"] = "boundary_preserving_open_mesh"
     return mesh, summary
 
 
-def _voxelize_watertight_mesh(mesh):
+def _patch_small_boundary_loops(mesh) -> tuple[Any, int]:
     try:
-        bounds = np.asarray(mesh.bounds, dtype=np.float64)
-        extent = bounds[1] - bounds[0]
-        max_extent = float(np.max(extent))
-        if not math.isfinite(max_extent) or max_extent <= 1e-6:
-            return None
-        start_resolution = max(48, int(config.delivery_watertight_voxel_resolution))
-        min_resolution = max(24, int(config.delivery_watertight_voxel_min_resolution))
-        tried: set[int] = set()
-        resolution = start_resolution
-        while resolution >= min_resolution:
-            if resolution in tried:
-                break
-            tried.add(resolution)
-            pitch = max(max_extent / float(resolution), 1e-4)
-            voxel_grid = mesh.voxelized(pitch)
-            voxel_grid = voxel_grid.fill()
-            watertight_mesh = voxel_grid.marching_cubes
-            if watertight_mesh is not None and len(watertight_mesh.faces) > 0:
-                watertight_mesh.remove_unreferenced_vertices()
-                if bool(getattr(watertight_mesh, "is_watertight", False)):
-                    return watertight_mesh
-            resolution = int(resolution * 0.75)
+        import trimesh
     except Exception:
-        return None
-    return None
+        return mesh, 0
 
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if len(vertices) == 0 or len(faces) == 0:
+        return mesh, 0
 
-def _is_reasonable_watertight_fallback(source_mesh, candidate_mesh) -> bool:
+    loops = _extract_small_boundary_loops(
+        vertices=vertices,
+        faces=faces,
+        max_edges=max(3, int(config.delivery_small_hole_max_edges)),
+        max_perimeter_ratio=max(0.0, float(config.delivery_small_hole_max_perimeter_ratio)),
+    )
+    if not loops:
+        return mesh, 0
+
+    new_vertices = vertices.tolist()
+    new_faces = faces.tolist()
+    patched_count = 0
+    for loop in loops:
+        loop_points = vertices[np.asarray(loop, dtype=np.int64)]
+        centroid = loop_points.mean(axis=0)
+        if not np.all(np.isfinite(centroid)):
+            continue
+        centroid_index = len(new_vertices)
+        new_vertices.append(centroid.tolist())
+        for edge_index in range(len(loop)):
+            a = int(loop[edge_index])
+            b = int(loop[(edge_index + 1) % len(loop)])
+            new_faces.append([a, b, centroid_index])
+        patched_count += 1
+
+    repaired = trimesh.Trimesh(
+        vertices=np.asarray(new_vertices, dtype=np.float64),
+        faces=np.asarray(new_faces, dtype=np.int64),
+        process=False,
+    )
     try:
-        source_faces = int(len(source_mesh.faces))
-        candidate_faces = int(len(candidate_mesh.faces))
+        repaired.remove_unreferenced_vertices()
     except Exception:
-        return False
-    if source_faces <= 0 or candidate_faces <= 0:
-        return False
-    if not bool(getattr(candidate_mesh, "is_watertight", False)):
-        return False
+        pass
+    return repaired, patched_count
 
-    # Reject "successful" closures that collapse a detailed mesh into a tiny hull-like shell.
-    min_faces = 2048 if source_faces >= 50_000 else 256
-    min_ratio = 0.02 if source_faces >= 50_000 else 0.005
-    return candidate_faces >= max(min_faces, int(source_faces * min_ratio))
+
+def _extract_small_boundary_loops(
+    *,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    max_edges: int,
+    max_perimeter_ratio: float,
+) -> list[list[int]]:
+    edge_pairs = np.sort(
+        np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]),
+        axis=1,
+    )
+    unique_edges, counts = np.unique(edge_pairs, axis=0, return_counts=True)
+    boundary_edges = unique_edges[counts == 1]
+    if boundary_edges.size == 0:
+        return []
+
+    adjacency: dict[int, list[int]] = {}
+    for start, end in boundary_edges.tolist():
+        adjacency.setdefault(int(start), []).append(int(end))
+        adjacency.setdefault(int(end), []).append(int(start))
+
+    bounds = np.asarray([vertices.min(axis=0), vertices.max(axis=0)], dtype=np.float64)
+    bbox_diag = float(np.linalg.norm(bounds[1] - bounds[0]))
+    perimeter_limit = bbox_diag * max_perimeter_ratio if bbox_diag > 1e-6 else math.inf
+
+    loops: list[list[int]] = []
+    used_edges: set[tuple[int, int]] = set()
+    for start, neighbors in adjacency.items():
+        if len(neighbors) != 2:
+            continue
+        for neighbor in neighbors:
+            edge_key = tuple(sorted((start, neighbor)))
+            if edge_key in used_edges:
+                continue
+            loop = _trace_boundary_loop(start, neighbor, adjacency, used_edges)
+            if len(loop) < 3 or len(loop) > max_edges:
+                continue
+            perimeter = _boundary_loop_perimeter(vertices, loop)
+            if perimeter_limit < math.inf and perimeter > perimeter_limit:
+                continue
+            loops.append(loop)
+    return loops
+
+
+def _trace_boundary_loop(
+    start: int,
+    next_vertex: int,
+    adjacency: dict[int, list[int]],
+    used_edges: set[tuple[int, int]],
+) -> list[int]:
+    loop = [start]
+    previous = start
+    current = next_vertex
+    used_edges.add(tuple(sorted((start, next_vertex))))
+    while True:
+        if current == start:
+            break
+        if current in loop:
+            return []
+        loop.append(current)
+        neighbors = adjacency.get(current, [])
+        if len(neighbors) != 2:
+            return []
+        candidate = neighbors[0] if neighbors[1] == previous else neighbors[1]
+        edge_key = tuple(sorted((current, candidate)))
+        if edge_key in used_edges and candidate != start:
+            return []
+        used_edges.add(edge_key)
+        previous, current = current, candidate
+    return loop
+
+
+def _boundary_loop_perimeter(vertices: np.ndarray, loop: list[int]) -> float:
+    if len(loop) < 2:
+        return 0.0
+    perimeter = 0.0
+    for index, vertex_index in enumerate(loop):
+        next_index = loop[(index + 1) % len(loop)]
+        perimeter += float(np.linalg.norm(vertices[vertex_index] - vertices[next_index]))
+    return perimeter
 
 
 def _smooth_mesh(mesh):
@@ -415,7 +496,12 @@ def _smooth_mesh(mesh):
     if faces.ndim != 2 or faces.shape[1] != 3 or len(vertices) == 0:
         return mesh
     boundary_mask = _boundary_vertex_mask(faces, vertex_count=len(vertices))
-    movable_indices = np.flatnonzero(~boundary_mask)
+    feature_mask = _feature_vertex_mask(
+        vertices=vertices,
+        faces=faces,
+        feature_angle_deg=float(config.delivery_feature_preserve_angle_deg),
+    )
+    movable_indices = np.flatnonzero(~boundary_mask & ~feature_mask)
     if movable_indices.size == 0:
         return mesh
     neighbors = _vertex_neighbors(faces, vertex_count=len(vertices))
@@ -480,6 +566,45 @@ def _boundary_preserving_laplacian_pass(
         centroid = vertices[neighbor_indices].mean(axis=0)
         updated[index] = vertices[index] + factor * (centroid - vertices[index])
     return updated
+
+
+def _feature_vertex_mask(
+    *,
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    feature_angle_deg: float,
+) -> np.ndarray:
+    if len(vertices) == 0 or len(faces) == 0:
+        return np.zeros(len(vertices), dtype=bool)
+    threshold_cosine = math.cos(math.radians(max(0.0, feature_angle_deg)))
+    face_normals = _face_normals(vertices, faces)
+    edge_to_faces: dict[tuple[int, int], list[int]] = {}
+    for face_index, face in enumerate(faces.tolist()):
+        a, b, c = int(face[0]), int(face[1]), int(face[2])
+        for start, end in ((a, b), (b, c), (c, a)):
+            edge_to_faces.setdefault(tuple(sorted((start, end))), []).append(face_index)
+    mask = np.zeros(len(vertices), dtype=bool)
+    for edge, face_indices in edge_to_faces.items():
+        mark_feature = len(face_indices) != 2
+        if not mark_feature and len(face_indices) == 2:
+            normal_a = face_normals[face_indices[0]]
+            normal_b = face_normals[face_indices[1]]
+            cosine = float(np.clip(np.dot(normal_a, normal_b), -1.0, 1.0))
+            mark_feature = cosine <= threshold_cosine
+        if mark_feature:
+            mask[list(edge)] = True
+    return mask
+
+
+def _face_normals(vertices: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    tri_vertices = vertices[faces]
+    normals = np.cross(
+        tri_vertices[:, 1] - tri_vertices[:, 0],
+        tri_vertices[:, 2] - tri_vertices[:, 0],
+    )
+    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+    lengths[lengths == 0] = 1.0
+    return normals / lengths
 
 
 def _simplify_mesh(mesh, *, target_faces: int):
@@ -588,31 +713,120 @@ def _project_vertex_colors(
     return rgba, int(np.count_nonzero(observed))
 
 
-def _sample_projected_views(poses: list[_ImagePose], *, max_views: int) -> list[_ImagePose]:
+def _sample_projected_views(ctx: JobContext, poses: list[_ImagePose], *, max_views: int) -> list[_ImagePose]:
     if not poses:
         return []
     if len(poses) <= max_views:
         return poses
     if max_views <= 1:
         return [poses[len(poses) // 2]]
+    quality_scores = _projection_pose_quality_scores(ctx, poses)
+    descriptors = _projection_pose_descriptors(poses)
+    selected_indices = _greedy_pose_selection(
+        descriptors=descriptors,
+        quality_scores=quality_scores,
+        target_count=max_views,
+    )
+    return [poses[index] for index in selected_indices]
 
-    indices = np.linspace(0, len(poses) - 1, num=max_views, dtype=np.int64)
-    deduped: list[_ImagePose] = []
-    seen: set[int] = set()
-    for index in indices.tolist():
-        if index in seen:
+
+def _projection_pose_quality_scores(ctx: JobContext, poses: list[_ImagePose]) -> np.ndarray:
+    summary = _read_json(ctx.output_dir / "curate_frames.json") or {}
+    frames = summary.get("frames")
+    if not isinstance(frames, list):
+        return np.ones(len(poses), dtype=np.float64)
+    by_stem: dict[str, float] = {}
+    for frame in frames:
+        if not isinstance(frame, dict):
             continue
-        seen.add(index)
-        deduped.append(poses[index])
-    if len(deduped) < max_views:
-        for index, pose in enumerate(poses):
-            if index in seen:
+        name = str(frame.get("name") or "").strip()
+        if not name:
+            continue
+        stem = Path(name).stem
+        target_signal = float(frame.get("target_signal") or 0.0)
+        orb_feature_count = float(frame.get("orb_feature_count") or 0.0)
+        hard_penalty = len(frame.get("hard_reject_reasons") or [])
+        soft_penalty = len(frame.get("soft_downgrade_reasons") or [])
+        score = 1.0
+        score += min(target_signal, 1.0) * 2.0
+        score += min(orb_feature_count / 1200.0, 1.5)
+        score -= hard_penalty * 0.50
+        score -= soft_penalty * 0.20
+        by_stem[stem] = max(score, 0.05)
+    raw_scores = np.asarray([by_stem.get(Path(pose.name).stem, 1.0) for pose in poses], dtype=np.float64)
+    min_value = float(raw_scores.min(initial=1.0))
+    max_value = float(raw_scores.max(initial=1.0))
+    if max_value - min_value < 1e-6:
+        return np.ones(len(poses), dtype=np.float64)
+    return np.clip((raw_scores - min_value) / max(max_value - min_value, 1e-6), 0.0, 1.0)
+
+
+def _projection_pose_descriptors(poses: list[_ImagePose]) -> np.ndarray:
+    if not poses:
+        return np.zeros((0, 7), dtype=np.float64)
+    centers = np.zeros((len(poses), 3), dtype=np.float64)
+    forwards = np.zeros((len(poses), 3), dtype=np.float64)
+    for index, pose in enumerate(poses):
+        rotation = _qvec_to_rotmat(pose.qvec)
+        translation = np.asarray(pose.tvec, dtype=np.float64)
+        center = -(rotation.T @ translation)
+        forward = rotation.T @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        norm = float(np.linalg.norm(forward))
+        if norm > 1e-6:
+            forward = forward / norm
+        centers[index] = center
+        forwards[index] = forward
+    center_mean = centers.mean(axis=0)
+    center_scale = np.maximum(centers.std(axis=0), 1e-3)
+    centers = (centers - center_mean) / center_scale
+    time_feature = np.linspace(0.0, 1.0, num=len(poses), dtype=np.float64)[:, None]
+    return np.concatenate([centers * 1.8, forwards * 1.2, time_feature * 0.6], axis=1)
+
+
+def _greedy_pose_selection(
+    *,
+    descriptors: np.ndarray,
+    quality_scores: np.ndarray,
+    target_count: int,
+) -> list[int]:
+    count = int(descriptors.shape[0])
+    if count <= target_count:
+        return list(range(count))
+    selected: list[int] = []
+    used: set[int] = set()
+    seed_candidates = [
+        int(np.argmax(quality_scores)),
+        0,
+        count - 1,
+    ]
+    for seed in seed_candidates:
+        if seed in used:
+            continue
+        used.add(seed)
+        selected.append(seed)
+        if len(selected) >= target_count:
+            return sorted(selected)
+    while len(selected) < target_count:
+        best_index: int | None = None
+        best_score = float("-inf")
+        for candidate in range(count):
+            if candidate in used:
                 continue
-            deduped.append(pose)
-            seen.add(index)
-            if len(deduped) >= max_views:
-                break
-    return deduped
+            novelty = min(
+                float(np.linalg.norm(descriptors[candidate] - descriptors[selected_index]))
+                for selected_index in selected
+            )
+            temporal_gap = min(abs(candidate - selected_index) for selected_index in selected) / max(count - 1, 1)
+            score = novelty + temporal_gap * 0.35 + float(quality_scores[candidate]) * 0.20
+            if score > best_score:
+                best_score = score
+                best_index = candidate
+        if best_index is None:
+            break
+        used.add(best_index)
+        selected.append(best_index)
+    selected.sort()
+    return selected
 
 
 def _load_delivery_projection_views(
@@ -721,25 +935,28 @@ def _load_curated_projection_view(
         return None
 
     image = np.asarray(Image.open(curated_path).convert("RGB"), dtype=np.float64)
-    square = _center_crop_square(image)
     target_size = max(256, int(config.delivery_projection_image_size))
-    output_size = min(square.shape[0], target_size)
-    if output_size <= 0:
+    output_width, output_height = _resolve_projection_dimensions(
+        source_width=int(camera.width),
+        source_height=int(camera.height),
+        target_longest_side=target_size,
+    )
+    if output_width <= 0 or output_height <= 0:
         return None
-    if square.shape[0] != output_size:
-        square = np.asarray(
-            Image.fromarray(square.astype(np.uint8), mode="RGB").resize((output_size, output_size), Image.BILINEAR),
-            dtype=np.float64,
-        )
+    resized_image = np.asarray(
+        Image.fromarray(image.astype(np.uint8), mode="RGB").resize((output_width, output_height), Image.BILINEAR),
+        dtype=np.float64,
+    )
 
-    scale = float(output_size) / max(float(camera.width), 1.0)
+    scale_x = float(output_width) / max(float(camera.width), 1.0)
+    scale_y = float(output_height) / max(float(camera.height), 1.0)
     scaled_camera = _Camera(
-        width=int(output_size),
-        height=int(output_size),
-        fx=float(camera.fx * scale),
-        fy=float(camera.fy * scale),
-        cx=float(camera.cx * scale),
-        cy=float(camera.cy * scale),
+        width=int(output_width),
+        height=int(output_height),
+        fx=float(camera.fx * scale_x),
+        fy=float(camera.fy * scale_y),
+        cx=float(camera.cx * scale_x),
+        cy=float(camera.cy * scale_y),
     )
     rotation = _qvec_to_rotmat(pose.qvec)
     translation = np.asarray(pose.tvec, dtype=np.float64)
@@ -747,19 +964,24 @@ def _load_curated_projection_view(
     return _ProjectionView(
         pose=pose,
         camera=scaled_camera,
-        image=square,
+        image=resized_image,
         rotation=rotation,
         translation=translation,
         center=center,
     )
 
 
-def _center_crop_square(image: np.ndarray) -> np.ndarray:
-    height, width = image.shape[:2]
-    side = min(height, width)
-    top = max(0, (height - side) // 2)
-    left = max(0, (width - side) // 2)
-    return np.ascontiguousarray(image[top : top + side, left : left + side])
+def _resolve_projection_dimensions(
+    *,
+    source_width: int,
+    source_height: int,
+    target_longest_side: int,
+) -> tuple[int, int]:
+    longest_side = max(source_width, source_height)
+    if longest_side <= 0:
+        return 0, 0
+    scale = float(target_longest_side) / float(longest_side)
+    return max(64, int(round(source_width * scale))), max(64, int(round(source_height * scale)))
 
 
 def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, projection_views: list[_ProjectionView], atlas_size: int):
@@ -913,28 +1135,35 @@ def _rasterize_photo_projection_atlas(
 
     photo_projected_pixel_count = 0
     projected_face_count = 0
+    ranked_candidates = [
+        _rank_projection_views(vertices[face], projection_views)
+        for face in faces
+    ]
+    preferred_views = _smooth_face_view_assignments(
+        faces=faces,
+        ranked_candidates=ranked_candidates,
+    )
 
-    for face in faces:
+    for face_index, face in enumerate(faces):
         tri_vertices = vertices[face]
         tri_uv = uv_pixels[face]
-        best_view = _select_best_projection_view(tri_vertices, projection_views)
-        if best_view is None:
-            continue
-        projected = _project_face_to_photo(
-            tri_vertices=tri_vertices,
-            tri_uv=tri_uv,
-            view=best_view,
-            atlas=atlas,
-            coverage=coverage,
+        ordered_candidates = _ordered_projection_candidates(
+            ranked_candidates[face_index],
+            preferred_view_index=preferred_views[face_index],
         )
-        if projected <= 0:
-            projected = _fill_face_from_centroid_sample(
+        if not ordered_candidates:
+            continue
+        projected = 0
+        for view_index, _ in ordered_candidates:
+            projected = _project_face_to_photo(
                 tri_vertices=tri_vertices,
                 tri_uv=tri_uv,
-                view=best_view,
+                view=projection_views[view_index],
                 atlas=atlas,
                 coverage=coverage,
             )
+            if projected > 0:
+                break
         if projected > 0:
             projected_face_count += 1
             photo_projected_pixel_count += projected
@@ -950,29 +1179,29 @@ def _rasterize_photo_projection_atlas(
     return atlas, observed_pixel_count, int(photo_projected_pixel_count), int(projected_face_count)
 
 
-def _select_best_projection_view(
+def _rank_projection_views(
     tri_vertices: np.ndarray,
     projection_views: list[_ProjectionView],
-) -> _ProjectionView | None:
+) -> list[tuple[int, float]]:
     if not projection_views:
-        return None
+        return []
     normal = np.cross(tri_vertices[1] - tri_vertices[0], tri_vertices[2] - tri_vertices[0])
     normal_norm = np.linalg.norm(normal)
     if normal_norm < 1e-8:
-        return None
+        return []
     normal = normal / normal_norm
     centroid = np.mean(tri_vertices, axis=0)
 
-    best_view = _select_best_projection_view_with_min_cosine(
+    ranked = _rank_projection_views_with_min_cosine(
         tri_vertices=tri_vertices,
         projection_views=projection_views,
         centroid=centroid,
         normal=normal,
         min_cosine=float(config.delivery_texture_min_view_cosine),
     )
-    if best_view is not None:
-        return best_view
-    return _select_best_projection_view_with_min_cosine(
+    if ranked:
+        return ranked
+    return _rank_projection_views_with_min_cosine(
         tri_vertices=tri_vertices,
         projection_views=projection_views,
         centroid=centroid,
@@ -981,17 +1210,16 @@ def _select_best_projection_view(
     )
 
 
-def _select_best_projection_view_with_min_cosine(
+def _rank_projection_views_with_min_cosine(
     *,
     tri_vertices: np.ndarray,
     projection_views: list[_ProjectionView],
     centroid: np.ndarray,
     normal: np.ndarray,
     min_cosine: float,
-) -> _ProjectionView | None:
-    best_score = -math.inf
-    best_view: _ProjectionView | None = None
-    for view in projection_views:
+) -> list[tuple[int, float]]:
+    ranked: list[tuple[int, float]] = []
+    for view_index, view in enumerate(projection_views):
         camera_points = (view.rotation @ tri_vertices.T).T + view.translation
         depth = camera_points[:, 2]
         if np.any(depth <= 1e-5):
@@ -1022,10 +1250,84 @@ def _select_best_projection_view_with_min_cosine(
             continue
 
         score = max(cosine, 0.05) * math.sqrt(area) / max(float(np.mean(depth)), 1e-3)
-        if score > best_score:
-            best_score = score
-            best_view = view
-    return best_view
+        ranked.append((view_index, float(score)))
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return ranked
+
+
+def _face_adjacency(faces: np.ndarray) -> list[list[int]]:
+    adjacency: list[set[int]] = [set() for _ in range(len(faces))]
+    edge_to_faces: dict[tuple[int, int], list[int]] = {}
+    for face_index, face in enumerate(faces.tolist()):
+        a, b, c = int(face[0]), int(face[1]), int(face[2])
+        for start, end in ((a, b), (b, c), (c, a)):
+            edge_to_faces.setdefault(tuple(sorted((start, end))), []).append(face_index)
+    for face_indices in edge_to_faces.values():
+        if len(face_indices) != 2:
+            continue
+        first, second = face_indices
+        adjacency[first].add(second)
+        adjacency[second].add(first)
+    return [sorted(neighbors) for neighbors in adjacency]
+
+
+def _smooth_face_view_assignments(
+    *,
+    faces: np.ndarray,
+    ranked_candidates: list[list[tuple[int, float]]],
+) -> list[int | None]:
+    assignments: list[int | None] = [
+        candidates[0][0] if candidates else None
+        for candidates in ranked_candidates
+    ]
+    adjacency = _face_adjacency(faces)
+    margin = max(0.0, float(config.delivery_texture_view_consistency_margin))
+    rounds = max(0, int(config.delivery_texture_view_smoothing_rounds))
+    for _ in range(rounds):
+        updated = assignments.copy()
+        for face_index, neighbors in enumerate(adjacency):
+            candidates = ranked_candidates[face_index]
+            if not candidates or not neighbors:
+                continue
+            score_by_view = {view_index: score for view_index, score in candidates}
+            current_view = assignments[face_index]
+            neighbor_counts: dict[int, int] = {}
+            for neighbor_index in neighbors:
+                neighbor_view = assignments[neighbor_index]
+                if neighbor_view is None:
+                    continue
+                neighbor_counts[neighbor_view] = neighbor_counts.get(neighbor_view, 0) + 1
+            if not neighbor_counts:
+                continue
+            dominant_view = max(
+                neighbor_counts,
+                key=lambda view_index: (neighbor_counts[view_index], score_by_view.get(view_index, -math.inf)),
+            )
+            if dominant_view == current_view or dominant_view not in score_by_view:
+                continue
+            current_score = score_by_view.get(current_view, candidates[0][1]) if current_view is not None else -math.inf
+            dominant_score = score_by_view[dominant_view]
+            if current_score <= 0.0:
+                if dominant_score > current_score:
+                    updated[face_index] = dominant_view
+                continue
+            if dominant_score >= current_score * (1.0 - margin):
+                updated[face_index] = dominant_view
+        assignments = updated
+    return assignments
+
+
+def _ordered_projection_candidates(
+    candidates: list[tuple[int, float]],
+    *,
+    preferred_view_index: int | None,
+) -> list[tuple[int, float]]:
+    if preferred_view_index is None or not candidates:
+        return candidates
+    preferred = [candidate for candidate in candidates if candidate[0] == preferred_view_index]
+    if not preferred:
+        return candidates
+    return preferred + [candidate for candidate in candidates if candidate[0] != preferred_view_index]
 
 
 def _project_face_to_photo(
@@ -1093,62 +1395,6 @@ def _project_face_to_photo(
     patch[valid_inside_indices[:, 0], valid_inside_indices[:, 1]] = sampled
     patch_coverage[valid_inside_indices[:, 0], valid_inside_indices[:, 1]] = 255
     return int(len(valid_inside_indices))
-
-
-def _fill_face_from_centroid_sample(
-    *,
-    tri_vertices: np.ndarray,
-    tri_uv: np.ndarray,
-    view: _ProjectionView,
-    atlas: np.ndarray,
-    coverage: np.ndarray,
-) -> int:
-    centroid = np.mean(tri_vertices, axis=0, keepdims=True)
-    camera_points = (view.rotation @ centroid.T).T + view.translation
-    depth = camera_points[:, 2]
-    if float(depth[0]) <= 1e-6:
-        return 0
-
-    u = view.camera.fx * (camera_points[:, 0] / depth) + view.camera.cx
-    v = view.camera.fy * (camera_points[:, 1] / depth) + view.camera.cy
-    if not (np.isfinite(u[0]) and np.isfinite(v[0])):
-        return 0
-    if u[0] < 0.0 or u[0] > (view.camera.width - 1) or v[0] < 0.0 or v[0] > (view.camera.height - 1):
-        return 0
-
-    sampled = _sample_bilinear_rgb(view.image, u, v)[0]
-    triangle_area = _edge_function(tri_uv[0], tri_uv[1], tri_uv[2])
-    if abs(triangle_area) < 1e-6:
-        return 0
-
-    atlas_size = atlas.shape[0]
-    min_x = max(0, int(np.floor(np.min(tri_uv[:, 0]))))
-    max_x = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 0]))))
-    min_y = max(0, int(np.floor(np.min(tri_uv[:, 1]))))
-    max_y = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 1]))))
-    if min_x >= max_x or min_y >= max_y:
-        return 0
-
-    xs = np.arange(min_x, max_x + 1, dtype=np.float64) + 0.5
-    ys = np.arange(min_y, max_y + 1, dtype=np.float64) + 0.5
-    grid_x, grid_y = np.meshgrid(xs, ys)
-    points = np.stack([grid_x, grid_y], axis=-1)
-
-    w0 = _edge_function(tri_uv[1], tri_uv[2], points)
-    w1 = _edge_function(tri_uv[2], tri_uv[0], points)
-    w2 = _edge_function(tri_uv[0], tri_uv[1], points)
-    if triangle_area < 0:
-        inside = (w0 <= 0) & (w1 <= 0) & (w2 <= 0)
-    else:
-        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
-    if not np.any(inside):
-        return 0
-
-    patch = atlas[min_y : max_y + 1, min_x : max_x + 1]
-    patch_coverage = coverage[min_y : max_y + 1, min_x : max_x + 1]
-    patch[inside] = sampled[None, :]
-    patch_coverage[inside] = 255
-    return int(np.count_nonzero(inside))
 
 
 def _sample_bilinear_rgb(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:

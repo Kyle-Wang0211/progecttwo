@@ -41,13 +41,9 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         for path in ctx.curated_dir.iterdir()
         if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
     )
+    if not curated_frame_paths:
+        raise RuntimeError("curated_frames_missing")
     frame_quality_weights = _load_curated_frame_weights(ctx, curated_frame_paths)
-    selected_frame_target = max(3, min(int(config.sparse2dgs_target_views), local_pcds.shape[0]))
-    selected_frame_indices = _select_sparse2dgs_view_indices(
-        local_pcds.shape[0],
-        target_views=selected_frame_target,
-        quality_weights=frame_quality_weights,
-    )
     scene_root = Path(config.sparse2dgs_repo) / "DTU_Sparse" / ctx.job_id
     if scene_root.exists():
         shutil.rmtree(scene_root)
@@ -100,6 +96,19 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         intrinsics.append(intrinsic)
 
     mean_intrinsic = np.mean(np.stack(intrinsics, axis=0), axis=0)
+    selection_camera_matrices = _estimate_selection_camera_matrices(
+        registered_pcds=registered_pcds,
+        mean_intrinsic=mean_intrinsic,
+        recon_utils=recon_utils,
+    )
+    selected_frame_target = min(local_pcds.shape[0], max(8, int(config.sparse2dgs_target_views)))
+    selected_frame_indices = _select_sparse2dgs_view_indices(
+        local_pcds.shape[0],
+        target_views=selected_frame_target,
+        quality_weights=frame_quality_weights,
+        camera_matrices=selection_camera_matrices,
+        images=rgb_imgs,
+    )
 
     for frame_idx in selected_frame_indices:
         img_name = f"{frame_idx:05d}"
@@ -108,9 +117,10 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
 
         predictor_image = _normalize_image(rgb_imgs[frame_idx])
         curated_path = curated_frame_paths[frame_idx] if 0 <= frame_idx < len(curated_frame_paths) else None
+        if curated_path is None:
+            raise RuntimeError(f"curated_bridge_frame_missing:{frame_idx}")
         export_image = _load_bridge_export_image(
             curated_path=curated_path,
-            fallback_image=predictor_image,
             width=width,
             height=height,
         )
@@ -124,11 +134,13 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
             intrinsic[0, :] *= scale_x
             intrinsic[1, :] *= scale_y
 
-        registered_pts = torch.from_numpy(registered_pcds[frame_idx]).float()
-        c2w, success = recon_utils.estimate_camera_pose(registered_pts, mean_intrinsic)
-        if not success:
-            pose_failed_indices.append(frame_idx)
-        w2c = np.linalg.inv(np.asarray(c2w, dtype=np.float64))
+        w2c = selection_camera_matrices[frame_idx]
+        if w2c is None:
+            registered_pts = torch.from_numpy(registered_pcds[frame_idx]).float()
+            c2w, success = recon_utils.estimate_camera_pose(registered_pts, mean_intrinsic)
+            if not success:
+                pose_failed_indices.append(frame_idx)
+            w2c = np.linalg.inv(np.asarray(c2w, dtype=np.float64))
 
         fx = float(intrinsic[0, 0])
         fy = float(intrinsic[1, 1])
@@ -409,11 +421,35 @@ def _load_curated_frame_weights(ctx: JobContext, curated_frame_paths: list[Path]
     return weights if weights else None
 
 
+def _estimate_selection_camera_matrices(
+    *,
+    registered_pcds: np.ndarray,
+    mean_intrinsic: np.ndarray,
+    recon_utils: Any,
+) -> list[np.ndarray | None]:
+    import torch
+
+    camera_matrices: list[np.ndarray | None] = []
+    for frame_idx in range(int(registered_pcds.shape[0])):
+        try:
+            registered_pts = torch.from_numpy(registered_pcds[frame_idx]).float()
+            c2w, success = recon_utils.estimate_camera_pose(registered_pts, mean_intrinsic)
+            if not success:
+                camera_matrices.append(None)
+                continue
+            camera_matrices.append(np.linalg.inv(np.asarray(c2w, dtype=np.float64)))
+        except Exception:
+            camera_matrices.append(None)
+    return camera_matrices
+
+
 def _select_sparse2dgs_view_indices(
     frame_count: int,
     *,
     target_views: int,
     quality_weights: list[float] | None = None,
+    camera_matrices: list[np.ndarray | None] | None = None,
+    images: np.ndarray | None = None,
 ) -> list[int]:
     if frame_count < target_views:
         raise RuntimeError(
@@ -421,45 +457,158 @@ def _select_sparse2dgs_view_indices(
         )
     if frame_count == target_views:
         return list(range(frame_count))
-    if quality_weights and len(quality_weights) == frame_count:
-        anchors = np.linspace(0, frame_count - 1, num=target_views).tolist()
-        search_radius = max(2, frame_count // max(target_views * 2, 1))
-        selected: list[int] = []
-        used: set[int] = set()
-        for anchor in anchors:
-            best_index: int | None = None
-            best_score = float("-inf")
-            for candidate in range(frame_count):
-                if candidate in used:
-                    continue
-                distance = abs(candidate - anchor)
-                if distance > search_radius and best_index is not None:
-                    continue
-                score = float(quality_weights[candidate]) - (distance / max(search_radius, 1)) * 0.18
-                if score > best_score:
-                    best_score = score
-                    best_index = candidate
-            if best_index is None:
-                raise RuntimeError("sparse2dgs_view_selection_failed")
-            used.add(best_index)
-            selected.append(best_index)
-        selected.sort()
-        return selected
-    indices = np.linspace(0, frame_count - 1, num=target_views)
-    unique = sorted({int(round(value)) for value in indices.tolist()})
-    if len(unique) != target_views:
-        unique = []
-        for value in indices.tolist():
-            candidate = int(round(value))
-            while candidate in unique and candidate < frame_count - 1:
-                candidate += 1
-            while candidate in unique and candidate > 0:
-                candidate -= 1
-            if candidate in unique:
-                raise RuntimeError("sparse2dgs_view_selection_failed")
-            unique.append(candidate)
-        unique.sort()
-    return unique
+    descriptors = _build_frame_selection_descriptors(
+        frame_count=frame_count,
+        camera_matrices=camera_matrices,
+        images=images,
+    )
+    normalized_quality = _normalize_quality_weights(
+        frame_count=frame_count,
+        quality_weights=quality_weights,
+    )
+    return _greedy_diverse_selection(
+        descriptors=descriptors,
+        target_count=target_views,
+        quality_scores=normalized_quality,
+    )
+
+
+def _build_frame_selection_descriptors(
+    *,
+    frame_count: int,
+    camera_matrices: list[np.ndarray | None] | None,
+    images: np.ndarray | None,
+) -> np.ndarray:
+    centers = np.zeros((frame_count, 3), dtype=np.float64)
+    forwards = np.zeros((frame_count, 3), dtype=np.float64)
+    valid_pose_mask = np.zeros(frame_count, dtype=bool)
+
+    if camera_matrices and len(camera_matrices) == frame_count:
+        for frame_idx, w2c in enumerate(camera_matrices):
+            if w2c is None:
+                continue
+            rotation = np.asarray(w2c[:3, :3], dtype=np.float64)
+            translation = np.asarray(w2c[:3, 3], dtype=np.float64)
+            center = -(rotation.T @ translation)
+            forward = rotation.T @ np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            norm = np.linalg.norm(forward)
+            if norm > 1e-6:
+                forward = forward / norm
+            centers[frame_idx] = center
+            forwards[frame_idx] = forward
+            valid_pose_mask[frame_idx] = True
+
+    if np.any(valid_pose_mask):
+        valid_centers = centers[valid_pose_mask]
+        center_mean = valid_centers.mean(axis=0)
+        center_scale = np.maximum(valid_centers.std(axis=0), 1e-3)
+        centers[valid_pose_mask] = (valid_centers - center_mean) / center_scale
+
+    contour_signatures = np.zeros((frame_count, 16), dtype=np.float64)
+    if images is not None and int(images.shape[0]) == frame_count:
+        for frame_idx in range(frame_count):
+            contour_signatures[frame_idx] = _frame_contour_signature(images[frame_idx])
+
+    time_feature = np.linspace(0.0, 1.0, num=frame_count, dtype=np.float64)[:, None]
+    return np.concatenate(
+        [
+            centers * 1.8,
+            forwards * 1.2,
+            contour_signatures * 0.9,
+            time_feature * 0.6,
+        ],
+        axis=1,
+    )
+
+
+def _frame_contour_signature(image: np.ndarray, *, grid_size: int = 4) -> np.ndarray:
+    rgb = _normalize_image(image).astype(np.float64)
+    grayscale = rgb.mean(axis=2) / 255.0
+    grad_y, grad_x = np.gradient(grayscale)
+    magnitude = np.hypot(grad_x, grad_y)
+    rows = np.array_split(np.arange(magnitude.shape[0]), grid_size)
+    cols = np.array_split(np.arange(magnitude.shape[1]), grid_size)
+    signature: list[float] = []
+    for row_indices in rows:
+        for col_indices in cols:
+            patch = magnitude[np.ix_(row_indices, col_indices)]
+            signature.append(float(np.mean(patch)))
+    descriptor = np.asarray(signature, dtype=np.float64)
+    norm = float(np.linalg.norm(descriptor))
+    if norm > 1e-8:
+        descriptor /= norm
+    return descriptor
+
+
+def _normalize_quality_weights(
+    *,
+    frame_count: int,
+    quality_weights: list[float] | None,
+) -> np.ndarray:
+    if not quality_weights or len(quality_weights) != frame_count:
+        return np.ones(frame_count, dtype=np.float64)
+    values = np.asarray(quality_weights, dtype=np.float64)
+    finite_mask = np.isfinite(values)
+    if not np.any(finite_mask):
+        return np.ones(frame_count, dtype=np.float64)
+    finite_values = values[finite_mask]
+    min_value = float(finite_values.min())
+    max_value = float(finite_values.max())
+    if max_value - min_value < 1e-6:
+        normalized = np.ones(frame_count, dtype=np.float64)
+    else:
+        normalized = (values - min_value) / max(max_value - min_value, 1e-6)
+        normalized[~finite_mask] = 0.0
+    return np.clip(normalized, 0.0, 1.0)
+
+
+def _greedy_diverse_selection(
+    *,
+    descriptors: np.ndarray,
+    target_count: int,
+    quality_scores: np.ndarray,
+) -> list[int]:
+    frame_count = int(descriptors.shape[0])
+    if frame_count <= target_count:
+        return list(range(frame_count))
+
+    selected: list[int] = []
+    used: set[int] = set()
+    seed_candidates = [
+        int(np.argmax(quality_scores)),
+        int(np.argmax(quality_scores[: max(1, frame_count // 4)])),
+        int(frame_count - max(1, frame_count // 4) + np.argmax(quality_scores[max(0, frame_count - max(1, frame_count // 4)) :])),
+    ]
+    for seed in seed_candidates:
+        if seed in used:
+            continue
+        used.add(seed)
+        selected.append(seed)
+        if len(selected) >= target_count:
+            return sorted(selected)
+
+    while len(selected) < target_count:
+        best_index: int | None = None
+        best_score = float("-inf")
+        for candidate in range(frame_count):
+            if candidate in used:
+                continue
+            novelty = min(
+                float(np.linalg.norm(descriptors[candidate] - descriptors[selected_index]))
+                for selected_index in selected
+            )
+            temporal_gap = min(abs(candidate - selected_index) for selected_index in selected) / max(frame_count - 1, 1)
+            score = novelty + temporal_gap * 0.35 + float(quality_scores[candidate]) * 0.20
+            if score > best_score:
+                best_score = score
+                best_index = candidate
+        if best_index is None:
+            raise RuntimeError("sparse2dgs_view_selection_failed")
+        used.add(best_index)
+        selected.append(best_index)
+
+    selected.sort()
+    return selected
 
 
 def _resize_image_if_needed(image: np.ndarray, *, width: int, height: int) -> np.ndarray:
@@ -473,23 +622,19 @@ def _resize_image_if_needed(image: np.ndarray, *, width: int, height: int) -> np
 
 def _load_bridge_export_image(
     *,
-    curated_path: Path | None,
-    fallback_image: np.ndarray,
+    curated_path: Path,
     width: int,
     height: int,
 ) -> np.ndarray:
     from PIL import Image
 
-    if curated_path is not None and curated_path.exists():
-        try:
-            with Image.open(curated_path) as image:
-                return np.asarray(
-                    image.convert("RGB").resize((width, height), Image.BILINEAR),
-                    dtype=np.uint8,
-                )
-        except Exception:
-            pass
-    return _resize_image_if_needed(fallback_image, width=width, height=height)
+    if not curated_path.exists():
+        raise RuntimeError(f"curated_bridge_frame_missing:{curated_path}")
+    with Image.open(curated_path) as image:
+        return np.asarray(
+            image.convert("RGB").resize((width, height), Image.BILINEAR),
+            dtype=np.uint8,
+        )
 
 
 def _resolve_bridge_export_dimensions(
@@ -498,15 +643,16 @@ def _resolve_bridge_export_dimensions(
     fallback_width: int,
     fallback_height: int,
 ) -> tuple[int, int, int, int, str]:
+    if not curated_frame_paths:
+        raise RuntimeError("curated_frames_missing")
     source_width = fallback_width
     source_height = fallback_height
-    image_source = "slam3r_lowres_contract"
+    image_source = "curated_original_resized"
     for curated_path in curated_frame_paths:
         image_size = _read_image_size(curated_path)
         if image_size is None:
             continue
         source_width, source_height = image_size
-        image_source = "curated_original_resized"
         break
 
     max_dim = max(256, int(config.sparse2dgs_contract_max_image_size))
