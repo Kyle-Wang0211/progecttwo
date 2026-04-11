@@ -30,6 +30,16 @@ class _ImagePose:
     tvec: tuple[float, float, float]
 
 
+@dataclass(frozen=True)
+class _ProjectionView:
+    pose: _ImagePose
+    camera: _Camera
+    image: np.ndarray
+    rotation: np.ndarray
+    translation: np.ndarray
+    center: np.ndarray
+
+
 def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
     assert ctx.matcha_dir is not None
     assert ctx.delivery_dir is not None
@@ -47,6 +57,7 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
 
     mesh = _drop_small_components(mesh)
     mesh = _drop_degenerate_faces(mesh)
+    mesh, topology_summary = _repair_mesh_topology(mesh)
     mesh = _smooth_mesh(mesh)
 
     try:
@@ -83,6 +94,10 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "hard_max_face_count": int(config.delivery_hard_max_face_count),
         "component_min_faces": int(config.delivery_component_min_faces),
         "component_ratio_floor": float(config.delivery_component_ratio_floor),
+        "watertight_before": bool(topology_summary["watertight_before"]),
+        "watertight_after": bool(topology_summary["watertight_after"]),
+        "hole_fill_iterations": int(topology_summary["hole_fill_iterations"]),
+        "holes_repaired": bool(topology_summary["holes_repaired"]),
     }
     (ctx.delivery_dir / config.delivery_mesh_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
@@ -107,15 +122,19 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
         poses,
         max_views=max(1, int(config.delivery_texture_max_views)),
     )
-    vertex_colors, observed_vertex_count = _project_vertex_colors(
-        mesh=mesh,
+    loaded_views = _load_projection_views(
         images_dir=ctx.sparse2dgs_scene_dir / "images",
         cameras=cameras,
         poses=projected_views,
     )
+    vertex_colors, observed_vertex_count = _project_vertex_colors(
+        mesh=mesh,
+        projection_views=loaded_views,
+    )
     textured_mesh, atlas_summary = _bake_uv_textured_mesh(
         mesh=mesh,
         vertex_colors=vertex_colors,
+        projection_views=loaded_views,
         atlas_size=max(256, int(config.delivery_texture_atlas_size)),
     )
     glb_path = ctx.delivery_dir / "default_mesh.glb"
@@ -126,15 +145,17 @@ def bake_default_texture_delivery(ctx: JobContext) -> Path:
     summary = {
         "optimized_mesh": str(optimized_mesh),
         "default_asset": str(glb_path),
-        "projection_mode": "multi_view_vertex_color_projection",
-        "texture_bake_mode": "uv_atlas_from_projected_vertex_colors",
-        "projected_view_count": len(projected_views),
+        "projection_mode": "per_texel_best_view_photo_projection",
+        "texture_bake_mode": "uv_atlas_from_visible_photo_projection",
+        "projected_view_count": len(loaded_views),
         "observed_vertex_count": int(observed_vertex_count),
         "face_count": int(len(textured_mesh.faces)),
         "vertex_count": int(len(textured_mesh.vertices)),
         "atlas_size": int(atlas_summary["atlas_size"]),
         "atlas_observed_pixel_count": int(atlas_summary["observed_pixel_count"]),
         "atlas_coverage_ratio": float(atlas_summary["coverage_ratio"]),
+        "atlas_photo_projected_pixel_count": int(atlas_summary["photo_projected_pixel_count"]),
+        "atlas_photo_projected_face_count": int(atlas_summary["photo_projected_face_count"]),
         "glb_size_bytes": int(glb_size_bytes),
         "glb_size_mb": round(glb_size_bytes / (1024 * 1024), 3) if glb_size_bytes > 0 else 0.0,
     }
@@ -230,6 +251,59 @@ def _drop_degenerate_faces(mesh):
     return mesh
 
 
+def _repair_mesh_topology(mesh):
+    summary = {
+        "watertight_before": bool(getattr(mesh, "is_watertight", False)),
+        "watertight_after": bool(getattr(mesh, "is_watertight", False)),
+        "hole_fill_iterations": 0,
+        "holes_repaired": False,
+    }
+    try:
+        import trimesh
+    except Exception:
+        return mesh, summary
+
+    repair = getattr(trimesh, "repair", None)
+    if repair is None:
+        return mesh, summary
+
+    for _ in range(max(1, int(config.delivery_hole_fill_iterations))):
+        summary["hole_fill_iterations"] += 1
+        try:
+            if hasattr(mesh, "process"):
+                mesh.process(validate=True)
+        except Exception:
+            pass
+        try:
+            if hasattr(repair, "fix_winding"):
+                repair.fix_winding(mesh)
+        except Exception:
+            pass
+        try:
+            if hasattr(repair, "fix_inversion"):
+                try:
+                    repair.fix_inversion(mesh, multibody=True)
+                except TypeError:
+                    repair.fix_inversion(mesh)
+        except Exception:
+            pass
+        try:
+            if hasattr(repair, "fill_holes"):
+                repaired = repair.fill_holes(mesh)
+                summary["holes_repaired"] = bool(summary["holes_repaired"] or repaired)
+        except Exception:
+            pass
+        try:
+            mesh.remove_unreferenced_vertices()
+        except Exception:
+            pass
+        if bool(getattr(mesh, "is_watertight", False)):
+            break
+
+    summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
+    return mesh, summary
+
+
 def _smooth_mesh(mesh):
     iterations = max(0, int(config.delivery_taubin_iterations))
     if iterations <= 0:
@@ -287,12 +361,8 @@ def _simplify_target_faces(face_count: int, *, target_faces: int) -> int:
 def _project_vertex_colors(
     *,
     mesh,
-    images_dir: Path,
-    cameras: dict[int, _Camera],
-    poses: list[_ImagePose],
+    projection_views: list[_ProjectionView],
 ) -> tuple[np.ndarray, int]:
-    from PIL import Image
-
     vertices = np.asarray(mesh.vertices, dtype=np.float64)
     vertex_count = len(vertices)
     if vertex_count == 0:
@@ -310,17 +380,12 @@ def _project_vertex_colors(
     color_accum = np.zeros((vertex_count, 3), dtype=np.float64)
     weight_accum = np.zeros(vertex_count, dtype=np.float64)
 
-    for pose in poses:
-        camera = cameras.get(pose.camera_id)
-        if camera is None:
-            continue
-        image_path = images_dir / pose.name
-        if not image_path.exists():
-            continue
-        image = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.float64)
+    for view in projection_views:
+        camera = view.camera
+        image = view.image
         height, width = image.shape[:2]
-        rotation = _qvec_to_rotmat(pose.qvec)
-        translation = np.asarray(pose.tvec, dtype=np.float64)
+        rotation = view.rotation
+        translation = view.translation
         camera_points = (rotation @ vertices.T).T + translation
         depth = camera_points[:, 2]
         valid = depth > 1e-6
@@ -332,8 +397,7 @@ def _project_vertex_colors(
         valid &= np.isfinite(u) & np.isfinite(v)
         valid &= (u >= 0.0) & (u <= (width - 1)) & (v >= 0.0) & (v <= (height - 1))
         if np.any(valid):
-            camera_center = -(rotation.T @ translation)
-            view_dirs = camera_center[None, :] - vertices
+            view_dirs = view.center[None, :] - vertices
             view_norm = np.linalg.norm(view_dirs, axis=1, keepdims=True)
             view_norm[view_norm == 0] = 1.0
             view_dirs /= view_norm
@@ -391,9 +455,41 @@ def _sample_projected_views(poses: list[_ImagePose], *, max_views: int) -> list[
     return deduped
 
 
-def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, atlas_size: int):
+def _load_projection_views(
+    *,
+    images_dir: Path,
+    cameras: dict[int, _Camera],
+    poses: list[_ImagePose],
+) -> list[_ProjectionView]:
+    from PIL import Image
+
+    projection_views: list[_ProjectionView] = []
+    for pose in poses:
+        camera = cameras.get(pose.camera_id)
+        if camera is None:
+            continue
+        image_path = images_dir / pose.name
+        if not image_path.exists():
+            continue
+        image = np.asarray(Image.open(image_path).convert("RGB"), dtype=np.float64)
+        rotation = _qvec_to_rotmat(pose.qvec)
+        translation = np.asarray(pose.tvec, dtype=np.float64)
+        center = -(rotation.T @ translation)
+        projection_views.append(
+            _ProjectionView(
+                pose=pose,
+                camera=camera,
+                image=image,
+                rotation=rotation,
+                translation=translation,
+                center=center,
+            )
+        )
+    return projection_views
+
+
+def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, projection_views: list[_ProjectionView], atlas_size: int):
     try:
-        import cv2
         import trimesh
         import xatlas
         from PIL import Image
@@ -420,11 +516,20 @@ def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, atlas_size: int):
         baked_normals = None
     baked_colors = np.asarray(vertex_colors[:, :3], dtype=np.float32)[vmapping]
 
-    texture_rgb, observed_pixel_count = _rasterize_vertex_color_atlas(
+    fallback_rgb, fallback_coverage = _rasterize_vertex_color_atlas(
         uvs=uvs,
         faces=remapped_faces,
         colors=baked_colors,
         atlas_size=atlas_size,
+    )
+    texture_rgb, observed_pixel_count, projected_pixel_count, projected_face_count = _rasterize_photo_projection_atlas(
+        vertices=baked_vertices.astype(np.float64),
+        uvs=uvs,
+        faces=remapped_faces,
+        projection_views=projection_views,
+        atlas_size=atlas_size,
+        fallback_rgb=fallback_rgb,
+        fallback_coverage=fallback_coverage,
     )
 
     pil_image = Image.fromarray(texture_rgb, mode="RGB")
@@ -441,6 +546,8 @@ def _bake_uv_textured_mesh(*, mesh, vertex_colors: np.ndarray, atlas_size: int):
         "atlas_size": atlas_size,
         "observed_pixel_count": int(observed_pixel_count),
         "coverage_ratio": float(observed_pixel_count / max(1, atlas_size * atlas_size)),
+        "photo_projected_pixel_count": int(projected_pixel_count),
+        "photo_projected_face_count": int(projected_face_count),
     }
     return textured_mesh, atlas_summary
 
@@ -509,8 +616,198 @@ def _rasterize_vertex_color_atlas(
         mask = coverage == 0
         atlas[mask] = dilated[mask]
 
+    return atlas, coverage
+
+
+def _rasterize_photo_projection_atlas(
+    *,
+    vertices: np.ndarray,
+    uvs: np.ndarray,
+    faces: np.ndarray,
+    projection_views: list[_ProjectionView],
+    atlas_size: int,
+    fallback_rgb: np.ndarray,
+    fallback_coverage: np.ndarray,
+) -> tuple[np.ndarray, int, int, int]:
+    import cv2
+
+    atlas = fallback_rgb.copy()
+    coverage = fallback_coverage.copy()
+    uv_pixels = np.empty_like(uvs, dtype=np.float64)
+    uv_pixels[:, 0] = np.clip(uvs[:, 0], 0.0, 1.0) * float(atlas_size - 1)
+    uv_pixels[:, 1] = (1.0 - np.clip(uvs[:, 1], 0.0, 1.0)) * float(atlas_size - 1)
+
+    photo_projected_pixel_count = 0
+    projected_face_count = 0
+
+    for face in faces:
+        tri_vertices = vertices[face]
+        tri_uv = uv_pixels[face]
+        best_view = _select_best_projection_view(tri_vertices, projection_views)
+        if best_view is None:
+            continue
+        projected = _project_face_to_photo(
+            tri_vertices=tri_vertices,
+            tri_uv=tri_uv,
+            view=best_view,
+            atlas=atlas,
+            coverage=coverage,
+        )
+        if projected > 0:
+            projected_face_count += 1
+            photo_projected_pixel_count += projected
+
+    if np.any(coverage):
+        kernel_size = max(1, int(config.delivery_texture_fill_kernel))
+        kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+        dilated = cv2.dilate(atlas, kernel, iterations=1)
+        mask = coverage == 0
+        atlas[mask] = dilated[mask]
+
     observed_pixel_count = int(np.count_nonzero(coverage))
-    return atlas, observed_pixel_count
+    return atlas, observed_pixel_count, int(photo_projected_pixel_count), int(projected_face_count)
+
+
+def _select_best_projection_view(
+    tri_vertices: np.ndarray,
+    projection_views: list[_ProjectionView],
+) -> _ProjectionView | None:
+    if not projection_views:
+        return None
+    normal = np.cross(tri_vertices[1] - tri_vertices[0], tri_vertices[2] - tri_vertices[0])
+    normal_norm = np.linalg.norm(normal)
+    if normal_norm < 1e-8:
+        return None
+    normal = normal / normal_norm
+    centroid = np.mean(tri_vertices, axis=0)
+
+    best_score = -math.inf
+    best_view: _ProjectionView | None = None
+    for view in projection_views:
+        camera_points = (view.rotation @ tri_vertices.T).T + view.translation
+        depth = camera_points[:, 2]
+        if np.any(depth <= 1e-5):
+            continue
+        u = view.camera.fx * (camera_points[:, 0] / depth) + view.camera.cx
+        v = view.camera.fy * (camera_points[:, 1] / depth) + view.camera.cy
+        width = view.camera.width
+        height = view.camera.height
+        if np.any(~np.isfinite(u)) or np.any(~np.isfinite(v)):
+            continue
+        if np.any(u < 0.0) or np.any(u > (width - 1)) or np.any(v < 0.0) or np.any(v > (height - 1)):
+            continue
+
+        view_dir = view.center - centroid
+        view_norm = np.linalg.norm(view_dir)
+        if view_norm <= 1e-8:
+            continue
+        view_dir = view_dir / view_norm
+        cosine = float(np.dot(normal, view_dir))
+        if cosine <= float(config.delivery_texture_min_view_cosine):
+            continue
+
+        area = abs(
+            (u[1] - u[0]) * (v[2] - v[0])
+            - (v[1] - v[0]) * (u[2] - u[0])
+        ) * 0.5
+        if area <= 1e-4:
+            continue
+
+        score = (cosine * cosine) * math.sqrt(area) / max(float(np.mean(depth)), 1e-3)
+        if score > best_score:
+            best_score = score
+            best_view = view
+    return best_view
+
+
+def _project_face_to_photo(
+    *,
+    tri_vertices: np.ndarray,
+    tri_uv: np.ndarray,
+    view: _ProjectionView,
+    atlas: np.ndarray,
+    coverage: np.ndarray,
+) -> int:
+    triangle_area = _edge_function(tri_uv[0], tri_uv[1], tri_uv[2])
+    if abs(triangle_area) < 1e-6:
+        return 0
+
+    atlas_size = atlas.shape[0]
+    min_x = max(0, int(np.floor(np.min(tri_uv[:, 0]))))
+    max_x = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 0]))))
+    min_y = max(0, int(np.floor(np.min(tri_uv[:, 1]))))
+    max_y = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 1]))))
+    if min_x >= max_x or min_y >= max_y:
+        return 0
+
+    xs = np.arange(min_x, max_x + 1, dtype=np.float64) + 0.5
+    ys = np.arange(min_y, max_y + 1, dtype=np.float64) + 0.5
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    points = np.stack([grid_x, grid_y], axis=-1)
+
+    w0 = _edge_function(tri_uv[1], tri_uv[2], points)
+    w1 = _edge_function(tri_uv[2], tri_uv[0], points)
+    w2 = _edge_function(tri_uv[0], tri_uv[1], points)
+    if triangle_area < 0:
+        inside = (w0 <= 0) & (w1 <= 0) & (w2 <= 0)
+    else:
+        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+    if not np.any(inside):
+        return 0
+
+    w0 = w0 / triangle_area
+    w1 = w1 / triangle_area
+    w2 = w2 / triangle_area
+    positions = (
+        w0[..., None] * tri_vertices[0][None, None, :]
+        + w1[..., None] * tri_vertices[1][None, None, :]
+        + w2[..., None] * tri_vertices[2][None, None, :]
+    )
+    flat_positions = positions[inside]
+    camera_points = (view.rotation @ flat_positions.T).T + view.translation
+    depth = camera_points[:, 2]
+    valid = depth > 1e-6
+    if not np.any(valid):
+        return 0
+
+    u = view.camera.fx * (camera_points[:, 0] / depth) + view.camera.cx
+    v = view.camera.fy * (camera_points[:, 1] / depth) + view.camera.cy
+    valid &= np.isfinite(u) & np.isfinite(v)
+    valid &= (u >= 0.0) & (u <= (view.camera.width - 1)) & (v >= 0.0) & (v <= (view.camera.height - 1))
+    if not np.any(valid):
+        return 0
+
+    sampled = _sample_bilinear_rgb(view.image, u[valid], v[valid])
+    patch = atlas[min_y : max_y + 1, min_x : max_x + 1]
+    patch_coverage = coverage[min_y : max_y + 1, min_x : max_x + 1]
+    inside_indices = np.argwhere(inside)
+    valid_inside_indices = inside_indices[valid]
+    patch[valid_inside_indices[:, 0], valid_inside_indices[:, 1]] = sampled
+    patch_coverage[valid_inside_indices[:, 0], valid_inside_indices[:, 1]] = 255
+    return int(len(valid_inside_indices))
+
+
+def _sample_bilinear_rgb(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    height, width = image.shape[:2]
+    u0 = np.floor(u).astype(np.int64)
+    v0 = np.floor(v).astype(np.int64)
+    u1 = np.clip(u0 + 1, 0, width - 1)
+    v1 = np.clip(v0 + 1, 0, height - 1)
+    u0 = np.clip(u0, 0, width - 1)
+    v0 = np.clip(v0, 0, height - 1)
+
+    du = (u - u0).astype(np.float64)
+    dv = (v - v0).astype(np.float64)
+
+    top_left = image[v0, u0]
+    top_right = image[v0, u1]
+    bottom_left = image[v1, u0]
+    bottom_right = image[v1, u1]
+
+    top = top_left * (1.0 - du[:, None]) + top_right * du[:, None]
+    bottom = bottom_left * (1.0 - du[:, None]) + bottom_right * du[:, None]
+    interpolated = top * (1.0 - dv[:, None]) + bottom * dv[:, None]
+    return np.clip(np.rint(interpolated), 0, 255).astype(np.uint8)
 
 
 def _edge_function(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:

@@ -98,7 +98,7 @@ def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
             "surface": "sparse2dgs",
             "mesh_extraction": "matcha",
             "delivery_mesh": "optimized_mesh",
-            "texture_bake": "projected_vertex_color_glb" if default_kind == "glb" else "disabled",
+            "texture_bake": "visible_photo_projection_glb" if default_kind == "glb" else "disabled",
             "rendering": "default_mesh_glb" if default_kind == "glb" else "disabled",
             "hq": "disabled",
         },

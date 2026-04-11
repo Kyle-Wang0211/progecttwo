@@ -151,6 +151,11 @@ class WorkerConfig:
     delivery_texture_max_views: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MAX_VIEWS", 16)
     delivery_texture_atlas_size: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_ATLAS_SIZE", 4096)
     delivery_texture_fill_kernel: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_FILL_KERNEL", 5)
+    delivery_texture_min_view_cosine: float = _env_float(
+        "OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MIN_VIEW_COSINE",
+        0.1,
+    )
+    delivery_hole_fill_iterations: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_HOLE_FILL_ITERATIONS", 3)
     delivery_taubin_iterations: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_ITERATIONS", 8)
     delivery_taubin_lambda: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_LAMBDA", 0.45)
     delivery_taubin_nu: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_NU", -0.5)
