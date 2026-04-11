@@ -25,6 +25,8 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 
+"${PYTHON_BIN}" "${SCRIPT_DIR}/patch_sparse2dgs_multiview.py" "${REPO_DIR}"
+
 DEFAULT_CKPT_LINK="${REPO_DIR}/model_clmvsnet.ckpt"
 OFFICIAL_CKPT_PATH="${REPO_DIR}/MVS/CLMVSNet/pretrained_model/model.ckpt"
 if [[ ! -f "${DEFAULT_CKPT_LINK}" && -f "${OFFICIAL_CKPT_PATH}" ]]; then
