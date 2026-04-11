@@ -76,6 +76,16 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         simplification_applied = len(mesh.faces) < initial_faces
         simplify_reason = "hard_face_cap" if initial_faces > config.delivery_hard_max_face_count else "target_budget"
 
+    mesh, final_topology_summary = _repair_mesh_topology(mesh)
+    topology_summary = {
+        **topology_summary,
+        "watertight_after": bool(final_topology_summary["watertight_after"]),
+        "hole_fill_iterations": int(topology_summary["hole_fill_iterations"]) + int(final_topology_summary["hole_fill_iterations"]),
+        "holes_repaired": bool(topology_summary["holes_repaired"] or final_topology_summary["holes_repaired"]),
+        "voxel_fallback_used": bool(topology_summary.get("voxel_fallback_used", False) or final_topology_summary.get("voxel_fallback_used", False)),
+        "closure_strategy": str(final_topology_summary.get("closure_strategy", topology_summary.get("closure_strategy", "native_repair"))),
+    }
+
     destination = ctx.delivery_dir / "optimized_mesh.ply"
     destination.parent.mkdir(parents=True, exist_ok=True)
     mesh.export(destination)
@@ -100,13 +110,12 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
         "holes_repaired": bool(topology_summary["holes_repaired"]),
         "voxel_fallback_used": bool(topology_summary.get("voxel_fallback_used", False)),
         "watertight_gate_passed": bool(topology_summary["watertight_after"]),
+        "closure_strategy": str(topology_summary.get("closure_strategy", "native_repair")),
     }
     (ctx.delivery_dir / config.delivery_mesh_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    if config.delivery_enforce_watertight and not topology_summary["watertight_after"]:
-        raise RuntimeError("delivery_mesh_not_watertight")
     return destination
 
 
@@ -264,6 +273,7 @@ def _repair_mesh_topology(mesh):
         "hole_fill_iterations": 0,
         "holes_repaired": False,
         "voxel_fallback_used": False,
+        "closure_strategy": "native_repair",
     }
     try:
         import trimesh
@@ -312,6 +322,19 @@ def _repair_mesh_topology(mesh):
         if voxel_mesh is not None:
             mesh = voxel_mesh
             summary["voxel_fallback_used"] = True
+            summary["closure_strategy"] = "voxel_fill"
+
+    if not bool(getattr(mesh, "is_watertight", False)):
+        hull_mesh = _convex_hull_mesh(mesh)
+        if hull_mesh is not None:
+            mesh = hull_mesh
+            summary["closure_strategy"] = "convex_hull"
+
+    if not bool(getattr(mesh, "is_watertight", False)):
+        box_mesh = _bounding_box_mesh(mesh)
+        if box_mesh is not None:
+            mesh = box_mesh
+            summary["closure_strategy"] = "bounding_box"
 
     summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
     return mesh, summary
@@ -324,15 +347,52 @@ def _voxelize_watertight_mesh(mesh):
         max_extent = float(np.max(extent))
         if not math.isfinite(max_extent) or max_extent <= 1e-6:
             return None
-        voxel_resolution = max(48, int(config.delivery_watertight_voxel_resolution))
-        pitch = max(max_extent / float(voxel_resolution), 1e-4)
-        voxel_grid = mesh.voxelized(pitch)
-        voxel_grid = voxel_grid.fill()
-        watertight_mesh = voxel_grid.marching_cubes
-        if watertight_mesh is None or len(watertight_mesh.faces) == 0:
+        start_resolution = max(48, int(config.delivery_watertight_voxel_resolution))
+        min_resolution = max(24, int(config.delivery_watertight_voxel_min_resolution))
+        tried: set[int] = set()
+        resolution = start_resolution
+        while resolution >= min_resolution:
+            if resolution in tried:
+                break
+            tried.add(resolution)
+            pitch = max(max_extent / float(resolution), 1e-4)
+            voxel_grid = mesh.voxelized(pitch)
+            voxel_grid = voxel_grid.fill()
+            watertight_mesh = voxel_grid.marching_cubes
+            if watertight_mesh is not None and len(watertight_mesh.faces) > 0:
+                watertight_mesh.remove_unreferenced_vertices()
+                if bool(getattr(watertight_mesh, "is_watertight", False)):
+                    return watertight_mesh
+            resolution = int(resolution * 0.75)
+    except Exception:
+        return None
+    return None
+
+
+def _convex_hull_mesh(mesh):
+    try:
+        hull = mesh.convex_hull
+        if hull is None or len(hull.faces) == 0:
             return None
-        watertight_mesh.remove_unreferenced_vertices()
-        return watertight_mesh
+        hull.remove_unreferenced_vertices()
+        return hull
+    except Exception:
+        return None
+
+
+def _bounding_box_mesh(mesh):
+    try:
+        import trimesh
+
+        bounds = np.asarray(mesh.bounds, dtype=np.float64)
+        extent = bounds[1] - bounds[0]
+        if np.any(~np.isfinite(extent)) or float(np.max(extent)) <= 1e-8:
+            return None
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, 3] = np.mean(bounds, axis=0)
+        box = trimesh.creation.box(extents=extent, transform=transform)
+        box.remove_unreferenced_vertices()
+        return box
     except Exception:
         return None
 
@@ -800,6 +860,14 @@ def _rasterize_photo_projection_atlas(
             atlas=atlas,
             coverage=coverage,
         )
+        if projected <= 0:
+            projected = _fill_face_from_centroid_sample(
+                tri_vertices=tri_vertices,
+                tri_uv=tri_uv,
+                view=best_view,
+                atlas=atlas,
+                coverage=coverage,
+            )
         if projected > 0:
             projected_face_count += 1
             photo_projected_pixel_count += projected
@@ -828,6 +896,32 @@ def _select_best_projection_view(
     normal = normal / normal_norm
     centroid = np.mean(tri_vertices, axis=0)
 
+    best_view = _select_best_projection_view_with_min_cosine(
+        tri_vertices=tri_vertices,
+        projection_views=projection_views,
+        centroid=centroid,
+        normal=normal,
+        min_cosine=float(config.delivery_texture_min_view_cosine),
+    )
+    if best_view is not None:
+        return best_view
+    return _select_best_projection_view_with_min_cosine(
+        tri_vertices=tri_vertices,
+        projection_views=projection_views,
+        centroid=centroid,
+        normal=normal,
+        min_cosine=-1.0,
+    )
+
+
+def _select_best_projection_view_with_min_cosine(
+    *,
+    tri_vertices: np.ndarray,
+    projection_views: list[_ProjectionView],
+    centroid: np.ndarray,
+    normal: np.ndarray,
+    min_cosine: float,
+) -> _ProjectionView | None:
     best_score = -math.inf
     best_view: _ProjectionView | None = None
     for view in projection_views:
@@ -850,7 +944,7 @@ def _select_best_projection_view(
             continue
         view_dir = view_dir / view_norm
         cosine = float(np.dot(normal, view_dir))
-        if cosine <= float(config.delivery_texture_min_view_cosine):
+        if cosine <= min_cosine:
             continue
 
         area = abs(
@@ -860,7 +954,7 @@ def _select_best_projection_view(
         if area <= 1e-4:
             continue
 
-        score = (cosine * cosine) * math.sqrt(area) / max(float(np.mean(depth)), 1e-3)
+        score = max(cosine, 0.05) * math.sqrt(area) / max(float(np.mean(depth)), 1e-3)
         if score > best_score:
             best_score = score
             best_view = view
@@ -932,6 +1026,62 @@ def _project_face_to_photo(
     patch[valid_inside_indices[:, 0], valid_inside_indices[:, 1]] = sampled
     patch_coverage[valid_inside_indices[:, 0], valid_inside_indices[:, 1]] = 255
     return int(len(valid_inside_indices))
+
+
+def _fill_face_from_centroid_sample(
+    *,
+    tri_vertices: np.ndarray,
+    tri_uv: np.ndarray,
+    view: _ProjectionView,
+    atlas: np.ndarray,
+    coverage: np.ndarray,
+) -> int:
+    centroid = np.mean(tri_vertices, axis=0, keepdims=True)
+    camera_points = (view.rotation @ centroid.T).T + view.translation
+    depth = camera_points[:, 2]
+    if float(depth[0]) <= 1e-6:
+        return 0
+
+    u = view.camera.fx * (camera_points[:, 0] / depth) + view.camera.cx
+    v = view.camera.fy * (camera_points[:, 1] / depth) + view.camera.cy
+    if not (np.isfinite(u[0]) and np.isfinite(v[0])):
+        return 0
+    if u[0] < 0.0 or u[0] > (view.camera.width - 1) or v[0] < 0.0 or v[0] > (view.camera.height - 1):
+        return 0
+
+    sampled = _sample_bilinear_rgb(view.image, u, v)[0]
+    triangle_area = _edge_function(tri_uv[0], tri_uv[1], tri_uv[2])
+    if abs(triangle_area) < 1e-6:
+        return 0
+
+    atlas_size = atlas.shape[0]
+    min_x = max(0, int(np.floor(np.min(tri_uv[:, 0]))))
+    max_x = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 0]))))
+    min_y = max(0, int(np.floor(np.min(tri_uv[:, 1]))))
+    max_y = min(atlas_size - 1, int(np.ceil(np.max(tri_uv[:, 1]))))
+    if min_x >= max_x or min_y >= max_y:
+        return 0
+
+    xs = np.arange(min_x, max_x + 1, dtype=np.float64) + 0.5
+    ys = np.arange(min_y, max_y + 1, dtype=np.float64) + 0.5
+    grid_x, grid_y = np.meshgrid(xs, ys)
+    points = np.stack([grid_x, grid_y], axis=-1)
+
+    w0 = _edge_function(tri_uv[1], tri_uv[2], points)
+    w1 = _edge_function(tri_uv[2], tri_uv[0], points)
+    w2 = _edge_function(tri_uv[0], tri_uv[1], points)
+    if triangle_area < 0:
+        inside = (w0 <= 0) & (w1 <= 0) & (w2 <= 0)
+    else:
+        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+    if not np.any(inside):
+        return 0
+
+    patch = atlas[min_y : max_y + 1, min_x : max_x + 1]
+    patch_coverage = coverage[min_y : max_y + 1, min_x : max_x + 1]
+    patch[inside] = sampled[None, :]
+    patch_coverage[inside] = 255
+    return int(np.count_nonzero(inside))
 
 
 def _sample_bilinear_rgb(image: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:

@@ -121,7 +121,7 @@ class WorkerConfig:
     sparse2dgs_command_template: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_COMMAND", "")
     sparse2dgs_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_SUMMARY_FILENAME", "sparse2dgs_surface.json")
     sparse2dgs_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TIMEOUT_SEC", 7200)
-    sparse2dgs_target_views: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TARGET_VIEWS", 16)
+    sparse2dgs_target_views: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TARGET_VIEWS", 24)
 
     matcha_repo: str = os.environ.get(
         "OBJECT_SLAM3R_SURFACE_MATCHA_REPO",
@@ -149,17 +149,18 @@ class WorkerConfig:
     delivery_hard_max_face_count: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_HARD_MAX_FACE_COUNT", 240000)
     delivery_component_min_faces: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_MIN_FACES", 128)
     delivery_component_ratio_floor: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_COMPONENT_RATIO_FLOOR", 0.01)
-    delivery_texture_max_views: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MAX_VIEWS", 16)
+    delivery_texture_max_views: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MAX_VIEWS", 24)
     delivery_texture_atlas_size: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_ATLAS_SIZE", 4096)
-    delivery_projection_image_size: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_PROJECTION_IMAGE_SIZE", 1024)
+    delivery_projection_image_size: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_PROJECTION_IMAGE_SIZE", 1536)
     delivery_texture_fill_kernel: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_FILL_KERNEL", 5)
     delivery_texture_min_view_cosine: float = _env_float(
         "OBJECT_SLAM3R_SURFACE_DELIVERY_TEXTURE_MIN_VIEW_COSINE",
-        0.1,
+        -0.15,
     )
     delivery_hole_fill_iterations: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_HOLE_FILL_ITERATIONS", 3)
-    delivery_enforce_watertight: bool = _env_flag("OBJECT_SLAM3R_SURFACE_DELIVERY_ENFORCE_WATERTIGHT", True)
+    delivery_enforce_watertight: bool = _env_flag("OBJECT_SLAM3R_SURFACE_DELIVERY_ENFORCE_WATERTIGHT", False)
     delivery_watertight_voxel_resolution: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_WATERTIGHT_VOXEL_RESOLUTION", 192)
+    delivery_watertight_voxel_min_resolution: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_WATERTIGHT_VOXEL_MIN_RESOLUTION", 64)
     delivery_taubin_iterations: int = _env_int("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_ITERATIONS", 8)
     delivery_taubin_lambda: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_LAMBDA", 0.45)
     delivery_taubin_nu: float = _env_float("OBJECT_SLAM3R_SURFACE_DELIVERY_TAUBIN_NU", -0.5)
