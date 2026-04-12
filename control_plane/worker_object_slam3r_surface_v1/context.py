@@ -31,6 +31,10 @@ class JobContext:
     default_publish_dir: Optional[Path] = None
     hq_dir: Optional[Path] = None
     should_run_hq_refine: bool = False
+    sparse2dgs_target_views_override: Optional[int] = None
+    sparse2dgs_contract_max_image_size_override: Optional[int] = None
+    sparse2dgs_contract_total_pixel_budget_override: Optional[int] = None
+    sparse2dgs_attempt_index: int = 0
 
     @property
     def pipeline_profile(self) -> dict[str, Any]:

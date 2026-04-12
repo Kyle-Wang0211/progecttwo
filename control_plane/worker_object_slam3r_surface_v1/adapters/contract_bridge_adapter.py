@@ -54,11 +54,26 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
 
     predictor_source_width = int(rgb_imgs.shape[2])
     predictor_source_height = int(rgb_imgs.shape[1])
-    source_width, source_height, width, height, bridge_image_source = _resolve_bridge_export_dimensions(
+    source_width, source_height = _resolve_bridge_source_dimensions(
         curated_frame_paths=curated_frame_paths,
         fallback_width=predictor_source_width,
         fallback_height=predictor_source_height,
     )
+    requested_target_views = (
+        ctx.sparse2dgs_target_views_override
+        if ctx.sparse2dgs_target_views_override is not None
+        else int(config.sparse2dgs_target_views)
+    )
+    requested_frame_target = min(local_pcds.shape[0], max(8, int(requested_target_views)))
+    selected_frame_target, width, height, bridge_budget = _resolve_bridge_export_plan(
+        frame_count=int(local_pcds.shape[0]),
+        requested_target_views=requested_frame_target,
+        source_width=source_width,
+        source_height=source_height,
+        max_image_size_override=ctx.sparse2dgs_contract_max_image_size_override,
+        total_pixel_budget_override=ctx.sparse2dgs_contract_total_pixel_budget_override,
+    )
+    bridge_image_source = "curated_original_resized"
     init_winsize = int(metadata.get("init_winsize", 0))
     kf_stride = int(metadata.get("kf_stride", 1))
     init_ref_id = int(metadata.get("init_ref_id", 0)) * kf_stride
@@ -101,7 +116,6 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         mean_intrinsic=mean_intrinsic,
         recon_utils=recon_utils,
     )
-    selected_frame_target = min(local_pcds.shape[0], max(8, int(config.sparse2dgs_target_views)))
     selected_frame_indices = _select_sparse2dgs_view_indices(
         local_pcds.shape[0],
         target_views=selected_frame_target,
@@ -225,6 +239,7 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         "sparse_dir": str(sparse_dir),
         "frame_count": int(local_pcds.shape[0]),
         "selected_frame_target": int(selected_frame_target),
+        "selected_frame_target_requested": int(requested_frame_target),
         "selected_frame_indices": selected_frame_indices,
         "selected_frame_count": len(selected_frame_indices),
         "selected_curated_filenames": [
@@ -237,6 +252,8 @@ def bridge_slam3r_to_sparse2dgs_scene(ctx: JobContext) -> Path:
         "predictor_image_size": [predictor_source_width, predictor_source_height],
         "exported_image_size": [width, height],
         "bridge_image_source": bridge_image_source,
+        "bridge_budget": bridge_budget,
+        "attempt_index": int(ctx.sparse2dgs_attempt_index),
         "pose_failed_indices": pose_failed_indices,
         "pose_failed_count": len(pose_failed_indices),
         "paper_stack": {
@@ -637,30 +654,89 @@ def _load_bridge_export_image(
         )
 
 
-def _resolve_bridge_export_dimensions(
+def _resolve_bridge_source_dimensions(
     *,
     curated_frame_paths: list[Path],
     fallback_width: int,
     fallback_height: int,
-) -> tuple[int, int, int, int, str]:
+) -> tuple[int, int]:
     if not curated_frame_paths:
         raise RuntimeError("curated_frames_missing")
     source_width = fallback_width
     source_height = fallback_height
-    image_source = "curated_original_resized"
     for curated_path in curated_frame_paths:
         image_size = _read_image_size(curated_path)
         if image_size is None:
             continue
         source_width, source_height = image_size
         break
+    return source_width, source_height
 
-    max_dim = max(256, int(config.sparse2dgs_contract_max_image_size))
-    longest_side = max(source_width, source_height)
-    scale = min(1.0, float(max_dim) / float(longest_side)) if longest_side > 0 else 1.0
-    export_width = max(64, _round_up_to_multiple(int(round(source_width * scale)), 64))
-    export_height = max(64, _round_up_to_multiple(int(round(source_height * scale)), 64))
-    return source_width, source_height, export_width, export_height, image_source
+
+def _resolve_bridge_export_plan(
+    *,
+    frame_count: int,
+    requested_target_views: int,
+    source_width: int,
+    source_height: int,
+    max_image_size_override: int | None = None,
+    total_pixel_budget_override: int | None = None,
+) -> tuple[int, int, int, dict[str, int | float | bool]]:
+    max_dim = max(
+        256,
+        int(
+            max_image_size_override
+            if max_image_size_override is not None
+            else config.sparse2dgs_contract_max_image_size
+        ),
+    )
+    min_dim = min(max_dim, max(256, int(config.sparse2dgs_contract_min_image_size)))
+    total_pixel_budget = max(
+        1_000_000,
+        int(
+            total_pixel_budget_override
+            if total_pixel_budget_override is not None
+            else config.sparse2dgs_contract_total_pixel_budget
+        ),
+    )
+    min_views = max(8, int(config.sparse2dgs_min_views))
+    target_views = min(frame_count, max(min_views, requested_target_views))
+    source_area = max(int(source_width) * int(source_height), 1)
+
+    while True:
+        max_area_per_view = max(64 * 64, total_pixel_budget // max(target_views, 1))
+        longest_side = max(source_width, source_height)
+        scale_by_dim = min(1.0, float(max_dim) / float(longest_side)) if longest_side > 0 else 1.0
+        scale_by_budget = min(1.0, math.sqrt(float(max_area_per_view) / float(source_area)))
+        scale = min(scale_by_dim, scale_by_budget)
+        export_width = max(64, _round_down_to_multiple(int(round(source_width * scale)), 64))
+        export_height = max(64, _round_down_to_multiple(int(round(source_height * scale)), 64))
+        while (
+            export_width * export_height * target_views > total_pixel_budget
+            and max(export_width, export_height) > min_dim
+        ):
+            aspect = float(source_width) / float(max(source_height, 1))
+            next_longest_side = max(min_dim, _round_down_to_multiple(max(export_width, export_height) - 64, 64))
+            if source_width >= source_height:
+                export_width = next_longest_side
+                export_height = max(64, _round_down_to_multiple(int(round(export_width / max(aspect, 1e-6))), 64))
+            else:
+                export_height = next_longest_side
+                export_width = max(64, _round_down_to_multiple(int(round(export_height * aspect)), 64))
+        export_longest_side = max(export_width, export_height)
+        if export_longest_side >= min_dim or target_views <= min_views:
+            budget_info = {
+                "requested_target_views": int(requested_target_views),
+                "resolved_target_views": int(target_views),
+                "total_pixel_budget": int(total_pixel_budget),
+                "max_image_size": int(max_dim),
+                "min_image_size": int(min_dim),
+                "exported_pixel_count_per_view": int(export_width * export_height),
+                "exported_total_pixel_count": int(export_width * export_height * target_views),
+                "target_views_reduced": bool(target_views != requested_target_views),
+            }
+            return target_views, export_width, export_height, budget_info
+        target_views -= 1
 
 
 def _read_image_size(path: Path) -> tuple[int, int] | None:
@@ -680,6 +756,12 @@ def _round_up_to_multiple(value: int, multiple: int) -> int:
     if multiple <= 0:
         return value
     return int(math.ceil(float(value) / float(multiple)) * multiple)
+
+
+def _round_down_to_multiple(value: int, multiple: int) -> int:
+    if multiple <= 0:
+        return value
+    return max(multiple, int(math.floor(float(value) / float(multiple)) * multiple))
 
 
 def _write_sparse2dgs_cam_file(

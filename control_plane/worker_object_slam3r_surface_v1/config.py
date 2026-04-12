@@ -39,6 +39,39 @@ def _default_storage_region() -> str:
     return "auto"
 
 
+def _configured_vram_mb() -> int:
+    return _env_int("OBJECT_SLAM3R_SURFACE_VRAM_MB", _env_int("OBJECT_FAST_PUBLISH_VRAM_MB", 24576))
+
+
+def _default_sparse2dgs_contract_max_image_size() -> int:
+    vram_mb = _configured_vram_mb()
+    if vram_mb <= 32768:
+        return 1280
+    if vram_mb <= 49152:
+        return 1408
+    if vram_mb <= 81920:
+        return 1536
+    return 1792
+
+
+def _default_sparse2dgs_contract_min_image_size() -> int:
+    vram_mb = _configured_vram_mb()
+    if vram_mb <= 32768:
+        return 640
+    return 768
+
+
+def _default_sparse2dgs_contract_total_pixel_budget() -> int:
+    vram_mb = _configured_vram_mb()
+    if vram_mb <= 32768:
+        return 18_000_000
+    if vram_mb <= 49152:
+        return 24_000_000
+    if vram_mb <= 81920:
+        return 36_000_000
+    return 56_000_000
+
+
 def _default_matcha_command_template() -> str:
     script_path = (
         _DEFAULT_REPO_ROOT
@@ -127,9 +160,30 @@ class WorkerConfig:
     sparse2dgs_summary_filename: str = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_SUMMARY_FILENAME", "sparse2dgs_surface.json")
     sparse2dgs_stage_timeout_sec: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TIMEOUT_SEC", 7200)
     sparse2dgs_target_views: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_TARGET_VIEWS", 24)
+    sparse2dgs_min_views: int = _env_int("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_MIN_VIEWS", 12)
     sparse2dgs_contract_max_image_size: int = _env_int(
         "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_CONTRACT_MAX_IMAGE_SIZE",
-        1536,
+        _default_sparse2dgs_contract_max_image_size(),
+    )
+    sparse2dgs_contract_min_image_size: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_CONTRACT_MIN_IMAGE_SIZE",
+        _default_sparse2dgs_contract_min_image_size(),
+    )
+    sparse2dgs_contract_total_pixel_budget: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_CONTRACT_TOTAL_PIXEL_BUDGET",
+        _default_sparse2dgs_contract_total_pixel_budget(),
+    )
+    sparse2dgs_max_oom_retries: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_MAX_OOM_RETRIES",
+        5,
+    )
+    sparse2dgs_oom_resolution_scale: float = _env_float(
+        "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_OOM_RESOLUTION_SCALE",
+        0.84,
+    )
+    sparse2dgs_oom_view_drop_step: int = _env_int(
+        "OBJECT_SLAM3R_SURFACE_SPARSE2DGS_OOM_VIEW_DROP_STEP",
+        2,
     )
 
     matcha_repo: str = os.environ.get(
