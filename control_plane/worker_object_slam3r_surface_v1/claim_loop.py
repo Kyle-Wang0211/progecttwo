@@ -258,6 +258,40 @@ def _make_sparse2dgs_progress_callback(
     return callback
 
 
+def _map_optimize_default_mesh_progress(local_progress: float) -> float:
+    ratio = min(max(local_progress, 0.0), 1.0)
+    return 0.88 + (0.94 - 0.88) * ratio
+
+
+def _make_optimize_default_mesh_progress_callback(
+    *,
+    client: ControlPlaneClient,
+    ctx: JobContext,
+    tracker: _RuntimeTracker,
+):
+    def callback(payload: dict[str, Any]) -> None:
+        local_progress = float(payload.get("progress", 0.0))
+        title = str(payload.get("title") or "正在优化默认网格")
+        detail = str(payload.get("detail") or "正在清理碎片、修法线并收敛到移动端友好的默认 mesh 预算。")
+        metrics = {
+            "optimize_local_progress_percent": f"{min(max(local_progress, 0.0), 1.0) * 100:.1f}",
+        }
+        extra_metrics = payload.get("metrics")
+        if isinstance(extra_metrics, dict):
+            metrics.update({str(key): str(value) for key, value in extra_metrics.items()})
+        _update_tracker_runtime(
+            client,
+            ctx,
+            tracker,
+            title=title,
+            detail=detail,
+            progress_fraction=_map_optimize_default_mesh_progress(local_progress),
+            metrics=metrics,
+        )
+
+    return callback
+
+
 def run_once(
     client: ControlPlaneClient,
     storage: ObjectStorageClient,
@@ -354,7 +388,14 @@ def run_once(
             title="正在优化默认网格",
             detail="正在清理碎片、修法线并收敛到移动端友好的默认 mesh 预算。",
             progress_fraction=0.88,
-            action=lambda current_ctx, _tracker: run_optimize_default_mesh(current_ctx),
+            action=lambda current_ctx, tracker: run_optimize_default_mesh(
+                current_ctx,
+                progress_callback=_make_optimize_default_mesh_progress_callback(
+                    client=client,
+                    ctx=current_ctx,
+                    tracker=tracker,
+                ),
+            ),
         )
         _run_step(
             ctx=ctx,

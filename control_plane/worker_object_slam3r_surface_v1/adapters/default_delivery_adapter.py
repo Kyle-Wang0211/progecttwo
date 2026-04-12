@@ -4,7 +4,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -40,26 +40,83 @@ class _ProjectionView:
     center: np.ndarray
 
 
-def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
+OptimizeProgressCallback = Callable[[dict[str, Any]], None]
+
+
+def optimize_default_mesh_delivery(
+    ctx: JobContext,
+    *,
+    progress_callback: OptimizeProgressCallback | None = None,
+) -> Path:
     assert ctx.matcha_dir is not None
     assert ctx.delivery_dir is not None
 
+    _emit_optimize_progress(
+        progress_callback,
+        progress=0.02,
+        title="正在读取默认网格",
+        detail="正在载入 MAtCha 默认 mesh，并检查原始拓扑规模。",
+        metrics={"optimize_phase": "load_matcha_mesh"},
+    )
     raw_mesh = _resolve_matcha_mesh_asset(ctx.matcha_dir)
     mesh = _load_mesh(raw_mesh)
     initial_faces = int(len(mesh.faces))
     initial_vertices = int(len(mesh.vertices))
 
+    _emit_optimize_progress(
+        progress_callback,
+        progress=0.08,
+        title="正在清理无效顶点",
+        detail=f"已读取原始网格，当前 {initial_faces:,} 面，正在清理无引用顶点并合并重复顶点。",
+        metrics={
+            "optimize_phase": "cleanup_vertices",
+            "initial_faces": str(initial_faces),
+            "initial_vertices": str(initial_vertices),
+        },
+    )
     mesh.remove_unreferenced_vertices()
     try:
         mesh.merge_vertices()
     except Exception:
         pass
 
+    _emit_optimize_progress(
+        progress_callback,
+        progress=0.15,
+        title="正在清理碎片",
+        detail="正在去掉极小碎片，只保留主连通表面。",
+        metrics={"optimize_phase": "drop_small_components"},
+    )
     mesh = _drop_small_components(mesh)
+    _emit_optimize_progress(
+        progress_callback,
+        progress=0.22,
+        title="正在清理退化三角面",
+        detail="正在清理退化面和重复面，避免后续修补时把坏拓扑继续放大。",
+        metrics={"optimize_phase": "drop_degenerate_faces"},
+    )
     mesh = _drop_degenerate_faces(mesh)
-    mesh, topology_summary = _repair_mesh_topology(mesh)
-    mesh = _smooth_mesh(mesh)
+    mesh, topology_summary = _repair_mesh_topology(
+        mesh,
+        progress_callback=progress_callback,
+        progress_start=0.24,
+        progress_end=0.46,
+        phase_prefix="first_topology_repair",
+    )
+    mesh = _smooth_mesh(
+        mesh,
+        progress_callback=progress_callback,
+        progress_start=0.46,
+        progress_end=0.70,
+    )
 
+    _emit_optimize_progress(
+        progress_callback,
+        progress=0.72,
+        title="正在修复法线",
+        detail="正在统一法线方向，减少移动端 viewer 里的阴影破碎感。",
+        metrics={"optimize_phase": "fix_normals"},
+    )
     try:
         mesh.fix_normals(multibody=True)
     except Exception:
@@ -68,15 +125,47 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
     simplification_applied = False
     simplify_reason = "preserve_geometry"
     target_faces = max(1024, config.delivery_target_face_count)
+    _emit_optimize_progress(
+        progress_callback,
+        progress=0.78,
+        title="正在评估默认预算",
+        detail="正在判断是否需要为了移动端默认成品做受控降面，优先保几何覆盖。",
+        metrics={
+            "optimize_phase": "evaluate_simplification",
+            "target_faces": str(target_faces),
+            "current_faces": str(len(mesh.faces)),
+        },
+    )
     if _should_simplify_mesh(mesh, target_faces=target_faces):
+        _emit_optimize_progress(
+            progress_callback,
+            progress=0.82,
+            title="正在收敛网格预算",
+            detail="当前网格超出默认预算，正在做保形降面并尽量保住主表面。",
+            metrics={"optimize_phase": "simplify_mesh"},
+        )
         mesh = _simplify_mesh(
             mesh,
             target_faces=_simplify_target_faces(initial_faces, target_faces=target_faces),
         )
         simplification_applied = len(mesh.faces) < initial_faces
         simplify_reason = "hard_face_cap" if initial_faces > config.delivery_hard_max_face_count else "target_budget"
+    else:
+        _emit_optimize_progress(
+            progress_callback,
+            progress=0.82,
+            title="默认预算无需降面",
+            detail="当前网格仍在默认预算内，继续保几何并进入最终拓扑修整。",
+            metrics={"optimize_phase": "preserve_geometry_budget"},
+        )
 
-    mesh, final_topology_summary = _repair_mesh_topology(mesh)
+    mesh, final_topology_summary = _repair_mesh_topology(
+        mesh,
+        progress_callback=progress_callback,
+        progress_start=0.84,
+        progress_end=0.94,
+        phase_prefix="final_topology_repair",
+    )
     topology_summary = {
         **topology_summary,
         "watertight_after": bool(final_topology_summary["watertight_after"]),
@@ -91,6 +180,13 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
 
     destination = ctx.delivery_dir / "optimized_mesh.ply"
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _emit_optimize_progress(
+        progress_callback,
+        progress=0.97,
+        title="正在写出优化网格",
+        detail="正在把优化后的默认 mesh 写盘，并生成交付摘要。",
+        metrics={"optimize_phase": "export_optimized_mesh"},
+    )
     mesh.export(destination)
 
     summary = {
@@ -118,6 +214,22 @@ def optimize_default_mesh_delivery(ctx: JobContext) -> Path:
     (ctx.delivery_dir / config.delivery_mesh_summary_filename).write_text(
         json.dumps(summary, indent=2, ensure_ascii=False),
         encoding="utf-8",
+    )
+    _emit_optimize_progress(
+        progress_callback,
+        progress=1.0,
+        title="默认网格优化完成",
+        detail=(
+            f"默认网格优化完成，当前 {len(mesh.faces):,} 面、{len(mesh.vertices):,} 顶点，"
+            "即将进入照片纹理投影。"
+        ),
+        metrics={
+            "optimize_phase": "done",
+            "optimized_faces": str(len(mesh.faces)),
+            "optimized_vertices": str(len(mesh.vertices)),
+            "holes_repaired": str(bool(topology_summary["holes_repaired"])).lower(),
+            "watertight_after": str(bool(topology_summary["watertight_after"])).lower(),
+        },
     )
     return destination
 
@@ -270,7 +382,14 @@ def _drop_degenerate_faces(mesh):
     return mesh
 
 
-def _repair_mesh_topology(mesh):
+def _repair_mesh_topology(
+    mesh,
+    *,
+    progress_callback: OptimizeProgressCallback | None = None,
+    progress_start: float = 0.0,
+    progress_end: float = 1.0,
+    phase_prefix: str = "topology_repair",
+):
     aggressive_repair_allowed = len(mesh.faces) <= int(config.delivery_aggressive_repair_face_cap)
     summary = {
         "watertight_before": bool(getattr(mesh, "is_watertight", False)),
@@ -289,6 +408,18 @@ def _repair_mesh_topology(mesh):
     repair = getattr(trimesh, "repair", None)
     if repair is None:
         return mesh, summary
+
+    _emit_optimize_progress(
+        progress_callback,
+        progress=progress_start,
+        title="正在修补拓扑边界",
+        detail="正在分析边界环和小孔，准备做边界保持的小洞修补。",
+        metrics={
+            "optimize_phase": phase_prefix,
+            "repair_mode": summary["closure_strategy"],
+            "aggressive_repair_allowed": str(bool(aggressive_repair_allowed)).lower(),
+        },
+    )
 
     if not aggressive_repair_allowed:
         try:
@@ -311,9 +442,33 @@ def _repair_mesh_topology(mesh):
         summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
         if not summary["watertight_after"]:
             summary["closure_strategy"] = "boundary_preserving_open_mesh"
+        _emit_optimize_progress(
+            progress_callback,
+            progress=progress_end,
+            title="已完成开放表面修补",
+            detail="当前网格过大，已跳过激进补洞，只做边界保持的开放表面修补。",
+            metrics={
+                "optimize_phase": phase_prefix,
+                "watertight_after": str(bool(summary["watertight_after"])).lower(),
+                "closure_strategy": summary["closure_strategy"],
+            },
+        )
         return mesh, summary
 
-    for _ in range(max(1, int(config.delivery_hole_fill_iterations))):
+    total_iterations = max(1, int(config.delivery_hole_fill_iterations))
+    for iteration_index in range(total_iterations):
+        iteration_ratio = iteration_index / max(total_iterations, 1)
+        _emit_optimize_progress(
+            progress_callback,
+            progress=progress_start + (progress_end - progress_start) * iteration_ratio,
+            title=f"正在修补小洞 {iteration_index + 1}/{total_iterations}",
+            detail=f"正在做第 {iteration_index + 1} 轮边界保持的小洞修补与拓扑清理。",
+            metrics={
+                "optimize_phase": phase_prefix,
+                "repair_iteration": str(iteration_index + 1),
+                "repair_total_iterations": str(total_iterations),
+            },
+        )
         summary["hole_fill_iterations"] += 1
         try:
             if hasattr(mesh, "process"):
@@ -354,6 +509,22 @@ def _repair_mesh_topology(mesh):
     summary["watertight_after"] = bool(getattr(mesh, "is_watertight", False))
     if not summary["watertight_after"]:
         summary["closure_strategy"] = "boundary_preserving_open_mesh"
+    _emit_optimize_progress(
+        progress_callback,
+        progress=progress_end,
+        title="拓扑修补完成",
+        detail=(
+            "当前轮拓扑修补已结束，"
+            f"小洞补面 {summary['small_hole_patches']} 处，"
+            f"watertight={summary['watertight_after']}。"
+        ),
+        metrics={
+            "optimize_phase": phase_prefix,
+            "small_hole_patches": str(summary["small_hole_patches"]),
+            "watertight_after": str(bool(summary["watertight_after"])).lower(),
+            "closure_strategy": summary["closure_strategy"],
+        },
+    )
     return mesh, summary
 
 
@@ -487,7 +658,13 @@ def _boundary_loop_perimeter(vertices: np.ndarray, loop: list[int]) -> float:
     return perimeter
 
 
-def _smooth_mesh(mesh):
+def _smooth_mesh(
+    mesh,
+    *,
+    progress_callback: OptimizeProgressCallback | None = None,
+    progress_start: float = 0.0,
+    progress_end: float = 1.0,
+):
     iterations = max(0, int(config.delivery_taubin_iterations))
     if iterations <= 0:
         return mesh
@@ -509,7 +686,19 @@ def _smooth_mesh(mesh):
     lamb = float(config.delivery_taubin_lambda)
     nu = float(config.delivery_taubin_nu)
     try:
-        for _ in range(iterations):
+        for iteration_index in range(iterations):
+            iteration_ratio = iteration_index / max(iterations, 1)
+            _emit_optimize_progress(
+                progress_callback,
+                progress=progress_start + (progress_end - progress_start) * iteration_ratio,
+                title=f"正在保边平滑表面 {iteration_index + 1}/{iterations}",
+                detail=f"正在做第 {iteration_index + 1} 轮边界/特征保持平滑，尽量减弱毛刺又不把表面抹圆。",
+                metrics={
+                    "optimize_phase": "smooth_mesh",
+                    "smooth_iteration": str(iteration_index + 1),
+                    "smooth_total_iterations": str(iterations),
+                },
+            )
             current = _boundary_preserving_laplacian_pass(
                 current,
                 neighbors=neighbors,
@@ -525,7 +714,34 @@ def _smooth_mesh(mesh):
     except Exception:
         return mesh
     mesh.vertices = current
+    _emit_optimize_progress(
+        progress_callback,
+        progress=progress_end,
+        title="保边平滑完成",
+        detail="已完成边界和特征保持平滑，继续进入法线修复与预算收敛。",
+        metrics={"optimize_phase": "smooth_mesh_done"},
+    )
     return mesh
+
+
+def _emit_optimize_progress(
+    callback: OptimizeProgressCallback | None,
+    *,
+    progress: float,
+    title: str,
+    detail: str,
+    metrics: dict[str, Any] | None = None,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        {
+            "progress": max(0.0, min(1.0, float(progress))),
+            "title": title,
+            "detail": detail,
+            "metrics": dict(metrics or {}),
+        }
+    )
 
 
 def _boundary_vertex_mask(faces: np.ndarray, *, vertex_count: int) -> np.ndarray:
