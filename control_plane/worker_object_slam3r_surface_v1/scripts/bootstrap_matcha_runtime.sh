@@ -5,7 +5,8 @@ ROOT_DIR="${1:-/opt/object_slam3r_surface_v1}"
 MATCHA_DIR="${ROOT_DIR}/third_party/MAtCha"
 PYTHON_BIN="${2:-${OBJECT_SLAM3R_SURFACE_MATCHA_PYTHON_BIN:-${ROOT_DIR}/envs/sugar-adapted/bin/python}}"
 PIP_BIN="$(cd "$(dirname "${PYTHON_BIN}")" && pwd)/pip"
-CUDA_HOME="${OBJECT_SLAM3R_SURFACE_CUDA_HOME:-/usr/local/cuda-12.8}"
+CUDA_HOME="${OBJECT_SLAM3R_SURFACE_CUDA_HOME:-${CUDA_HOME:-/usr/local/cuda}}"
+TORCH_BUILD_SHIM_DIR="${ROOT_DIR}/local/torch_build_shim"
 
 if [[ ! -x "${PYTHON_BIN}" ]]; then
   echo "matcha_python_missing: ${PYTHON_BIN}" >&2
@@ -24,6 +25,31 @@ export CUDA_PATH="${CUDA_HOME}"
 export CUDAToolkit_ROOT="${CUDA_HOME}"
 export CUDACXX="${CUDA_HOME}/bin/nvcc"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
+
+mkdir -p "${TORCH_BUILD_SHIM_DIR}"
+cat > "${TORCH_BUILD_SHIM_DIR}/sitecustomize.py" <<'PY'
+try:
+    import torch.utils.cpp_extension as _ce
+except Exception:
+    _ce = None
+
+if _ce is not None:
+    def _ignore_cuda_version(*args, **kwargs):
+        return None
+
+    _ce._check_cuda_version = _ignore_cuda_version
+PY
+export PYTHONPATH="${TORCH_BUILD_SHIM_DIR}:${PYTHONPATH:-}"
+
+OPEN3D_VERSION="$("${PYTHON_BIN}" - <<'PY'
+import sys
+
+if sys.version_info >= (3, 12):
+    print("0.19.0")
+else:
+    print("0.18.0")
+PY
+)"
 
 patch_if_missing() {
   local needle="$1"
@@ -49,6 +75,12 @@ patch_if_missing "cstdint" \
 patch_if_missing "cfloat" \
   "${MATCHA_DIR}/2d-gaussian-splatting/submodules/simple-knn/simple_knn.cu" \
   "#include <cfloat>"
+
+if [[ ! -f "${MATCHA_DIR}/2d-gaussian-splatting/submodules/simple-knn/simple_knn/__init__.py" ]]; then
+  cat > "${MATCHA_DIR}/2d-gaussian-splatting/submodules/simple-knn/simple_knn/__init__.py" <<'PY'
+"""Python package shim for the compiled simple_knn extension."""
+PY
+fi
 
 python3 - <<'PY' "${MATCHA_DIR}/2d-gaussian-splatting/submodules/tetra-triangulation/CMakeLists.txt"
 from pathlib import Path
@@ -92,7 +124,7 @@ PY
   tqdm==4.67.1 \
   matplotlib==3.9.4 \
   roma==1.5.0 \
-  open3d==0.18.0 \
+  "open3d==${OPEN3D_VERSION}" \
   fvcore \
   iopath
 
@@ -115,7 +147,13 @@ import torch
 print(torch.utils.cmake_prefix_path)
 PY
 )"
-export Torch_DIR="${CONDA_PREFIX}/lib/python3.10/site-packages/torch/share/cmake/Torch"
+export Torch_DIR="$("${PYTHON_BIN}" - <<'PY'
+import pathlib
+import torch
+
+print(pathlib.Path(torch.__file__).resolve().parent / "share" / "cmake" / "Torch")
+PY
+)"
 cmake -DCMAKE_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=1" -DCMAKE_CUDA_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=1" .
 make -j2
 "${PIP_BIN}" install -e . --no-build-isolation

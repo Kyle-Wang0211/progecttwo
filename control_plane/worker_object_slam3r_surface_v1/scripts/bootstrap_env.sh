@@ -17,7 +17,8 @@ apt-get install -y --no-install-recommends \
   git curl ca-certificates pkg-config \
   build-essential cmake ninja-build \
   ffmpeg python3 python3-venv python3-pip \
-  libglib2.0-0 libgl1
+  libglib2.0-0 libgl1 \
+  libcgal-dev libeigen3-dev libgmp-dev libmpfr-dev
 
 mkdir -p "${THIRD_PARTY_DIR}"
 
