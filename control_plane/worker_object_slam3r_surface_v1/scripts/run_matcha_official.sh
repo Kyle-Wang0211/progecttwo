@@ -37,10 +37,11 @@ fi
 
 mkdir -p "${OUTPUT_DIR}"
 export PYTHONPATH="${REPO_DIR}:${REPO_DIR}/2d-gaussian-splatting/submodules/simple-knn:${PYTHONPATH:-}"
+export PYTHONNOUSERSITE=1
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
-export CUDA_HOME="${OBJECT_SLAM3R_SURFACE_CUDA_HOME:-/usr/local/cuda-12.8}"
+export CUDA_HOME="${OBJECT_SLAM3R_SURFACE_CUDA_HOME:-${CUDA_HOME:-/usr/local/cuda}}"
 export PATH="${PYTHON_DIR}:${CUDA_HOME}/bin:${PATH}"
-export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 
 cd "${REPO_DIR}"
 exec "${PYTHON_BIN}" scripts/extract_tetra_mesh.py \

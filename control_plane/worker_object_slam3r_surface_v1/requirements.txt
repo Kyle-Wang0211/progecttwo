@@ -9,3 +9,4 @@ matplotlib
 trimesh
 xatlas
 fast-simplification
+mediapy

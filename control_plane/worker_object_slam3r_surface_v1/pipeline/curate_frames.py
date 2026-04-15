@@ -99,6 +99,7 @@ def curate_frames(ctx: JobContext) -> None:
     client_live_backfill_count = 0
     client_live_rejected_count = 0
     client_live_soft_outlier_count = 0
+    selection_policy = "server_visual_novelty_filter"
     hard_reject_counts = {
         "blur": 0,
         "dark": 0,
@@ -119,6 +120,7 @@ def curate_frames(ctx: JobContext) -> None:
     }
 
     if used_client_live_selection:
+        selection_policy = "client_live_selected"
         minimum_slam_frames = max(
             4,
             min(
@@ -185,6 +187,51 @@ def curate_frames(ctx: JobContext) -> None:
 
         if len(curated_unique) < minimum_slam_frames:
             raise RuntimeError("curate_frames_insufficient_client_selected_frames")
+
+        preserve_all_valid_for_hq = (
+            bool(config.curated_hq_preserve_valid_frames_enabled)
+            and len(curated_unique) <= max(1, int(config.curated_hq_preserve_valid_frames_threshold))
+            and len(curated_unique) < max(1, int(config.curated_max_frames))
+        )
+        if preserve_all_valid_for_hq:
+            all_scored_frames: list[_FrameMetrics] = []
+            for frame_path in frame_paths:
+                metric = _score_frame(
+                    frame_path,
+                    target_zone_anchor=(target_zone_anchor_x, target_zone_anchor_y),
+                    target_zone_mode=target_zone_mode,
+                )
+                if metric is None:
+                    continue
+                all_scored_frames.append(metric)
+            visually_valid_all = [
+                frame
+                for frame in all_scored_frames
+                if not _hard_reject_reasons(
+                    frame,
+                    blur_threshold=blur_threshold,
+                    dark_threshold=dark_threshold,
+                    bright_threshold=bright_threshold,
+                    min_orb_features=min_orb_features,
+                    min_target_signal=min_target_signal,
+                )
+            ]
+            if not visually_valid_all:
+                visually_valid_all = all_scored_frames
+            before_names = {frame.path.name for frame in curated_unique}
+            augmented = _supplement_temporal_coverage(
+                frames=visually_valid_all,
+                accepted=curated_unique,
+                max_frames=max(1, int(config.curated_max_frames)),
+                sector_count=max(8, int(config.curated_temporal_coverage_sectors)),
+            )
+            added_names = [frame.path.name for frame in augmented if frame.path.name not in before_names]
+            if added_names:
+                curated_unique = augmented
+                client_live_backfill_count += len(added_names)
+                selection_policy = "client_live_selected_plus_temporal_coverage_hq"
+            readable_frame_count = max(readable_frame_count, len(all_scored_frames))
+            visually_valid_frame_count = max(visually_valid_frame_count, len(visually_valid_all))
     else:
         scored_frames: list[_FrameMetrics] = []
         for frame_path in frame_paths:
@@ -229,15 +276,24 @@ def curate_frames(ctx: JobContext) -> None:
         if not visually_valid:
             visually_valid = scored_frames
 
-        curated_unique = _novelty_filter(
-            frames=visually_valid,
-            max_similarity=max_similarity,
-            min_frame_gap=max(1, int(math.ceil(min_accept_interval_sec * config.extract_fps))),
-            max_frames=max(1, config.curated_max_frames),
+        preserve_all_valid_for_hq = (
+            bool(config.curated_hq_preserve_valid_frames_enabled)
+            and len(visually_valid) <= max(1, int(config.curated_hq_preserve_valid_frames_threshold))
         )
+        if preserve_all_valid_for_hq:
+            curated_unique = visually_valid[: max(1, min(len(visually_valid), config.curated_max_frames))]
+            selection_policy = "server_visual_preserve_all_valid_hq"
+        else:
+            curated_unique = _novelty_filter(
+                frames=visually_valid,
+                max_similarity=max_similarity,
+                min_frame_gap=max(1, int(math.ceil(min_accept_interval_sec * config.extract_fps))),
+                max_frames=max(1, config.curated_max_frames),
+            )
 
         if not curated_unique:
             curated_unique = visually_valid[: max(1, min(len(visually_valid), config.curated_max_frames))]
+            selection_policy = "server_visual_fallback_first_valid"
 
         if curated_unique:
             first_frame = visually_valid[0]
@@ -264,6 +320,14 @@ def curate_frames(ctx: JobContext) -> None:
             deduped.append(frame)
             if len(deduped) >= minimum_slam_frames:
                 break
+
+    if not used_client_live_selection:
+        deduped = _supplement_temporal_coverage(
+            frames=visually_valid,
+            accepted=deduped,
+            max_frames=max(1, config.curated_max_frames),
+            sector_count=max(1, int(config.curated_temporal_coverage_sectors)),
+        )
 
     for frame in deduped:
         shutil.copy2(frame.path, ctx.curated_dir / frame.path.name)
@@ -297,6 +361,7 @@ def curate_frames(ctx: JobContext) -> None:
                 "stage": "curate_frames",
                 "strategy": ctx.pipeline_string("strategy", "object_slam3r_surface_v1"),
                 "selection_source": "client_live_timestamps" if used_client_live_selection else "server_visual_curation",
+                "selection_policy": selection_policy,
                 "target_zone_mode": ctx.pipeline_string("target_zone_mode", "subject"),
                 "input_frame_count": len(frame_paths),
                 "readable_frame_count": readable_frame_count,
@@ -626,6 +691,60 @@ def _novelty_filter(
             break
 
     return accepted
+
+
+def _supplement_temporal_coverage(
+    *,
+    frames: list[_FrameMetrics],
+    accepted: list[_FrameMetrics],
+    max_frames: int,
+    sector_count: int,
+) -> list[_FrameMetrics]:
+    if not frames or not accepted or len(accepted) >= max_frames:
+        return accepted
+
+    sector_count = max(1, min(int(sector_count), len(frames), max_frames))
+    if sector_count <= 1:
+        return accepted
+
+    order_by_name = {frame.path.name: index for index, frame in enumerate(frames)}
+    accepted_names = {frame.path.name for frame in accepted}
+
+    def _sector_id(frame: _FrameMetrics) -> int:
+        index = order_by_name.get(frame.path.name, 0)
+        return min(sector_count - 1, int(index * sector_count / max(len(frames), 1)))
+
+    accepted_sectors = {_sector_id(frame) for frame in accepted}
+    if len(accepted_sectors) >= sector_count:
+        return sorted(accepted, key=lambda frame: order_by_name.get(frame.path.name, 0))
+
+    supplemented = list(accepted)
+    for sector_id in range(sector_count):
+        if sector_id in accepted_sectors or len(supplemented) >= max_frames:
+            continue
+        sector_frames = [
+            frame
+            for frame in frames
+            if _sector_id(frame) == sector_id and frame.path.name not in accepted_names
+        ]
+        if not sector_frames:
+            continue
+        best_frame = max(sector_frames, key=_coverage_priority_score)
+        supplemented.append(best_frame)
+        accepted_names.add(best_frame.path.name)
+        accepted_sectors.add(sector_id)
+
+    supplemented.sort(key=lambda frame: order_by_name.get(frame.path.name, 0))
+    return supplemented[:max_frames]
+
+
+def _coverage_priority_score(frame: _FrameMetrics) -> tuple[float, float, float, float]:
+    return (
+        float(_target_signal(frame)),
+        float(frame.orb_feature_count),
+        float(frame.blur_score),
+        float(frame.global_variance),
+    )
 
 
 def _parse_client_live_timestamps_ms(raw: str) -> list[int]:

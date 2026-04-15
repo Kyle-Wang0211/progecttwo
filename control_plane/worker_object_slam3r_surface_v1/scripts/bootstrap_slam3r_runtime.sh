@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${1:-/opt/object_slam3r_surface_v1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ROOT_DIR="${1:-${DEFAULT_ROOT_DIR}}"
 SLAM3R_DIR="${ROOT_DIR}/third_party/SLAM3R"
 PYTHON_BIN="${2:-${OBJECT_SLAM3R_SURFACE_SLAM3R_PYTHON_BIN:-${ROOT_DIR}/venv/bin/python}}"
 CUDA_HOME="${OBJECT_SLAM3R_SURFACE_CUDA_HOME:-${CUDA_HOME:-/usr/local/cuda}}"

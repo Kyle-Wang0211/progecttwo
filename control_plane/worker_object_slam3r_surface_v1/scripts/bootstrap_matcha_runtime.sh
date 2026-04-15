@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${1:-/opt/object_slam3r_surface_v1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ROOT_DIR="${1:-${DEFAULT_ROOT_DIR}}"
 MATCHA_DIR="${ROOT_DIR}/third_party/MAtCha"
 PYTHON_BIN="${2:-${OBJECT_SLAM3R_SURFACE_MATCHA_PYTHON_BIN:-${ROOT_DIR}/envs/sugar-adapted/bin/python}}"
 PIP_BIN="$(cd "$(dirname "${PYTHON_BIN}")" && pwd)/pip"
@@ -112,6 +114,7 @@ PY
 
 "${PIP_BIN}" install --upgrade pip setuptools wheel
 "${PIP_BIN}" install \
+  importlib_metadata \
   rich==13.9.4 \
   pyyaml==6.0.2 \
   trimesh==4.6.4 \
@@ -124,9 +127,58 @@ PY
   tqdm==4.67.1 \
   matplotlib==3.9.4 \
   roma==1.5.0 \
+  scikit-image \
   "open3d==${OPEN3D_VERSION}" \
   fvcore \
   iopath
+
+if ! "${PYTHON_BIN}" - <<'PY' >/dev/null 2>&1
+import pytorch3d  # noqa: F401
+PY
+then
+  "${PIP_BIN}" install ninja
+  export CUB_HOME="${CUB_HOME:-${CUDA_HOME}/include}"
+  PYTORCH3D_BUILD_DIR="$(mktemp -d)"
+  cleanup_pytorch3d_build_dir() {
+    rm -rf "${PYTORCH3D_BUILD_DIR}"
+  }
+  trap cleanup_pytorch3d_build_dir EXIT
+  git clone --depth 1 https://github.com/facebookresearch/pytorch3d.git "${PYTORCH3D_BUILD_DIR}/pytorch3d"
+  rm -rf \
+    "${PYTORCH3D_BUILD_DIR}/pytorch3d/pytorch3d/csrc/pulsar" \
+    "${PYTORCH3D_BUILD_DIR}/pytorch3d/pytorch3d/renderer/points/pulsar"
+  python3 - <<'PY' "${PYTORCH3D_BUILD_DIR}/pytorch3d"
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+
+ext_cpp = root / "pytorch3d" / "csrc" / "ext.cpp"
+text = ext_cpp.read_text()
+text = text.replace('#include "./pulsar/global.h" // Include before <torch/extension.h>.\n', "")
+text = text.replace('#include "./pulsar/pytorch/renderer.h"\n', "")
+text = text.replace('#include "./pulsar/pytorch/tensor_util.h"\n', "")
+pulsar_marker = "  // Pulsar.\n"
+if pulsar_marker in text:
+    text = text.split(pulsar_marker, 1)[0].rstrip() + "\n}\n"
+ext_cpp.write_text(text)
+
+points_init = root / "pytorch3d" / "renderer" / "points" / "__init__.py"
+points_text = points_init.read_text()
+points_text = points_text.replace(
+    "from .pulsar.unified import PulsarPointsRenderer\n",
+    "try:\n"
+    "    from .pulsar.unified import PulsarPointsRenderer\n"
+    "except Exception:\n"
+    "    PulsarPointsRenderer = None\n",
+)
+points_init.write_text(points_text)
+PY
+  export MAX_JOBS="${OBJECT_SLAM3R_SURFACE_PYTORCH3D_MAX_JOBS:-1}"
+  "${PIP_BIN}" install "${PYTORCH3D_BUILD_DIR}/pytorch3d" --no-build-isolation
+  trap - EXIT
+  cleanup_pytorch3d_build_dir
+fi
 
 pushd "${MATCHA_DIR}/2d-gaussian-splatting/submodules/diff-surfel-rasterization" >/dev/null
 "${PIP_BIN}" install -e . --no-build-isolation

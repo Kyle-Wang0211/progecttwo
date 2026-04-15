@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 PYTHON_BIN="${OBJECT_SLAM3R_SURFACE_SLAM3R_PYTHON_BIN:-${PYTHON_BIN:-${ROOT_DIR}/venv/bin/python}}"
 
+source "${SCRIPT_DIR}/load_hf_token.sh"
+
 if [[ ! -d "${REPO_DIR}" ]]; then
   echo "slam3r_repo_missing: ${REPO_DIR}" >&2
   exit 2

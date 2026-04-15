@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${1:-/opt/object_slam3r_surface_v1}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+ROOT_DIR="${1:-${DEFAULT_ROOT_DIR}}"
 VENV_DIR="${ROOT_DIR}/venv"
 THIRD_PARTY_DIR="${ROOT_DIR}/third_party"
 SLAM3R_DIR="${THIRD_PARTY_DIR}/SLAM3R"
@@ -41,7 +43,7 @@ fi
 python3 -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r "$(dirname "$0")/../requirements.txt"
+python -m pip install -r "${SCRIPT_DIR}/../requirements.txt"
 python -m pip install \
   torch==2.10.0 \
   torchvision==0.25.0 \

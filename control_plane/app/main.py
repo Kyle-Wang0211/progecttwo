@@ -88,6 +88,25 @@ CLIENT_RETURN_EVENT_TYPES = {
     "mobile_viewer_opened",
 }
 
+OBJECT_SURFACE_PREPROCESS_STAGES = {
+    "download_input",
+    "curate",
+    "slam3r_reconstruct",
+    "slam3r_scene_contract",
+}
+
+OBJECT_SURFACE_TRAIN_STAGES = {
+    "sparse2dgs_surface",
+}
+
+OBJECT_SURFACE_EXPORT_STAGES = {
+    "matcha_mesh_extract",
+    "optimize_default_mesh",
+    "bake_default_texture",
+    "publish_default_mesh",
+    "artifact_upload",
+}
+
 UPLOAD_EVENT_TYPES = {
     "upload_window_opened",
     "upload_started",
@@ -287,6 +306,10 @@ def _is_preprocess_runtime_payload(payload: dict[str, Any]) -> bool:
     stage = _runtime_stage_key(payload)
     phase = _runtime_phase_key(payload)
     state = _runtime_state_key(payload)
+    if stage in OBJECT_SURFACE_PREPROCESS_STAGES:
+        return True
+    if stage in OBJECT_SURFACE_TRAIN_STAGES | OBJECT_SURFACE_EXPORT_STAGES:
+        return False
     if stage.startswith("train") or stage.startswith("export") or stage == "completed":
         return False
     if state in {JobState.ASSIGNED.value, JobState.RECONSTRUCTING.value}:
@@ -302,6 +325,10 @@ def _is_train_runtime_payload(payload: dict[str, Any]) -> bool:
     stage = _runtime_stage_key(payload)
     phase = _runtime_phase_key(payload)
     state = _runtime_state_key(payload)
+    if stage in OBJECT_SURFACE_TRAIN_STAGES:
+        return True
+    if stage in OBJECT_SURFACE_EXPORT_STAGES:
+        return False
     if state in {JobState.TRAINING_PROBE.value, JobState.TRAINING_FULL.value}:
         return True
     if stage.startswith("train"):
@@ -314,6 +341,8 @@ def _is_export_runtime_payload(payload: dict[str, Any]) -> bool:
     phase = _runtime_phase_key(payload)
     basis = _runtime_basis_key(payload)
     return (
+        stage in OBJECT_SURFACE_EXPORT_STAGES
+        or
         stage.startswith("export")
         or phase == "artifact"
         or basis == "artifact_manifest"
@@ -1220,8 +1249,16 @@ def _mobile_state_for(row: JobRow) -> str:
     if row.state == JobState.QUEUED:
         return "queued"
     if row.state == JobState.ASSIGNED:
+        if str(row.stage or "").strip().lower() in OBJECT_SURFACE_EXPORT_STAGES:
+            return "packaging"
+        if str(row.stage or "").strip().lower() in OBJECT_SURFACE_TRAIN_STAGES:
+            return "training"
         return "reconstructing"
     if row.state == JobState.RECONSTRUCTING:
+        if str(row.stage or "").strip().lower() in OBJECT_SURFACE_EXPORT_STAGES:
+            return "packaging"
+        if str(row.stage or "").strip().lower() in OBJECT_SURFACE_TRAIN_STAGES:
+            return "training"
         return "reconstructing"
     if row.state in {JobState.TRAINING_PROBE, JobState.TRAINING_FULL}:
         return "training"
@@ -1747,8 +1784,11 @@ def create_mobile_job(payload: dict[str, Any]) -> dict[str, Any]:
     client_record_id = payload.get("clientRecordId") or payload.get("client_record_id")
     user_id = payload.get("userId") or payload.get("user_id")
     tenant_id = payload.get("tenantId") or payload.get("tenant_id") or "tenant_demo"
+    requested_pipeline_payload = payload.get("pipelineProfile") or payload.get("pipeline_profile")
+    if not requested_pipeline_payload and str(capture_origin or "").strip().lower() == "object_mode_v2":
+        requested_pipeline_payload = {"strategy": OBJECT_SLAM3R_SURFACE_STRATEGY}
     requested_pipeline_profile = _requested_pipeline_profile_payload(
-        payload.get("pipelineProfile") or payload.get("pipeline_profile")
+        requested_pipeline_payload
     )
 
     if not file_name or file_size_bytes is None or not content_type or not capture_origin:
@@ -2259,6 +2299,18 @@ def _finalize_cancel_if_worker_released(row: JobRow) -> JobRow:
         input_upload_etag=None if cleanup["input_deleted"] else row.input_upload_etag,
         artifact=None if cleanup["artifacts_deleted"] else row.artifact,
     )
+
+
+@app.get("/v1/mobile-jobs/by-client-record/{client_record_id}")
+def get_mobile_job_by_client_record(client_record_id: str, capture_origin: str | None = None) -> dict[str, Any]:
+    row = repo.get_latest_job_by_client_record_id(
+        client_record_id,
+        capture_origin=capture_origin,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="job_not_found")
+    row = _finalize_cancel_if_worker_released(row)
+    return _mobile_status_from_row(row)
 
 
 @app.get("/v1/mobile-jobs/{job_id}")

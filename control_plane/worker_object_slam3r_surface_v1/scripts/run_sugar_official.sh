@@ -32,8 +32,8 @@ import torch
 print(pathlib.Path(torch.__file__).resolve().parent / "lib")
 PY
 )"
-export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:/usr/local/cuda-12.8/lib64:${LD_LIBRARY_PATH:-}"
-export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-12.8}"
+export CUDA_HOME="${OBJECT_SLAM3R_SURFACE_CUDA_HOME:-${CUDA_HOME:-/usr/local/cuda}}"
+export LD_LIBRARY_PATH="${TORCH_LIB_DIR}:${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
 export PATH="${CUDA_HOME}/bin:${PATH}"
 export PATH="$(dirname "${PYTHON_BIN}"):${PATH}"
 export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"

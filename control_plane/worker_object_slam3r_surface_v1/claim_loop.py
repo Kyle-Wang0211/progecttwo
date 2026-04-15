@@ -16,6 +16,7 @@ from .pipeline.run_matcha_mesh import run_matcha_mesh
 from .pipeline.run_optimize_default_mesh import run_optimize_default_mesh
 from .pipeline.run_slam3r import run_slam3r
 from .pipeline.run_sparse2dgs_surface import run_sparse2dgs_surface
+from .quality_gate import hq_gate_failure_reason
 from .runtime import ControlPlaneClient, push_runtime
 from .storage_client import ObjectStorageClient
 
@@ -263,6 +264,45 @@ def _map_optimize_default_mesh_progress(local_progress: float) -> float:
     return 0.88 + (0.94 - 0.88) * ratio
 
 
+def _map_matcha_mesh_progress(local_progress: float) -> float:
+    ratio = min(max(local_progress, 0.0), 1.0)
+    return 0.82 + (0.88 - 0.82) * ratio
+
+
+def _map_bake_default_texture_progress(local_progress: float) -> float:
+    ratio = min(max(local_progress, 0.0), 1.0)
+    return 0.94 + (0.97 - 0.94) * ratio
+
+
+def _make_matcha_mesh_progress_callback(
+    *,
+    client: ControlPlaneClient,
+    ctx: JobContext,
+    tracker: _RuntimeTracker,
+):
+    def callback(payload: dict[str, Any]) -> None:
+        local_progress = float(payload.get("progress", 0.0))
+        title = str(payload.get("title") or "正在执行 MAtCha 网格提取")
+        detail = str(payload.get("detail") or "正在从多窗口高分辨率表面里提取 HQ 主网格。")
+        metrics = {
+            "matcha_local_progress_percent": f"{min(max(local_progress, 0.0), 1.0) * 100:.1f}",
+        }
+        extra_metrics = payload.get("metrics")
+        if isinstance(extra_metrics, dict):
+            metrics.update({str(key): str(value) for key, value in extra_metrics.items()})
+        _update_tracker_runtime(
+            client,
+            ctx,
+            tracker,
+            title=title,
+            detail=detail,
+            progress_fraction=_map_matcha_mesh_progress(local_progress),
+            metrics=metrics,
+        )
+
+    return callback
+
+
 def _make_optimize_default_mesh_progress_callback(
     *,
     client: ControlPlaneClient,
@@ -271,8 +311,8 @@ def _make_optimize_default_mesh_progress_callback(
 ):
     def callback(payload: dict[str, Any]) -> None:
         local_progress = float(payload.get("progress", 0.0))
-        title = str(payload.get("title") or "正在优化默认网格")
-        detail = str(payload.get("detail") or "正在清理碎片、修法线并收敛到移动端友好的默认 mesh 预算。")
+        title = str(payload.get("title") or "正在优化 HQ 网格")
+        detail = str(payload.get("detail") or "正在清理碎片、修法线并收敛到 HQ-only 的开放表面质量门槛。")
         metrics = {
             "optimize_local_progress_percent": f"{min(max(local_progress, 0.0), 1.0) * 100:.1f}",
         }
@@ -286,6 +326,35 @@ def _make_optimize_default_mesh_progress_callback(
             title=title,
             detail=detail,
             progress_fraction=_map_optimize_default_mesh_progress(local_progress),
+            metrics=metrics,
+        )
+
+    return callback
+
+
+def _make_bake_default_texture_progress_callback(
+    *,
+    client: ControlPlaneClient,
+    ctx: JobContext,
+    tracker: _RuntimeTracker,
+):
+    def callback(payload: dict[str, Any]) -> None:
+        local_progress = float(payload.get("progress", 0.0))
+        title = str(payload.get("title") or "正在投影 HQ 纹理")
+        detail = str(payload.get("detail") or "正在把多视图高分辨率照片投影到 HQ 网格。")
+        metrics = {
+            "texture_local_progress_percent": f"{min(max(local_progress, 0.0), 1.0) * 100:.1f}",
+        }
+        extra_metrics = payload.get("metrics")
+        if isinstance(extra_metrics, dict):
+            metrics.update({str(key): str(value) for key, value in extra_metrics.items()})
+        _update_tracker_runtime(
+            client,
+            ctx,
+            tracker,
+            title=title,
+            detail=detail,
+            progress_fraction=_map_bake_default_texture_progress(local_progress),
             metrics=metrics,
         )
 
@@ -332,8 +401,8 @@ def run_once(
             ctx=ctx,
             client=client,
             stage="curate",
-            title="正在筛选有效关键帧",
-            detail="正在按统一标准筛选可供 SLAM3R 使用的关键帧。",
+            title="正在整理关键帧",
+            detail="正在把端上已接受素材映射成稳定、可复现的 HQ 关键帧集合。",
             progress_fraction=0.28,
             action=lambda current_ctx, _tracker: curate_frames(current_ctx),
         )
@@ -377,16 +446,23 @@ def run_once(
             client=client,
             stage="matcha_mesh_extract",
             title="正在执行 MAtCha 网格提取",
-            detail="正在按 CVPR 2025 MAtCha 从稳定 surface 中提取默认 mesh。",
+            detail="正在按 CVPR 2025 MAtCha 从稳定 surface 中提取 HQ 网格主表面。",
             progress_fraction=0.82,
-            action=lambda current_ctx, _tracker: run_matcha_mesh(current_ctx),
+            action=lambda current_ctx, tracker: run_matcha_mesh(
+                current_ctx,
+                progress_callback=_make_matcha_mesh_progress_callback(
+                    client=client,
+                    ctx=current_ctx,
+                    tracker=tracker,
+                ),
+            ),
         )
         _run_step(
             ctx=ctx,
             client=client,
             stage="optimize_default_mesh",
-            title="正在优化默认网格",
-            detail="正在清理碎片、修法线并收敛到移动端友好的默认 mesh 预算。",
+            title="正在优化 HQ 网格",
+            detail="正在清理碎片、修法线并收敛到 HQ-only 的开放表面质量门槛。",
             progress_fraction=0.88,
             action=lambda current_ctx, tracker: run_optimize_default_mesh(
                 current_ctx,
@@ -401,32 +477,41 @@ def run_once(
             ctx=ctx,
             client=client,
             stage="bake_default_texture",
-            title="正在投影照片纹理",
-            detail="正在把多视图照片信息投影到默认 mesh，并写出 GLB 成品。",
+            title="正在投影 HQ 纹理",
+            detail="正在把多视图照片投影到 HQ 网格，并写出唯一的 HQ GLB 成品。",
             progress_fraction=0.94,
-            action=lambda current_ctx, _tracker: run_bake_default_texture(current_ctx),
+            action=lambda current_ctx, tracker: run_bake_default_texture(
+                current_ctx,
+                progress_callback=_make_bake_default_texture_progress_callback(
+                    client=client,
+                    ctx=current_ctx,
+                    tracker=tracker,
+                ),
+            ),
         )
 
-        default_manifest_holder: dict[str, dict[str, dict[str, object]]] = {}
+        publish_result_holder: dict[str, dict[str, object]] = {}
         _run_step(
             ctx=ctx,
             client=client,
             stage="publish_default_mesh",
-            title="正在整理默认网格成品",
-            detail="正在写出默认 mesh、海报和 viewer manifest。",
+            title="正在整理 HQ 成品",
+            detail="正在写出 HQ GLB、海报、quality report 和 viewer manifest。",
             progress_fraction=0.97,
-            action=lambda current_ctx, _tracker: default_manifest_holder.setdefault(
-                "manifest",
+            action=lambda current_ctx, _tracker: publish_result_holder.setdefault(
+                "result",
                 publish_default_mesh(current_ctx, client, storage),
             ),
         )
-        default_manifest = default_manifest_holder["manifest"]
+        publish_result = publish_result_holder["result"]
+        default_manifest = publish_result["artifact_manifest"]
+        quality_report = publish_result["quality_report"]
         _run_step(
             ctx=ctx,
             client=client,
             stage="artifact_upload",
-            title="正在回传默认网格成品",
-            detail="正在上传默认 mesh 成品清单并通知手机准备下载。",
+            title="正在回传 HQ 成品",
+            detail="正在上传 HQ 成品清单并通知手机准备下载。",
             progress_fraction=0.99,
             action=lambda current_ctx, _tracker: client.upload_artifact_manifest(
                 current_ctx.job_id,
@@ -435,9 +520,20 @@ def run_once(
             ),
         )
 
-        client.complete(ctx.job_id, worker_id, "已完成", "默认 mesh 成品已准备好")
+        failed_cards = [str(card) for card in (quality_report.get("failed_cards") or [])]
+        publish_allowed = bool(quality_report.get("publish_allowed"))
+        completion_detail = "HQ 成品已准备好"
+        if not publish_allowed:
+            completion_detail = "未达 HQ，仅供质检候选结果已上传"
+            if failed_cards:
+                completion_detail += f"。未通过：{', '.join(failed_cards)}。"
+
+        client.complete(ctx.job_id, worker_id, "已完成", completion_detail)
         print(
-            f"[object_slam3r_surface_v1] job={ctx.job_id} completed",
+            (
+                f"[object_slam3r_surface_v1] job={ctx.job_id} completed publish_allowed={publish_allowed}"
+                f" failed_cards={failed_cards}"
+            ),
             flush=True,
         )
         return True

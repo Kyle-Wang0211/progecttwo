@@ -308,6 +308,28 @@ class InMemoryRepository:
         with self._lock:
             return self.jobs.get(job_id)
 
+    def get_latest_job_by_client_record_id(
+        self,
+        client_record_id: str,
+        *,
+        capture_origin: Optional[str] = None,
+    ) -> Optional[JobRow]:
+        normalized_client_record_id = str(client_record_id or "").strip()
+        if not normalized_client_record_id:
+            return None
+        normalized_capture_origin = str(capture_origin or "").strip() or None
+        with self._lock:
+            matches = [
+                row
+                for row in self.jobs.values()
+                if row.client_record_id == normalized_client_record_id
+                and (normalized_capture_origin is None or row.capture_origin == normalized_capture_origin)
+            ]
+        if not matches:
+            return None
+        matches.sort(key=lambda row: (row.created_at, row.updated_at), reverse=True)
+        return matches[0]
+
     def update_job(self, job_id: str, **changes: Any) -> JobRow:
         with self._lock:
             row = self.jobs[job_id]
@@ -921,6 +943,44 @@ class PostgresRepository:
     def get_job(self, job_id: str) -> Optional[JobRow]:
         with self._connect() as conn:
             record = conn.execute("select * from jobs where job_id = %s", (job_id,)).fetchone()
+        if record is None:
+            return None
+        return self._job_row_from_record(record)
+
+    def get_latest_job_by_client_record_id(
+        self,
+        client_record_id: str,
+        *,
+        capture_origin: Optional[str] = None,
+    ) -> Optional[JobRow]:
+        normalized_client_record_id = str(client_record_id or "").strip()
+        if not normalized_client_record_id:
+            return None
+        normalized_capture_origin = str(capture_origin or "").strip() or None
+        with self._connect() as conn:
+            if normalized_capture_origin is None:
+                record = conn.execute(
+                    """
+                    select *
+                    from jobs
+                    where client_record_id = %s::text
+                    order by created_at desc, updated_at desc
+                    limit 1
+                    """,
+                    (normalized_client_record_id,),
+                ).fetchone()
+            else:
+                record = conn.execute(
+                    """
+                    select *
+                    from jobs
+                    where client_record_id = %s::text
+                      and capture_origin = %s::text
+                    order by created_at desc, updated_at desc
+                    limit 1
+                    """,
+                    (normalized_client_record_id, normalized_capture_origin),
+                ).fetchone()
         if record is None:
             return None
         return self._job_row_from_record(record)

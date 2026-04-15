@@ -11,6 +11,7 @@ import numpy as np
 
 from .config import config
 from .context import JobContext
+from .quality_gate import quality_report_path
 
 
 _TINY_PNG_BASE64 = (
@@ -51,9 +52,22 @@ def _write_poster(ctx: JobContext, destination: Path) -> None:
         pass
 
     try:
-        shutil.copy2(source, destination)
+        import cv2
+
+        image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+        if image is not None and cv2.imwrite(str(destination), image):
+            return
     except Exception:
-        destination.write_bytes(base64.b64decode(_TINY_PNG_BASE64))
+        pass
+
+    if source.suffix.lower() == ".png":
+        try:
+            shutil.copy2(source, destination)
+            return
+        except Exception:
+            pass
+
+    destination.write_bytes(base64.b64decode(_TINY_PNG_BASE64))
 
 
 def ensure_default_publish_files(ctx: JobContext) -> dict[str, Path]:
@@ -80,17 +94,29 @@ def ensure_hq_publish_files(ctx: JobContext) -> dict[str, Path]:
     return {"hq_asset": hq_asset}
 
 
-def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
+def write_viewer_manifest(
+    ctx: JobContext,
+    *,
+    hq_ready: bool,
+    publish_allowed: bool,
+    failed_cards: list[str] | None = None,
+) -> Path:
     assert ctx.default_publish_dir is not None
     default_asset = _resolve_default_publish_asset(ctx.default_publish_dir)
     default_kind = _artifact_kind_for_path(default_asset)
+    failed_cards = [str(card) for card in (failed_cards or [])]
     payload: dict[str, Any] = {
         "version": "object_surface_v1",
+        "product_mode": "hq_only",
+        "primary_product": "hq_mesh_glb",
+        "inspection_only": not publish_allowed,
+        "hq_passed": publish_allowed,
+        "failed_cards": failed_cards,
         "default_asset": {
             "kind": default_kind,
             "path": f"default/{default_asset.name}",
             "ready": True,
-            "representation": "textured_mesh" if default_kind in {"glb", "mesh"} else "surface_mesh",
+            "representation": "hq_textured_mesh" if default_kind in {"glb", "mesh"} else "hq_surface_mesh",
         },
         "poster": {
             "kind": "png",
@@ -100,13 +126,20 @@ def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
             "reconstruction": "slam3r",
             "surface": "sparse2dgs",
             "mesh_extraction": "matcha",
-            "delivery_mesh": "optimized_mesh",
-            "texture_bake": "visible_photo_projection_glb" if default_kind == "glb" else "disabled",
-            "rendering": "default_mesh_glb" if default_kind == "glb" else "disabled",
+            "delivery_mesh": "hq_optimized_open_surface",
+            "texture_bake": "hq_visible_photo_projection_glb" if default_kind == "glb" else "disabled",
+            "rendering": "hq_mesh_glb" if default_kind == "glb" else "disabled",
             "hq": "disabled",
         },
         "camera_preset": _default_camera_preset(ctx),
     }
+    report_path = quality_report_path(ctx)
+    if report_path.exists():
+        payload["quality_report"] = {
+            "kind": "json",
+            "path": f"default/{report_path.name}",
+            "ready": True,
+        }
 
     hq_asset = _resolve_optional_hq_publish_asset(ctx.hq_dir) if ctx.hq_dir is not None else None
     if hq_asset is not None:
@@ -114,12 +147,6 @@ def write_viewer_manifest(ctx: JobContext, *, hq_ready: bool) -> Path:
             "kind": "gaussian",
             "path": f"hq/{hq_asset.name}",
             "ready": hq_ready,
-        }
-    else:
-        payload["hq_asset"] = {
-            "kind": "gaussian",
-            "path": "hq/hq_asset.ply",
-            "ready": False,
         }
 
     manifest_path = ctx.default_publish_dir / "viewer_manifest.json"
@@ -132,12 +159,23 @@ def build_default_artifact_manifest(
     default_asset: dict[str, Any],
     preview_asset: dict[str, Any],
     viewer_manifest_asset: dict[str, Any],
+    quality_report_asset: dict[str, Any] | None = None,
+    publish_allowed: bool,
+    failed_cards: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    failed_cards = [str(card) for card in (failed_cards or [])]
+    payload = {
         "primary_artifact": default_asset,
         "preview": preview_asset,
         "viewer_manifest": viewer_manifest_asset,
+        "product_mode": "hq_only",
+        "inspection_only": not publish_allowed,
+        "hq_passed": publish_allowed,
+        "failed_cards": failed_cards,
     }
+    if quality_report_asset is not None:
+        payload["quality_report"] = quality_report_asset
+    return payload
 
 
 def build_hq_artifact_manifest(

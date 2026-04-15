@@ -210,6 +210,10 @@ sys.path.insert(0, str(repo_dir / "2d-gaussian-splatting"))
 
 payload = {}
 checks = {
+    "pytorch3d": "import pytorch3d as m; payload['pytorch3d_module'] = m.__file__",
+    "pytorch3d.runtime": "from pytorch3d.renderer import FoVPerspectiveCameras, TexturesVertex, TexturesUV; from pytorch3d.ops import knn_points; from pytorch3d.structures import Meshes, join_meshes_as_scene; payload['pytorch3d_runtime_ok'] = True",
+    "open3d": "import open3d as m; payload['open3d_module'] = m.__file__",
+    "skimage": "import skimage as m; payload['skimage_module'] = m.__file__",
     "diff_surfel_rasterization": "import diff_surfel_rasterization as m; payload['diff_surfel_rasterization_module'] = m.__file__",
     "simple_knn._C": "import simple_knn._C as m; payload['simple_knn_module'] = m.__file__",
     "tetranerf_cpp_extension": "from tetranerf.utils.extension import tetranerf_cpp_extension as m; payload['tetranerf_module'] = m.__file__",
@@ -270,25 +274,147 @@ print(json.dumps(payload, ensure_ascii=False))
     payload["python_bin"] = python_bin
     payload["repo_dir"] = str(repo_dir)
     payload["ok"] = bool(
-        payload.get("diff_surfel_rasterization")
+        payload.get("pytorch3d")
+        and payload.get("pytorch3d.runtime")
+        and payload.get("open3d")
+        and payload.get("skimage")
+        and payload.get("diff_surfel_rasterization")
         and payload.get("simple_knn._C")
         and payload.get("tetranerf_cpp_extension")
     )
     return payload
 
 
+def _probe_sparse2dgs_runtime() -> dict[str, object]:
+    python_bin = os.environ.get("OBJECT_SLAM3R_SURFACE_SPARSE2DGS_PYTHON_BIN", "").strip()
+    repo_dir = config.sparse2dgs_repo.strip()
+    if not python_bin:
+        return {"python_bin": None, "ok": False, "error": "missing_python_bin"}
+    if not repo_dir:
+        return {"python_bin": python_bin, "ok": False, "error": "missing_repo_dir"}
+    script = r"""
+import importlib.util
+import json
+import pathlib
+import sys
+
+repo_dir = pathlib.Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(repo_dir))
+
+payload = {}
+for name in ("mediapy", "cv2", "matplotlib", "numpy", "torch"):
+    payload[name] = bool(importlib.util.find_spec(name))
+
+print(json.dumps(payload, ensure_ascii=False))
+"""
+    try:
+        completed = subprocess.run(
+            [python_bin, "-c", script, repo_dir],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=dict(os.environ),
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "python_bin": python_bin,
+            "repo_dir": repo_dir,
+            "ok": False,
+            "error": f"probe_failed:{type(exc).__name__}:{exc}",
+        }
+    if completed.returncode != 0:
+        return {
+            "python_bin": python_bin,
+            "repo_dir": repo_dir,
+            "ok": False,
+            "error": f"probe_exit_{completed.returncode}",
+            "stderr": (completed.stderr or "").strip(),
+            "stdout": (completed.stdout or "").strip(),
+        }
+    lines = [line.strip() for line in (completed.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return {
+            "python_bin": python_bin,
+            "repo_dir": repo_dir,
+            "ok": False,
+            "error": "probe_no_output",
+        }
+    try:
+        payload = json.loads(lines[-1])
+    except json.JSONDecodeError:
+        return {
+            "python_bin": python_bin,
+            "repo_dir": repo_dir,
+            "ok": False,
+            "error": "probe_invalid_json",
+            "stdout": (completed.stdout or "").strip(),
+        }
+    payload["python_bin"] = python_bin
+    payload["repo_dir"] = repo_dir
+    payload["ok"] = bool(
+        payload.get("mediapy")
+        and payload.get("cv2")
+        and payload.get("matplotlib")
+        and payload.get("numpy")
+        and payload.get("torch")
+    )
+    missing = [name for name in ("mediapy", "cv2", "matplotlib", "numpy", "torch") if not payload.get(name)]
+    payload["missing_runtime_modules"] = missing
+    return payload
+
+
+def _startup_command_status() -> dict[str, object]:
+    package_root = Path(__file__).resolve().parent
+    scripts_dir = package_root / "scripts"
+
+    def classify(name: str, template: str, expected_script: str, *, legacy_markers: tuple[str, ...] = ()) -> dict[str, object]:
+        expected_path = str((scripts_dir / expected_script).resolve())
+        raw = (template or "").strip()
+        lowered = raw.lower()
+        uses_expected_wrapper = expected_path in raw or expected_script in raw
+        legacy_detected = any(marker in lowered for marker in legacy_markers)
+        return {
+            "name": name,
+            "configured": bool(raw),
+            "uses_expected_wrapper": uses_expected_wrapper,
+            "legacy_detected": legacy_detected,
+            "template": raw,
+            "expected_wrapper": expected_path,
+        }
+
+    return {
+        "slam3r": classify("slam3r", config.slam3r_command_template, "run_slam3r_official.sh"),
+        "sparse2dgs": classify("sparse2dgs", config.sparse2dgs_command_template, "run_sparse2dgs_official.sh"),
+        "matcha": classify(
+            "matcha",
+            config.matcha_command_template,
+            "run_matcha_official.sh",
+            legacy_markers=(
+                "extract_mesh_adaptive_tsdf.py",
+                "2d-gaussian-splatting/extract_mesh_adaptive_tsdf.py",
+                "python 2d-gaussian-splatting",
+            ),
+        ),
+    }
+
+
 def _log_startup_self_check() -> None:
     layout = _startup_layout_status()
     hf_status = _hf_token_status()
     slam3r_runtime = _probe_slam3r_runtime()
+    sparse2dgs_runtime = _probe_sparse2dgs_runtime()
     matcha_runtime = _probe_matcha_runtime()
+    command_status = _startup_command_status()
     print(
         "[object_slam3r_surface_v1] startup_self_check "
         + json.dumps(
             {
                 "layout": layout,
                 "hf_token": hf_status,
+                "command_status": command_status,
                 "slam3r_runtime": slam3r_runtime,
+                "sparse2dgs_runtime": sparse2dgs_runtime,
                 "matcha_runtime": matcha_runtime,
             },
             ensure_ascii=False,

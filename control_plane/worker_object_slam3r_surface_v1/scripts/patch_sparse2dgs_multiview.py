@@ -7,20 +7,75 @@ from pathlib import Path
 
 def patch_train_py(path: Path) -> bool:
     text = path.read_text()
-    if "n_views=len(scene.getTrainCameras().copy())" in text:
-        return False
+    changed = False
 
-    old = (
-        '                         mask=gaussians.view_indexs[get_view_idx(scene.getTrainCameras().copy(), viewpoint_cam.image_name)].squeeze() > 0.5) * opt.lambda_dr\n'
-    )
-    new = (
-        '                         mask=gaussians.view_indexs[get_view_idx(scene.getTrainCameras().copy(), viewpoint_cam.image_name)].squeeze() > 0.5,\n'
-        '                         n_views=len(scene.getTrainCameras().copy())) * opt.lambda_dr\n'
-    )
-    if old not in text:
-        raise RuntimeError(f"expected Sparse2DGS train.py pattern not found in {path}")
-    path.write_text(text.replace(old, new))
-    return True
+    if "n_views=len(scene.getTrainCameras().copy())" not in text:
+        old = (
+            '                         mask=gaussians.view_indexs[get_view_idx(scene.getTrainCameras().copy(), viewpoint_cam.image_name)].squeeze() > 0.5) * opt.lambda_dr\n'
+        )
+        new = (
+            '                         mask=gaussians.view_indexs[get_view_idx(scene.getTrainCameras().copy(), viewpoint_cam.image_name)].squeeze() > 0.5,\n'
+            '                         n_views=len(scene.getTrainCameras().copy())) * opt.lambda_dr\n'
+        )
+        if old not in text:
+            raise RuntimeError(f"expected Sparse2DGS train.py pattern not found in {path}")
+        text = text.replace(old, new)
+        changed = True
+
+    if "object_slam3r_surface_feature_guard" not in text:
+        old = '        fea_loss = get_fea_loss(render_pkg["feature_map"], viewpoint_cam.feature[0]) * opt.lambda_fea\n'
+        new = (
+            '        feature_map = render_pkg["feature_map"]\n'
+            '        feature_ref = viewpoint_cam.feature[0]\n'
+            '        # object_slam3r_surface_feature_guard: fallback gracefully when\n'
+            '        # downgraded Sparse2DGS windows produce empty or mismatched feature maps.\n'
+            '        if (\n'
+            '            feature_map.ndim == 3\n'
+            '            and feature_ref.ndim == 3\n'
+            '            and feature_map.shape[0] > 0\n'
+            '            and feature_map.shape == feature_ref.shape\n'
+            '        ):\n'
+            '            fea_loss = get_fea_loss(feature_map, feature_ref) * opt.lambda_fea\n'
+            '        else:\n'
+            '            fea_loss = image.sum() * 0.0\n'
+        )
+        if old not in text:
+            raise RuntimeError(f"expected Sparse2DGS feature loss pattern not found in {path}")
+        text = text.replace(old, new)
+        changed = True
+
+    if "object_slam3r_surface_feature_vis_guard" not in text:
+        old = (
+            '                mvsfea = transforms.ToPILImage()(visualize_feature_map(viewpoint_cam.feature)) \n'
+            '                rendfea = transforms.ToPILImage()(visualize_feature_map(render_pkg["feature_map"][None])) \n'
+            '                _, h, w = gt_image.shape\n'
+        )
+        new = (
+            '                _, h, w = gt_image.shape\n'
+            '                feature_vis_size = (w, h)\n'
+            '                # object_slam3r_surface_feature_vis_guard: downgraded windows can\n'
+            '                # legitimately produce empty feature channels. Skip debug PCA rather\n'
+            '                # than aborting training for a visualization-only path.\n'
+            '                def _safe_feature_vis(feature_tensor):\n'
+            '                    if feature_tensor is None or getattr(feature_tensor, "ndim", 0) < 3:\n'
+            '                        return Image.new("RGB", feature_vis_size)\n'
+            '                    if feature_tensor.shape[-3] <= 0:\n'
+            '                        return Image.new("RGB", feature_vis_size)\n'
+            '                    try:\n'
+            '                        return transforms.ToPILImage()(visualize_feature_map(feature_tensor))\n'
+            '                    except Exception:\n'
+            '                        return Image.new("RGB", feature_vis_size)\n'
+            '                mvsfea = _safe_feature_vis(viewpoint_cam.feature)\n'
+            '                rendfea = _safe_feature_vis(render_pkg["feature_map"][None])\n'
+        )
+        if old not in text:
+            raise RuntimeError(f"expected Sparse2DGS feature visualization pattern not found in {path}")
+        text = text.replace(old, new)
+        changed = True
+
+    if changed:
+        path.write_text(text)
+    return changed
 
 
 def patch_loss_utils_py(path: Path) -> bool:
@@ -78,37 +133,112 @@ def patch_loss_utils_py(path: Path) -> bool:
 
 def patch_gaussian_model_py(path: Path) -> bool:
     text = path.read_text()
-    if "object_slam3r_surface_multiview_update_points" in text:
-        return False
+    changed = False
 
-    old = (
-        "            view_index = self.view_indexs[i].squeeze() > 0.5 # 3n\n"
-        "            selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)\n"
-        "            selected_pts_mask_all = selected_pts_mask[None, :].repeat(3, 1).reshape(-1)# n -> 3n\n"
-        "            selected_pts_mask_all = torch.logical_and(selected_pts_mask_all, view_index.cuda())\n"
-    )
-    new = (
-        "            # object_slam3r_surface_multiview_update_points: upstream assumes exactly 3 views.\n"
-        "            view_index = self.view_indexs[i].squeeze() > 0.5\n"
-        "            selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)\n"
-        "            point_count = max(int(selected_pts_mask.shape[0]), 1)\n"
-        "            total_count = int(view_index.shape[0])\n"
-        "            repeat_count = max(total_count // point_count, 1)\n"
-        "            selected_pts_mask_all = selected_pts_mask[None, :].repeat(repeat_count, 1).reshape(-1)\n"
-        "            if selected_pts_mask_all.shape[0] < total_count:\n"
-        "                pad = total_count - selected_pts_mask_all.shape[0]\n"
-        "                selected_pts_mask_all = torch.cat([\n"
-        "                    selected_pts_mask_all,\n"
-        "                    torch.zeros(pad, device=selected_pts_mask.device, dtype=torch.bool),\n"
-        "                ])\n"
-        "            elif selected_pts_mask_all.shape[0] > total_count:\n"
-        "                selected_pts_mask_all = selected_pts_mask_all[:total_count]\n"
-        "            selected_pts_mask_all = torch.logical_and(selected_pts_mask_all, view_index.cuda())\n"
-    )
-    if old not in text:
-        raise RuntimeError(f"expected Sparse2DGS gaussian_model.py pattern not found in {path}")
-    path.write_text(text.replace(old, new))
-    return True
+    if "object_slam3r_surface_multiview_update_points" not in text:
+        old = (
+            "            view_index = self.view_indexs[i].squeeze() > 0.5 # 3n\n"
+            "            selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)\n"
+            "            selected_pts_mask_all = selected_pts_mask[None, :].repeat(3, 1).reshape(-1)# n -> 3n\n"
+            "            selected_pts_mask_all = torch.logical_and(selected_pts_mask_all, view_index.cuda())\n"
+        )
+        new = (
+            "            # object_slam3r_surface_multiview_update_points: upstream assumes exactly 3 views.\n"
+            "            view_index = self.view_indexs[i].squeeze() > 0.5\n"
+            "            selected_pts_mask = torch.logical_and(ncc < points_ncc, ncc < 0.5)\n"
+            "            point_count = max(int(selected_pts_mask.shape[0]), 1)\n"
+            "            total_count = int(view_index.shape[0])\n"
+            "            repeat_count = max(total_count // point_count, 1)\n"
+            "            selected_pts_mask_all = selected_pts_mask[None, :].repeat(repeat_count, 1).reshape(-1)\n"
+            "            if selected_pts_mask_all.shape[0] < total_count:\n"
+            "                pad = total_count - selected_pts_mask_all.shape[0]\n"
+            "                selected_pts_mask_all = torch.cat([\n"
+            "                    selected_pts_mask_all,\n"
+            "                    torch.zeros(pad, device=selected_pts_mask.device, dtype=torch.bool),\n"
+            "                ])\n"
+            "            elif selected_pts_mask_all.shape[0] > total_count:\n"
+            "                selected_pts_mask_all = selected_pts_mask_all[:total_count]\n"
+            "            selected_pts_mask_all = torch.logical_and(selected_pts_mask_all, view_index.cuda())\n"
+        )
+        if old not in text:
+            raise RuntimeError(f"expected Sparse2DGS gaussian_model.py pattern not found in {path}")
+        text = text.replace(old, new)
+        changed = True
+
+    if "object_slam3r_surface_checkpoint_guard" not in text:
+        old = (
+            "    def capture(self):\n"
+            "        return (\n"
+            "            self.active_sh_degree,\n"
+            "            self._xyz,\n"
+            "            self._features_dc,\n"
+            "            self._features_rest,\n"
+            "            self._scaling,\n"
+            "            self._rotation,\n"
+            "            self._opacity,\n"
+            "            self.max_radii2D,\n"
+            "            self.xyz_gradient_accum,\n"
+            "            self.denom,\n"
+            "            self.optimizer.state_dict(),\n"
+            "            self.spatial_lr_scale,\n"
+            "        )\n"
+            "    \n"
+            "    def restore(self, model_args, training_args):\n"
+        )
+        new = (
+            "    def capture(self):\n"
+            "        # object_slam3r_surface_checkpoint_guard: some torch/optimizer combinations\n"
+            "        # fail to serialize optimizer state mid-training. Preserve the model weights\n"
+            "        # so resume can still continue from the latest checkpoint.\n"
+            "        optimizer_state = None\n"
+            "        if self.optimizer is not None:\n"
+            "            try:\n"
+            "                optimizer_state = self.optimizer.state_dict()\n"
+            "            except Exception as exc:\n"
+            "                print(f\"[Sparse2DGS] warning: optimizer checkpoint state unavailable: {exc}\")\n"
+            "        return (\n"
+            "            self.active_sh_degree,\n"
+            "            self._xyz,\n"
+            "            self._features_dc,\n"
+            "            self._features_rest,\n"
+            "            self._scaling,\n"
+            "            self._rotation,\n"
+            "            self._opacity,\n"
+            "            self.max_radii2D,\n"
+            "            self.xyz_gradient_accum,\n"
+            "            self.denom,\n"
+            "            optimizer_state,\n"
+            "            self.spatial_lr_scale,\n"
+            "        )\n"
+            "    \n"
+            "    def restore(self, model_args, training_args):\n"
+        )
+        if old not in text:
+            raise RuntimeError(f"expected Sparse2DGS checkpoint capture pattern not found in {path}")
+        text = text.replace(old, new)
+        old_restore = (
+            "        self.training_setup(training_args)\n"
+            "        self.xyz_gradient_accum = xyz_gradient_accum\n"
+            "        self.denom = denom\n"
+            "        self.optimizer.load_state_dict(opt_dict)\n"
+        )
+        new_restore = (
+            "        self.training_setup(training_args)\n"
+            "        self.xyz_gradient_accum = xyz_gradient_accum\n"
+            "        self.denom = denom\n"
+            "        if opt_dict is not None:\n"
+            "            self.optimizer.load_state_dict(opt_dict)\n"
+            "        else:\n"
+            "            print(\"[Sparse2DGS] resuming without optimizer state\")\n"
+        )
+        if old_restore not in text:
+            raise RuntimeError(f"expected Sparse2DGS checkpoint restore pattern not found in {path}")
+        text = text.replace(old_restore, new_restore)
+        changed = True
+
+    if changed:
+        path.write_text(text)
+    return changed
 
 
 def main() -> int:

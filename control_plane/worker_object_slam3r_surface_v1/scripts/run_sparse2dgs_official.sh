@@ -9,6 +9,8 @@ fi
 REPO_DIR="$1"
 SCENE_DIR="$2"
 OUTPUT_DIR="$3"
+shift 3
+EXTRA_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 PYTHON_BIN="${OBJECT_SLAM3R_SURFACE_SPARSE2DGS_PYTHON_BIN:-${PYTHON_BIN:-${ROOT_DIR}/venv/bin/python}}"
@@ -36,4 +38,5 @@ fi
 cd "${REPO_DIR}"
 exec "${PYTHON_BIN}" train.py \
   -s "${SCENE_DIR}" \
-  -m "${OUTPUT_DIR}"
+  -m "${OUTPUT_DIR}" \
+  "${EXTRA_ARGS[@]}"
