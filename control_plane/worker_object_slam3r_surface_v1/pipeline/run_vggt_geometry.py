@@ -176,7 +176,7 @@ def run_vggt_geometry(
         "backend": "vggt",
         "paper": "Visual Geometry Grounded Transformer",
         "paper_url": "https://arxiv.org/abs/2503.11651",
-        "checkpoint": _VGGT_CHECKPOINT_DEFAULT,
+        "checkpoint": os.environ.get("OBJECT_SLAM3R_SURFACE_VGGT_CHECKPOINT", _VGGT_CHECKPOINT_DEFAULT),
         "frame_count": len(frame_paths),
         "inference_seconds": round(inference_seconds, 2),
         "peak_gpu_mb": int(peak_mem_mb),
