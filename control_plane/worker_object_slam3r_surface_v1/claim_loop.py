@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Any, Optional
@@ -8,6 +9,7 @@ from .config import config
 from .context import JobContext
 from .paths import ensure_job_layout
 from .pipeline.bridge_slam3r_scene import bridge_slam3r_scene
+from .pipeline.apply_subject_mask import apply_subject_mask
 from .pipeline.curate_frames import curate_frames
 from .pipeline.curate_from_client import curate_from_client
 from .pipeline.download_input import download_input
@@ -475,11 +477,33 @@ def run_once(
                 action=lambda current_ctx, _tracker: curate_frames(current_ctx),
                 recorder=recorder,
             )
+        # MobileSAM 主体分割 — env-gated, default off during Phase A.
+        # When AETHER_USE_SUBJECT_MASK=1 AND the manifest carries
+        # per-frame `subject_mask` blocks (only true once the Flutter
+        # client's Phase B native pixel-buffer bridge ships), each
+        # curated JPEG gets its background pixels white-filled before
+        # VGGT sees it. When env is off OR no masks were uploaded, the
+        # stage is a no-op and exits in <50 ms — safe to leave wired
+        # in for old client + new worker combos.
+        _run_step(
+            ctx=ctx,
+            client=client,
+            stage="apply_subject_mask",
+            title="正在按主体掩码裁剪背景",
+            detail="正在把客户端上传的 MobileSAM 主体掩码套到 VGGT 输入帧上,白化背景以减少噪声重建。",
+            progress_fraction=0.32,
+            action=lambda current_ctx, _tracker: apply_subject_mask(current_ctx),
+            recorder=recorder,
+        )
         # Geometry backend branch: slam3r (incremental, needs bridge) vs
         # vggt (feed-forward, writes contract directly). Selection via
-        # config.geometry_backend env. Default slam3r for safety; flip to
-        # vggt once production A/B confirms.
-        _geometry_backend = str(getattr(config, "geometry_backend", "slam3r") or "slam3r").lower()
+        # config.geometry_backend env. Default flipped to vggt for object-
+        # level dome captures (~50-150 frames) — VGGT's <1 s forward pass
+        # makes SLAM3R's ~15 min incremental untenable at this scale and
+        # eliminates the bridge stage's PnP back-solve as a failure source.
+        # SLAM3R remains as a fallback for unusually long sequences or if
+        # VGGT OOMs (set OBJECT_SLAM3R_SURFACE_GEOMETRY_BACKEND=slam3r).
+        _geometry_backend = str(getattr(config, "geometry_backend", "vggt") or "vggt").lower()
         if _geometry_backend == "vggt":
             _run_step(
                 ctx=ctx,
