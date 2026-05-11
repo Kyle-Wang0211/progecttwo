@@ -10,6 +10,7 @@ from .context import JobContext
 from .paths import ensure_job_layout
 from .pipeline.bridge_slam3r_scene import bridge_slam3r_scene
 from .pipeline.apply_subject_mask import apply_subject_mask
+from .pipeline.crop_mesh_to_subject_sphere import crop_mesh_to_subject_sphere
 from .pipeline.curate_frames import curate_frames
 from .pipeline.curate_from_client import curate_from_client
 from .pipeline.download_input import download_input
@@ -659,6 +660,28 @@ def run_once(
                 ),
                 recorder=recorder,
             )
+
+        # Geometric subject crop. Trims the mesh to a sphere around the
+        # inferred subject center (centroid of VGGT camera positions ×
+        # AETHER_CROP_RADIUS_RATIO of the orbit radius). Removes far-field
+        # carcasses (background walls, distant furniture) that the
+        # dome's per-frame quality gate cannot stop — those filter the
+        # cameras, not the pixels each camera sees. Disable by setting
+        # AETHER_CROP_RADIUS_RATIO=0 or >=1.0. Pairs with the Phase B
+        # frame-level SAM mask path (apply_subject_mask above): SAM
+        # gives pixel-precise subject boundaries on each frame; this
+        # geometry crop guarantees the mesh stays inside the orbit
+        # shell regardless.
+        _run_step(
+            ctx=ctx,
+            client=client,
+            stage="crop_mesh_to_subject_sphere",
+            title="正在按主体球裁剪 mesh",
+            detail="用 VGGT 相机位置推主体中心 + 拍摄半径,把远景碎片砍掉。",
+            progress_fraction=0.95,
+            action=lambda current_ctx, _tracker: crop_mesh_to_subject_sphere(current_ctx),
+            recorder=recorder,
+        )
 
         # Advisory: renders delivered mesh from non-training poses, records
         # LPIPS/SSIM to delivery/holdout_lpips_advisory.json. Pure diagnostic
