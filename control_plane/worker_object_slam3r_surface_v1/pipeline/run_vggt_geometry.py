@@ -28,8 +28,21 @@ from typing import Any
 from ..context import JobContext
 
 
-_VGGT_REPO_DEFAULT = "/opt/object_slam3r_surface_v1_sidecar/third_party/vggt"
-_VGGT_CHECKPOINT_DEFAULT = "facebook/VGGT-1B"
+# VGGT repo path: env override first, then probe both layouts.
+# Legacy /opt/object_slam3r_surface_v1_sidecar/... was the original sidecar
+# install path; new Vast.ai workers (2026-05+) install under /root/third_party/.
+_VGGT_REPO_DEFAULT = next(
+    (p for p in [
+        "/root/third_party/vggt",
+        "/opt/object_slam3r_surface_v1_sidecar/third_party/vggt",
+    ] if os.path.exists(p)),
+    "/root/third_party/vggt",
+)
+# Commercial checkpoint (release 2025-09-17). VGGT-1B (non-Commercial) is
+# CC-BY-NC and cannot be used in production. VGGT-1B-Commercial is gated by
+# Meta's LLaMA-style application; the HF token must hold accepted access.
+# Override via env OBJECT_SLAM3R_SURFACE_VGGT_CHECKPOINT.
+_VGGT_CHECKPOINT_DEFAULT = "facebook/VGGT-1B-Commercial"
 _VGGT_TARGET_EDGE = 518  # ViT patch-aligned, matches VGGT training
 # Cap dense pointcloud so 2DGS/MILo init doesn't choke. 500k is ~5× denser
 # than SLAM3R's typical output and well within train.py's init capacity.

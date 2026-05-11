@@ -18,8 +18,116 @@ from __future__ import annotations
 import argparse, json, os, shutil, subprocess, sys, time
 from pathlib import Path
 
-TEXRECON_BIN = '/workspace/mvs-texturing/build/apps/texrecon/texrecon'
+# Binary paths: env override first, then probe the two known install layouts.
+# Original /workspace/mvs-texturing/... was the legacy sidecar layout; new
+# Vast.ai workers build mvs-texturing under /root/third_party/. Without the
+# env-or-probe fallback, run_poisson_mvs_subprocess() fails immediately on
+# any non-legacy worker.
+def _resolve_bin(env_key: str, candidates: list[str]) -> str:
+    override = os.environ.get(env_key)
+    if override:
+        return override
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return candidates[0]
+
+
+TEXRECON_BIN = _resolve_bin('TEXRECON_BIN', [
+    '/root/third_party/mvs-texturing/build/apps/texrecon/texrecon',
+    '/workspace/mvs-texturing/build/apps/texrecon/texrecon',
+])
+POISSON_RECON_BIN = os.environ.get('POISSON_RECON_BIN', '/root/third_party/PoissonRecon/Bin/Linux/PoissonRecon')
+SURFACE_TRIMMER_BIN = os.environ.get('SURFACE_TRIMMER_BIN', '/root/third_party/PoissonRecon/Bin/Linux/SurfaceTrimmer')
 TARGET_EDGE = 518
+
+
+def _run_poisson(pcd, *, depth: int, work_dir: Path):
+    """Poisson surface reconstruction with multi-threaded fast path.
+
+    Fast: PoissonRecon C++ binary (mkazhdan/PoissonRecon, OpenMP, 16-32x speedup on 32+ cores).
+    Fallback: Open3D Python (single-threaded; used if binary missing or fails).
+
+    Returns (open3d.geometry.TriangleMesh, np.ndarray of per-vertex density).
+    """
+    import numpy as np
+    import open3d as o3d
+
+    if os.path.exists(POISSON_RECON_BIN) and os.access(POISSON_RECON_BIN, os.X_OK):
+        try:
+            n_threads = int(os.environ.get('POISSON_RECON_THREADS',
+                                           os.environ.get('OMP_NUM_THREADS', 32)))
+            in_ply = work_dir / '_poisson_in.ply'
+            out_ply = work_dir / '_poisson_out.ply'
+            o3d.io.write_point_cloud(str(in_ply), pcd, write_ascii=False)
+
+            cmd = [POISSON_RECON_BIN,
+                   '--in', str(in_ply),
+                   '--out', str(out_ply),
+                   '--depth', str(depth),
+                   '--density']
+            # PoissonRecon CLI 不接受 --threads,通过 OMP_NUM_THREADS env 控制
+            env = {**os.environ, 'OMP_NUM_THREADS': str(n_threads)}
+            print(f'PoissonRecon binary: depth={depth} OMP_NUM_THREADS={n_threads}', flush=True)
+            rc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=env)
+            if rc.returncode != 0:
+                raise RuntimeError(f'rc={rc.returncode} stderr={rc.stderr[-400:]}')
+
+            # Layer 1: SurfaceTrimmer (Misha Kazhdan 官方 PoissonRecon 工具) ——
+            # 砍低 sampling density 区域(噪声/外推) + 小 island(碎片)
+            # 参考: https://www.cs.jhu.edu/~misha/Code/PoissonRecon/
+            if os.path.exists(SURFACE_TRIMMER_BIN) and os.access(SURFACE_TRIMMER_BIN, os.X_OK):
+                trim_density = float(os.environ.get('POISSON_TRIM_DENSITY', '7'))
+                trim_aratio = float(os.environ.get('POISSON_TRIM_ARATIO', '0.005'))
+                trim_smooth = int(os.environ.get('POISSON_TRIM_SMOOTH', '5'))
+                trimmed_ply = work_dir / '_poisson_trimmed.ply'
+                trim_cmd = [SURFACE_TRIMMER_BIN,
+                            '--in', str(out_ply),
+                            '--out', str(trimmed_ply),
+                            '--trim', str(trim_density),
+                            '--aRatio', str(trim_aratio),
+                            '--smooth', str(trim_smooth)]
+                print(f'SurfaceTrimmer: trim={trim_density} aRatio={trim_aratio} smooth={trim_smooth}', flush=True)
+                trim_rc = subprocess.run(trim_cmd, capture_output=True, text=True, timeout=300, env=env)
+                if trim_rc.returncode == 0 and trimmed_ply.exists():
+                    # Sanity check:trim 不能砍到接近空(均匀低 density 输入会被全砍掉)
+                    raw_size = out_ply.stat().st_size
+                    trim_size = trimmed_ply.stat().st_size
+                    if trim_size > 1024 and trim_size > raw_size * 0.01:
+                        print(f'SurfaceTrimmer OK: {raw_size:,}b → {trim_size:,}b', flush=True)
+                        out_ply.unlink(missing_ok=True)
+                        out_ply = trimmed_ply
+                    else:
+                        print(f'SurfaceTrimmer too aggressive ({trim_size}b vs raw {raw_size:,}b);'
+                              f' falling back to raw PoissonRecon output', flush=True)
+                        trimmed_ply.unlink(missing_ok=True)
+                else:
+                    print(f'SurfaceTrimmer failed (rc={trim_rc.returncode}); using raw PoissonRecon output', flush=True)
+
+            from plyfile import PlyData
+            ply = PlyData.read(str(out_ply))
+            v = ply['vertex']
+            verts = np.column_stack([v['x'], v['y'], v['z']]).astype(np.float64)
+            density_props = [p.name for p in v.properties if p.name in ('quality', 'density', 'value')]
+            if density_props:
+                densities = np.asarray(v[density_props[0]], dtype=np.float64)
+            else:
+                print('WARN: no density property in PoissonRecon output', flush=True)
+                densities = np.ones(len(verts))
+            faces = np.vstack(ply['face']['vertex_indices']).astype(np.int32)
+
+            mesh = o3d.geometry.TriangleMesh()
+            mesh.vertices = o3d.utility.Vector3dVector(verts)
+            mesh.triangles = o3d.utility.Vector3iVector(faces)
+            in_ply.unlink(missing_ok=True)
+            out_ply.unlink(missing_ok=True)
+            return mesh, densities
+        except Exception as e:
+            print(f'PoissonRecon binary failed ({type(e).__name__}: {e}); fallback to Open3D', flush=True)
+    else:
+        print(f'PoissonRecon binary not at {POISSON_RECON_BIN}; using Open3D (slow)', flush=True)
+
+    return o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=depth)
 
 
 def _write_progress(path: Path, progress: float, title: str, detail: str, extra: dict | None = None):
@@ -37,7 +145,21 @@ def main() -> int:
     ap.add_argument('--progress-path', required=True)
     ap.add_argument('--conf-floor', type=float, default=1.5)
     ap.add_argument('--voxel-size', type=float, default=0.005)
-    ap.add_argument('--poisson-depth', type=int, default=10)
+    # Octree depth for Poisson surface reconstruction.
+    #
+    # Default 9 (not 10): for VGGT-derived point clouds, 255k voxel-downsampled
+    # points lives at the depth=8-9 sweet spot. depth=10 was the original
+    # c380d33 default but in practice over-resolves the octree (max 1024³
+    # cells), spending 20+ minutes on sparse cells with no payoff in quality
+    # — and amplifying VGGT depth noise. Measured 2026-05-11: depth=10 took
+    # 1303 s on a 30 s dome capture; depth=9 expected 60-180 s on same input.
+    #
+    # Override via AETHER_POISSON_DEPTH (also: --poisson-depth on CLI).
+    ap.add_argument(
+        '--poisson-depth',
+        type=int,
+        default=int(os.environ.get('AETHER_POISSON_DEPTH', '9')),
+    )
     ap.add_argument('--density-quantile', type=float, default=0.05)
     args = ap.parse_args()
 
@@ -68,12 +190,62 @@ def main() -> int:
 
     _write_progress(prog, 0.30, 'Poisson 表面重建', f'depth={args.poisson_depth}')
     t0 = time.time()
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=args.poisson_depth)
+    mesh, densities = _run_poisson(pcd, depth=args.poisson_depth, work_dir=delivery)
     print(f'Poisson done {time.time()-t0:.1f}s: {len(mesh.vertices):,}v {len(mesh.triangles):,}f', flush=True)
 
     _write_progress(prog, 0.45, '去除低密度面', f'q={args.density_quantile}')
     densities = np.asarray(densities)
     mesh.remove_vertices_by_mask(densities < np.quantile(densities, args.density_quantile))
+
+    # Layer 2: keep only top-N largest connected components (Open3D 文档化 standard)
+    # "useful for reconstruction methods that don't always produce single mesh; smaller parts are often noise"
+    # 参考: https://www.open3d.org/docs/release/python_api/open3d.geometry.TriangleMesh.html
+    keep_top_n = int(os.environ.get('POISSON_KEEP_TOP_COMPONENTS', '5'))
+    if keep_top_n > 0 and len(mesh.triangles) > 0:
+        clusters, n_tri, _ = mesh.cluster_connected_triangles()
+        n_tri = np.asarray(n_tri)
+        clusters = np.asarray(clusters)
+        if len(n_tri) > keep_top_n:
+            largest_idx = np.argsort(n_tri)[-keep_top_n:]
+            drop_mask = ~np.isin(clusters, largest_idx)
+            n_dropped = int(drop_mask.sum())
+            mesh.remove_triangles_by_mask(drop_mask)
+            mesh.remove_unreferenced_vertices()
+            print(f'cluster cleanup: {len(n_tri)} components → {keep_top_n}, dropped {n_dropped:,} faces', flush=True)
+
+    # Layer 3: hole fill (Open3D tensor mesh fill_holes).
+    #
+    # After SurfaceTrimmer + density filter + cluster cleanup, the mesh
+    # still has boundary loops where VGGT confidence dropped below
+    # conf_floor (smooth surfaces, occluded faces). Poisson can't bridge
+    # those gaps without point support. Open3D's tensor fill_holes (port
+    # of Liepa 2003 + Barequet & Sharir 1995) re-triangulates boundary
+    # loops up to a given perimeter. Doesn't invent geometry — just
+    # patches small/medium holes with planar triangulation, leaves big
+    # missing regions alone (which is the right behavior: if VGGT didn't
+    # see it, we shouldn't fabricate it).
+    #
+    # `POISSON_FILL_HOLES_SIZE` is a length threshold (boundary loop
+    # perimeter in mesh units, typically meters): loops shorter than
+    # this get filled, longer ones (genuine missing chunks) stay open.
+    # Default 0.3 m ≈ ~30cm boundary perimeter,适合椅子座面这种
+    # smooth-surface hole 但不会乱填整个 mesh.
+    # Set to 0 to disable.
+    fill_hole_size = float(os.environ.get('POISSON_FILL_HOLES_SIZE', '0.3'))
+    if fill_hole_size > 0 and len(mesh.triangles) > 0:
+        try:
+            v_before, f_before = len(mesh.vertices), len(mesh.triangles)
+            tm = o3d.t.geometry.TriangleMesh.from_legacy(mesh)
+            tm = tm.fill_holes(hole_size=fill_hole_size)
+            mesh = tm.to_legacy()
+            v_after, f_after = len(mesh.vertices), len(mesh.triangles)
+            print(
+                f'hole fill: hole_size={fill_hole_size}m, '
+                f'{v_before:,}v {f_before:,}f → {v_after:,}v {f_after:,}f '
+                f'(+{f_after - f_before:,}f)', flush=True)
+        except Exception as e:
+            print(f'hole fill failed ({type(e).__name__}: {e}); using mesh as-is', flush=True)
+
     mesh.compute_vertex_normals()
     geom_ply = delivery / 'optimized_mesh.ply'
     o3d.io.write_triangle_mesh(str(geom_ply), mesh)

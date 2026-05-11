@@ -9,6 +9,7 @@ from .config import config
 from .context import JobContext
 from .paths import ensure_job_layout
 from .pipeline.bridge_slam3r_scene import bridge_slam3r_scene
+from .pipeline.align_to_gravity import align_to_gravity
 from .pipeline.apply_subject_mask import apply_subject_mask
 from .pipeline.crop_mesh_to_subject_sphere import crop_mesh_to_subject_sphere
 from .pipeline.curate_frames import curate_frames
@@ -520,6 +521,28 @@ def run_once(
                 recorder=recorder,
             )
             # VGGT writes sparse2dgs_scene_contract.json itself; no bridge.
+
+            # Rotate VGGT outputs into ARKit gravity-aligned world frame.
+            # ARSession runs with worldAlignment=.gravity and the curated
+            # manifest carries each frame's ARKit camera→world matrix, so
+            # we can compute a rotation that takes VGGT-world to ARKit-
+            # gravity-world and rotate both `world_points` and per-frame
+            # `extrinsic` in vggt_raw.npz. Non-fatal: if the manifest is
+            # missing ARKit pose for any reason, this stage no-ops and the
+            # mesh ends up in VGGT's frame as before.
+            # Currently env-gated OFF via AETHER_SKIP_ALIGN_GRAVITY=1
+            # (default) because the rotation math is still being
+            # verified — see align_to_gravity.py for context.
+            _run_step(
+                ctx=ctx,
+                client=client,
+                stage="align_to_gravity",
+                title="正在对齐重力方向",
+                detail="按客户端 ARKit 重力姿态把 VGGT 输出旋到 +Y up,后续 Poisson/MVS 自然生成正立的网格。",
+                progress_fraction=0.50,
+                action=lambda current_ctx, _tracker: align_to_gravity(current_ctx),
+                recorder=recorder,
+            )
         else:
             _run_step(
                 ctx=ctx,

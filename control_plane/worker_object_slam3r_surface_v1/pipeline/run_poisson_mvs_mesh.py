@@ -21,8 +21,26 @@ from typing import Any, Callable
 
 from ..context import JobContext
 
-_DA3_VENV_PY = '/workspace/da3_venv/bin/python'
-_SUBPROCESS_SCRIPT = '/opt/object_slam3r_surface_v1_sidecar/control_plane/worker_object_slam3r_surface_v1/pipeline/_run_poisson_mvs_subprocess.py'
+# DA3 (Depth-Anything-V3) venv is optional — only used when AETHER_GEOM_BACKEND=da3.
+# When DA3 is not set up on this worker, fall back to the main venv (the
+# subprocess only touches numpy + open3d + subprocess.run(texrecon); the DA3
+# venv is just a stricter pin from the original sidecar layout).
+#
+# Subprocess script path: env override first, then deterministic resolution
+# from this file's parent directory. The original hardcode
+# `/opt/object_slam3r_surface_v1_sidecar/...` only worked on the legacy
+# sidecar layout; new Vast.ai workers install under /root/control_plane/
+# and would silently miss the subprocess. Resolve relative to __file__ so
+# the path is correct on any layout.
+_DA3_VENV_PY = os.environ.get(
+    'AETHER_POISSON_MVS_PYTHON',
+    '/workspace/da3_venv/bin/python' if os.path.exists('/workspace/da3_venv/bin/python')
+    else '/root/venv/bin/python',
+)
+_SUBPROCESS_SCRIPT = os.environ.get(
+    'AETHER_POISSON_MVS_SUBPROCESS',
+    str(Path(__file__).parent / '_run_poisson_mvs_subprocess.py'),
+)
 
 
 def run_poisson_mvs_mesh(ctx: JobContext, *, progress_callback: Callable[..., Any] | None = None) -> dict[str, Any]:
