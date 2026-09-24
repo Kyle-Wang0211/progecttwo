@@ -1,0 +1,12 @@
+# tasks — same-page-production-v1
+- [x] 1.1 查看模式 + 画廊路由 + `_pageCaptureDir`(test/review_mode_same_page_test.dart 5 例)
+- [x] 2.0 C ABI v2 头(核 + vendored 副本同一份)
+- [x] 2.1 C++ 逐帧融合 + 最终 PLY 逐字节门(核 47cd3d3a;15 臂 sha 全同,阴性对照通过)
+- [x] 2.2 Dart FFI run2/回退 + DenseLiveCloud + launcher(test/dense 20 例)
+- [x] 2.3 覆盖层 denseRunning 态(胶囊 + 无底部按钮,widget 测试)
+- [x] 2.4 DenseWaitEta 全局观察器 + PipelineEta.setUnits(test/eta 13 例)
+- [x] 2.5 页面接线(test/dense_same_page_wiring_test.dart 6 例)
+- [x] 2.6 PWDense.xcframework 重建(导出 6)+ 出包 Runner-164-same-page-dense.app(自证全过);五道闸待用户令「装」
+- [x] 3.1 核可行性调研 → 阻断解除:出货态提交(28ca8b48+68bfa680,用户授权),scratch 干净重建 = 机上载荷只差 6 字节日期戳
+- [x] 3.2 Ceres 迭代计数刀(核 a313ede0)+ Dart 可选绑定/事件(4c0f29a)+ 页面按迭代重规划 + vendor 提升(4e22ee7);闸全过
+- [x] 3.3 出包 Runner-165-ba-iter-progress.app(基线 164,只换 App+PWOfficialSfm);待用户「装」

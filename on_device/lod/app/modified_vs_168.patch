@@ -1,0 +1,760 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 8ff5d13..55c713e 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -11,7 +11,7 @@
+ - **永远没有云端**:重建全在手机本地。
+ - 真机包必须 `flutter build ios --profile`(debug 脱调试器即崩)。
+ - **真机测试拔线安全**:detached 启动、日志写 App 容器、事后 `devicectl copy` 拉取;绝不要求用户连线陪盯。
+-- 点云**全量交付**,不为展示降采样。
++- 点云**全量存盘、任一点拉近可见**(2026-09-24 用户签决,取代原「全量交付,不为展示降采样」):PLY 一个点不删、不改写;展示可以分级(LOD 八叉树),但用于显示的树必须装下 PLY 的每一个点(C1:树内点数 = PLY 点数、octree.bin = 18 B × 点数)、每个叶节点拉近都选得到(S2),自检不过就不用树,退回平铺显示。
+ - 拍摄期 SfM worker 与 UI 必须异步:拍照按钮永不等 SfM。
+ - 拍摄完成后进等待页;等待页必须有"返回草稿";同任务卡重入回原等待页,不得起第二个重建;最终点云先取色并持久化才出现"完成"。
+ - 灵动岛任务只能由用户点"拍摄完成"触发,启动/前后台切换不得凭空创建。
+diff --git a/ios/Runner.xcodeproj/project.pbxproj b/ios/Runner.xcodeproj/project.pbxproj
+index cdd203e..fe079e7 100644
+--- a/ios/Runner.xcodeproj/project.pbxproj
++++ b/ios/Runner.xcodeproj/project.pbxproj
+@@ -29,6 +29,10 @@
+ 		9B1673374931C4F76F9B36EF /* libPods-RunnerTests.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2536F507406F4BEF525FFBA0 /* libPods-RunnerTests.a */; };
+ 		A1B2C3D4E5F60000DEAD0007 /* test_scene.jpg in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F60000DEAD0008 /* test_scene.jpg */; };
+ 		B70000010000000000000001 /* pw_jxl_bridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = B70000110000000000000001 /* pw_jxl_bridge.mm */; };
++		F1D000010000000000000001 /* PwLodSurface.m in Sources */ = {isa = PBXBuildFile; fileRef = F1D000110000000000000001 /* PwLodSurface.m */; };
++		F1D000010000000000000003 /* PwLodTexture.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1D000110000000000000003 /* PwLodTexture.swift */; };
++		F1D000010000000000000004 /* PwLodTexturePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1D000110000000000000004 /* PwLodTexturePlugin.swift */; };
++		F1D000010000000000000005 /* PwLodProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1D000110000000000000005 /* PwLodProbe.swift */; };
+ 		B70000020000000000000002 /* PWJXLBridgeTests.mm in Sources */ = {isa = PBXBuildFile; fileRef = B70000130000000000000003 /* PWJXLBridgeTests.mm */; };
+ 		BEA29390F7446D1CF364C5CF /* libPods-Runner.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 9E80450483A882E2B20514AC /* libPods-Runner.a */; };
+ 		C80000010000000000000001 /* pw_zpaq_bridge.cpp in Sources */ = {isa = PBXBuildFile; fileRef = C80000110000000000000001 /* pw_zpaq_bridge.cpp */; settings = {COMPILER_FLAGS = "-DNOJIT -Dunix"; }; };
+@@ -104,6 +108,11 @@
+ 		9E80450483A882E2B20514AC /* libPods-Runner.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-Runner.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		A1B2C3D4E5F60000DEAD0008 /* test_scene.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; name = test_scene.jpg; path = TestFixtures/test_scene.jpg; sourceTree = "<group>"; };
+ 		B70000110000000000000001 /* pw_jxl_bridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = pw_jxl_bridge.mm; sourceTree = "<group>"; };
++		F1D000110000000000000001 /* PwLodSurface.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PwLodSurface.m; sourceTree = "<group>"; };
++		F1D000110000000000000003 /* PwLodTexture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PwLodTexture.swift; sourceTree = "<group>"; };
++		F1D000110000000000000004 /* PwLodTexturePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PwLodTexturePlugin.swift; sourceTree = "<group>"; };
++		F1D000110000000000000005 /* PwLodProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PwLodProbe.swift; sourceTree = "<group>"; };
++		F1D000110000000000000002 /* PwLodSurface.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PwLodSurface.h; sourceTree = "<group>"; };
+ 		B70000120000000000000002 /* pw_jxl_bridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = pw_jxl_bridge.h; sourceTree = "<group>"; };
+ 		B70000130000000000000003 /* PWJXLBridgeTests.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = PWJXLBridgeTests.mm; sourceTree = "<group>"; };
+ 		C80000110000000000000001 /* pw_zpaq_bridge.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = pw_zpaq_bridge.cpp; sourceTree = "<group>"; };
+@@ -208,6 +217,11 @@
+ 				E10000110000000000000001 /* PwXrslamTransportCore.cpp */,
+ 				0F1C1A10000000000000A001 /* PwVioCapability.swift */,
+ 				0F1C1A10000000000000A002 /* PwVioThermal.swift */,
++				F1D000110000000000000002 /* PwLodSurface.h */,
++				F1D000110000000000000001 /* PwLodSurface.m */,
++				F1D000110000000000000003 /* PwLodTexture.swift */,
++				F1D000110000000000000004 /* PwLodTexturePlugin.swift */,
++				F1D000110000000000000005 /* PwLodProbe.swift */,
+ 				0F1C1A200000000000000004 /* OfficialArchiveBackgroundTask.swift */,
+ 				0F1C1A300000000000000005 /* PWJSONSafety.swift */,
+ 				16019E67BE3B581AE0E2152F /* MetalRenderer.swift */,
+@@ -551,6 +565,10 @@
+ 				0F1C1A10000000000000A013 /* PwVioSlamFeeder.swift in Sources */,
+ 				0F1C1A10000000000000A011 /* PwVioCapability.swift in Sources */,
+ 				0F1C1A10000000000000A012 /* PwVioThermal.swift in Sources */,
++				F1D000010000000000000001 /* PwLodSurface.m in Sources */,
++				F1D000010000000000000003 /* PwLodTexture.swift in Sources */,
++				F1D000010000000000000004 /* PwLodTexturePlugin.swift in Sources */,
++				F1D000010000000000000005 /* PwLodProbe.swift in Sources */,
+ 				0F1C1A200000000000000014 /* OfficialArchiveBackgroundTask.swift in Sources */,
+ 				0F1C1A300000000000000015 /* PWJSONSafety.swift in Sources */,
+ 				03D62ABCFE668FE66D5CD107 /* MetalRenderer.swift in Sources */,
+@@ -663,6 +681,7 @@
+ 					"$(inherited)",
+ 					"$(PROJECT_DIR)/Vendor/JXL/include",
+ 					"$(PROJECT_DIR)/Vendor/Zpaq/include",
++					"$(PROJECT_DIR)/../vendor/aether_lod/include",
+ 				);
+ 				INFOPLIST_FILE = Runner/Info.plist;
+ 				LD_RUNPATH_SEARCH_PATHS = (
+@@ -705,7 +724,10 @@
+ 					"-Wl,-u,_pw_zpaq_decompress_file",
+ 					"-Wl,-u,_pw_zpaq_cancellation_generation",
+ 					"-Wl,-u,_pw_zpaq_request_cancel",
++					"-force_load",
++					"$(PW_LOD_ARCHIVE)",
+ 				);
++				PW_LOD_ARCHIVE = "$(PROJECT_DIR)/../vendor/aether_lod/libs/ios-arm64/libpw_lod_72ee817f.a";
+ 				PRODUCT_BUNDLE_IDENTIFIER = com.kyle.PocketWorld;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
+@@ -897,6 +919,7 @@
+ 					"$(inherited)",
+ 					"$(PROJECT_DIR)/Vendor/JXL/include",
+ 					"$(PROJECT_DIR)/Vendor/Zpaq/include",
++					"$(PROJECT_DIR)/../vendor/aether_lod/include",
+ 				);
+ 				INFOPLIST_FILE = Runner/Info.plist;
+ 				LD_RUNPATH_SEARCH_PATHS = (
+@@ -939,7 +962,10 @@
+ 					"-Wl,-u,_pw_zpaq_decompress_file",
+ 					"-Wl,-u,_pw_zpaq_cancellation_generation",
+ 					"-Wl,-u,_pw_zpaq_request_cancel",
++					"-force_load",
++					"$(PW_LOD_ARCHIVE)",
+ 				);
++				PW_LOD_ARCHIVE = "$(PROJECT_DIR)/../vendor/aether_lod/libs/ios-arm64/libpw_lod_72ee817f.a";
+ 				PRODUCT_BUNDLE_IDENTIFIER = com.kyle.PocketWorld;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
+@@ -971,6 +997,7 @@
+ 					"$(inherited)",
+ 					"$(PROJECT_DIR)/Vendor/JXL/include",
+ 					"$(PROJECT_DIR)/Vendor/Zpaq/include",
++					"$(PROJECT_DIR)/../vendor/aether_lod/include",
+ 				);
+ 				INFOPLIST_FILE = Runner/Info.plist;
+ 				LD_RUNPATH_SEARCH_PATHS = (
+@@ -1013,7 +1040,10 @@
+ 					"-Wl,-u,_pw_zpaq_decompress_file",
+ 					"-Wl,-u,_pw_zpaq_cancellation_generation",
+ 					"-Wl,-u,_pw_zpaq_request_cancel",
++					"-force_load",
++					"$(PW_LOD_ARCHIVE)",
+ 				);
++				PW_LOD_ARCHIVE = "$(PROJECT_DIR)/../vendor/aether_lod/libs/ios-arm64/libpw_lod_72ee817f.a";
+ 				PRODUCT_BUNDLE_IDENTIFIER = com.kyle.PocketWorld;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
+diff --git a/ios/Runner/AppDelegate.swift b/ios/Runner/AppDelegate.swift
+index 0a1fc82..6f968d1 100644
+--- a/ios/Runner/AppDelegate.swift
++++ b/ios/Runner/AppDelegate.swift
+@@ -39,6 +39,14 @@ import UIKit
+     } else {
+       NSLog("[AppDelegate] registrar(forPlugin: PwVioThermalPlugin) nil — VIO thermal telemetry unavailable")
+     }
++    // [pw][lod] 2026-09-24 build 171: GPU point-cloud viewer channel 'pw_lod_texture'
++    //   (ios/Runner/PwLodTexturePlugin.swift). Same form as the plugins above; the bench's
++    //   FlutterImplicitEngineBridge form (feat/lod-viewer 9e2bb09) does not apply here.
++    if let registrar = self.registrar(forPlugin: "PwLodTexturePlugin") {
++      PwLodTexturePlugin.register(with: registrar)
++    } else {
++      NSLog("[AppDelegate] registrar(forPlugin: PwLodTexturePlugin) nil — cloud views fall back to the CPU painter")
++    }
+     if #available(iOS 11.0, *) {
+       if let registrar = self.registrar(
+         forPlugin: "OfficialAetherARKitPlugin"
+diff --git a/ios/Runner/Info.plist b/ios/Runner/Info.plist
+index 9356abd..c1c2e7f 100644
+--- a/ios/Runner/Info.plist
++++ b/ios/Runner/Info.plist
+@@ -59,7 +59,7 @@
+ 	<key>NSPhotoLibraryUsageDescription</key>
+ 	<string>方寸间仅在你主动选择时读取照片，用于提交举报或权益投诉的证明材料。</string>
+ 	<key>PWBuildExperimentMarker</key>
+-	<string>future-jxl-lossless-archive-v1+transient-ar-previews-v1+future-official-zpaq-db-archive-v1+official-archive-bgprocessing-v1+official-fast-safe-rollback-v1+highres-metadata-json-safety-v1+production-archive-hard-stop-v1+portable-sfm-speed-arms-v1-default-off+sqlite-dual-candidate-archive-v2+future-official-lepton-photo-archive-v2</string>
++	<string>future-jxl-lossless-archive-v1+transient-ar-previews-v1+future-official-zpaq-db-archive-v1+official-archive-bgprocessing-v1+official-fast-safe-rollback-v1+highres-metadata-json-safety-v1+production-archive-hard-stop-v1+portable-sfm-speed-arms-v1-default-off+sqlite-dual-candidate-archive-v2+future-official-lepton-photo-archive-v2+lod-one-viewer-v3</string>
+ 	<key>PWBuildMarker</key>
+ 	<string>permanent-project-delete-20260725</string>
+ 	<key>PWSocialProfileSafetyBuildId</key>
+@@ -103,8 +103,6 @@
+ 	<key>UISupportedInterfaceOrientations</key>
+ 	<array>
+ 		<string>UIInterfaceOrientationPortrait</string>
+-		<string>UIInterfaceOrientationLandscapeLeft</string>
+-		<string>UIInterfaceOrientationLandscapeRight</string>
+ 	</array>
+ 	<key>UISupportedInterfaceOrientations~ipad</key>
+ 	<array>
+diff --git a/ios/Runner/Runner-Bridging-Header.h b/ios/Runner/Runner-Bridging-Header.h
+index c7349ce..b1a718e 100644
+--- a/ios/Runner/Runner-Bridging-Header.h
++++ b/ios/Runner/Runner-Bridging-Header.h
+@@ -9,3 +9,10 @@
+ // [pw][vio] One cross-platform C++ transport wraps the frozen official ABI.
+ // Swift sees raw transport only; Dart owns configuration and interpretation.
+ #import "../../vendor/xrslam/transport/PwXrslamTransportCore.h"
++
++// [pw][lod] 2026-09-24 build 171: the GPU point-cloud viewer (one viewer for every stage of the
++// capture page). PwLodSurface.h includes the frozen C ABI vendor/aether_lod/include/pwlod_viewer.h
++// (v3) so Swift sees pwlod_camera / pwlod_style / pwlod_frame_stats with the engine's layout.
++// The engine archive libpw_lod_72ee817f.a is -force_load'ed by the Runner target and binds its
++// wgpu* to the Dawn already inside libaether3d_ffi.a (no second Dawn).
++#import "PwLodSurface.h"
+diff --git a/lib/ui/official_capture/ar_capture_page.dart b/lib/ui/official_capture/ar_capture_page.dart
+index da75af6..9882a89 100644
+--- a/lib/ui/official_capture/ar_capture_page.dart
++++ b/lib/ui/official_capture/ar_capture_page.dart
+@@ -30,7 +30,7 @@ import 'dart:math' as math;
+ import 'dart:typed_data' show Int32List, Float32List, Float64List, Uint8List;
+ 
+ import 'package:flutter/foundation.dart'
+-    show compute, defaultTargetPlatform, TargetPlatform;
++    show compute, defaultTargetPlatform, TargetPlatform, ValueListenable;
+ 
+ import '../../official_capture/dense_stage.dart';
+ 
+@@ -77,6 +77,7 @@ import '../../eta/eta_prior_log.dart';
+ import '../../eta/pipeline_eta.dart';
+ import '../../dense/dense_live_cloud.dart';
+ import '../../dense/dense_stage_progress.dart';
++import '../../point_cloud_lod/dense_lod_cache.dart';
+ import '../../official_capture/transient_preview_cleanup.dart';
+ import '../../official_capture/dome/dome_target_points.dart';
+ import '../../official_capture/realtime_capture_preview.dart';
+@@ -450,6 +451,35 @@ class _OfficialARCapturePageState extends State<OfficialARCapturePage>
+   /// instead of the sparse cloud; dense is then "done" for this project).
+   SfmLiveSnapshot? _denseReviewSnapshot;
+ 
++  /// [LOD v3 2026-09-24] The finished dense cloud's octree (built on the phone by
++  /// DenseLodCache into Library/Caches/lod/<作品标识>/ after official_dense.ply lands, or
++  /// found valid on re-entry). While it is not ready — building, failed, or not asked for —
++  /// the same view keeps drawing the flat 1 M display copy.
++  ValueListenable<DenseLodState>? _denseLod;
++  String? _denseLodPly;
++
++  void _watchDenseLod(String densePly) {
++    if (_denseLodPly == densePly && _denseLod != null) return;
++    _denseLod?.removeListener(_onDenseLod);
++    _denseLodPly = densePly;
++    _denseLod = DenseLodCache.instance.watch(densePly)..addListener(_onDenseLod);
++    DeviceLog.log('OfficialARCapturePage', 'dense LOD: ${_denseLod!.value}');
++  }
++
++  void _onDenseLod() {
++    final s = _denseLod?.value;
++    if (s != null) DeviceLog.log('OfficialARCapturePage', 'dense LOD: $s');
++    if (mounted) setState(() {});
++  }
++
++  /// The octree to hand the view: only while the finished dense cloud is what is on screen.
++  String? get _lodOctreeDirOnScreen {
++    final s = _denseLod?.value;
++    if (s == null || s.phase != DenseLodPhase.ready) return null;
++    if (_denseRunningHere || !_denseDoneHere) return null;
++    return s.octreeDir;
++  }
++
+   /// [LIVE-WAIT] Wait countdown of the sparse job (lib/eta: Ninja prediction +
+   /// commit-once coarse label). Planned when the wait page goes up, finished
+   /// after the PLY is persisted; the prior log lives in the app documents dir.
+@@ -2281,6 +2311,8 @@ class _OfficialARCapturePageState extends State<OfficialARCapturePage>
+     SparseCloudData? dense;
+     final densePly = '$dir/official_dense.ply';
+     if (File(densePly).existsSync()) {
++      // [LOD v3] a valid tree is used at once; otherwise the 1 M copy shows while it is built.
++      _watchDenseLod(densePly);
+       try {
+         dense = await compute(loadReviewCloud, densePly, debugLabel: 'review_load_dense');
+       } catch (e) {
+@@ -2465,6 +2497,8 @@ class _OfficialARCapturePageState extends State<OfficialARCapturePage>
+   void _onDenseProgress() {
+     final p = denseStageProgress.value;
+     if (p == null || p.captureDir != _pageCaptureDir) return;
++    // [LOD v3] official_dense.ply has landed ⇒ build/verify its octree in the background.
++    if (p.state == DenseStageState.done && p.outPly != null) _watchDenseLod(p.outPly!);
+     if (mounted && _sfmPhase != null) setState(() {});
+   }
+ 
+@@ -4943,6 +4977,7 @@ class _OfficialARCapturePageState extends State<OfficialARCapturePage>
+       ..clearLiveImages();
+     denseStageProgress.removeListener(_onDenseProgress);
+     DenseWaitEta.instance.label.removeListener(_onDenseProgress);
++    _denseLod?.removeListener(_onDenseLod);
+     super.dispose();
+   }
+ 
+@@ -5395,6 +5430,7 @@ class _OfficialARCapturePageState extends State<OfficialARCapturePage>
+                   ? _denseWaitLabel(context)
+                   : _sparseWaitLabel(context),
+               initialPerspective: _sfmPerspectiveStart,
++              lodOctreeDir: _lodOctreeDirOnScreen,
+               // [2026-08-09 用户签决] 进度口径=用户视角:"已完成 x/N 帧",
+               // N=本场实拍照片数。补算/重喂是内部机制,不暴露 —— 欠账帧
+               // 补算完成时 fed 自然爬到 N,用户只看到计数在涨。
+diff --git a/lib/ui/official_capture/sfm_preview_overlay.dart b/lib/ui/official_capture/sfm_preview_overlay.dart
+index 992f751..9fe3022 100644
+--- a/lib/ui/official_capture/sfm_preview_overlay.dart
++++ b/lib/ui/official_capture/sfm_preview_overlay.dart
+@@ -49,6 +49,7 @@ class SfmPreviewOverlay extends StatelessWidget {
+     this.cloudController,
+     this.initialPerspective,
+     this.toolsOverlay,
++    this.lodOctreeDir,
+   });
+ 
+   final SfmPreviewPhase phase;
+@@ -98,6 +99,11 @@ class SfmPreviewOverlay extends StatelessWidget {
+   final PerspectiveStart? initialPerspective;
+   final Widget? toolsOverlay;
+ 
++  /// [LOD v3 2026-09-24] The finished dense cloud's octree while the dense cloud is on screen
++  /// (DenseLodCache); null = the GPU viewer draws [snapshot]'s points. The view is the same
++  /// SparseCloudView instance throughout (user: 「查看器要全程一致」).
++  final String? lodOctreeDir;
++
+   @override
+   Widget build(BuildContext context) {
+     final snap = snapshot;
+@@ -122,6 +128,9 @@ class SfmPreviewOverlay extends StatelessWidget {
+                     key: const ValueKey('capture_preview_cloud'),
+                     xyz: snap.xyz,
+                     rgb: snap.rgb,
++                    // [LOD v3] one GPU viewer draws every stage of this page.
++                    gpu: true,
++                    octreeDir: lodOctreeDir,
+                     onCameraChanged: onCameraChanged,
+                     controller: cloudController,
+                     initialPerspective: initialPerspective,
+diff --git a/lib/ui/official_capture/sparse_cloud_view.dart b/lib/ui/official_capture/sparse_cloud_view.dart
+index 246ac63..fceb5f1 100644
+--- a/lib/ui/official_capture/sparse_cloud_view.dart
++++ b/lib/ui/official_capture/sparse_cloud_view.dart
+@@ -19,6 +19,8 @@ import 'package:flutter/material.dart';
+ 
+ import '../../official_capture/selection_box.dart';
+ import '../../point_cloud_display/progressive_octree_order.dart';
++import '../../point_cloud_lod/gpu_cloud_layer.dart';
++import '../../point_cloud_lod/lod_bridge.dart';
+ import '../sparse_thumbnail.dart' show kSparseThumbPitch, kSparseThumbYaw;
+ import 'cloud_camera.dart';
+ import 'selection_rect_handles.dart';
+@@ -252,8 +254,30 @@ class SparseCloudView extends StatefulWidget {
+     this.bottomGestureExclusion = 0,
+     this.bottomFade = 0,
+     this.bottomFadeArcRadius = 0,
++    this.gpu = false,
++    this.octreeDir,
++    this.lodBridge,
+   });
+ 
++  /// [LOD v3 2026-09-24, build 171] Draw the points with the GPU viewer (pwlod_viewer.h v3,
++  /// lib/point_cloud_lod/gpu_cloud_layer.dart) instead of [SparseCloudPainter]: same camera
++  /// (this view's CloudProjection, incl. the LIVE-WAIT morph), same look (pwlod_style from this
++  /// view's _pointSize/_exposure/_tone and the painter's height ramp), same selection semantics
++  /// (editing ⇒ tint outside, browsing ⇒ cull outside). Gestures, picking, selection editing and
++  /// every overlay stay in Dart exactly as before. The CPU painter keeps drawing until the GPU
++  /// has published a frame, and again for good if the GPU path fails. User 2026-09-24:
++  /// 「查看器我觉得要全程一致」— the capture page and the full-screen viewer pass true; the
++  /// gallery card (auto_rotating_cloud_view.dart) keeps false.
++  final bool gpu;
++
++  /// With [gpu]: the finished dense cloud's octree (DenseLodCache, Library/Caches/lod/…). When
++  /// set, the engine draws the tree (zoom in ⇒ every point) instead of the flat [xyz] sample;
++  /// [xyz]/[rgb] still drive the fit, picking and the CPU fallback, so the camera does not move.
++  final String? octreeDir;
++
++  /// Test hook for the GPU channel (null = the real `pw_lod_texture` channel).
++  final LodBridge? lodBridge;
++
+   /// 底部这么高的区域不接受相机手势 —— 编辑态工具面板压在全屏点云视图
+   /// 之上(视图保持全屏才不会在切换时跳),而手势竞技场拦不住:实测拨
+   /// 刻度尺时下层仍吃到 8px 位移并把视角转走。位置判定是确定性的。
+@@ -390,6 +414,10 @@ class _SparseCloudViewState extends State<SparseCloudView>
+   Size _viewSize = Size.zero;
+   double _fitRadius = 1;
+ 
++  /// [LOD v3] The GPU half (null unless widget.gpu). See SparseCloudView.gpu.
++  GpuCloudLayer? _gpu;
++  GpuCloudSource? _gpuSource;
++
+   @override
+   void initState() {
+     super.initState();
+@@ -417,11 +445,92 @@ class _SparseCloudViewState extends State<SparseCloudView>
+       vsync: this,
+       duration: const Duration(milliseconds: 280),
+     )..addListener(_onMorph);
++    if (widget.gpu) _attachGpu();
+     WidgetsBinding.instance.addPostFrameCallback((_) {
+       if (mounted) _emitCamera();
+     });
+   }
+ 
++  void _attachGpu() {
++    _gpu = GpuCloudLayer(bridge: widget.lodBridge)..addListener(_onGpuChanged);
++  }
++
++  void _detachGpu() {
++    _gpu?..removeListener(_onGpuChanged)..dispose();
++    _gpu = null;
++    _gpuSource = null;
++  }
++
++  void _onGpuChanged() {
++    if (mounted) setState(() {});
++  }
++
++  /// The GPU layer's texture while it is the one drawing (null ⇒ the CPU painter draws).
++  @visibleForTesting
++  int? get debugGpuTextureId => _gpu?.textureId;
++
++  @visibleForTesting
++  GpuCloudLayer? get debugGpuLayer => _gpu;
++
++  /// The projection this view paints with at its current size (the GPU camera's source).
++  @visibleForTesting
++  CloudProjection debugProjection() => _projectionFor(_viewSize);
++
++  /// pwlod_style of this view: its own look fields + the painter's height ramp + the selection
++  /// mode the painter would use (editing ⇒ tint outside the box, browsing ⇒ cull outside;
++  /// drawSelectionWireframe is always false here, as in build()).
++  LodStyle _gpuStyle() {
++    final ramp = SparseCloudPainter.heightRampOf(widget.xyz);
++    final box = widget.selectionBox;
++    return LodStyle(
++      pointSize: _pointSize,
++      spritePx: 16, // SparseCloudPainter sprite edge (_buildSprite: 16×16)
++      discRadiusPxAtScale1: 7, // _buildSprite: drawCircle(Offset(8, 8), 7)
++      maxSpriteScale: kMaxPointSpriteScale,
++      tone: LodTone.values[_tone],
++      exposure: _exposure,
++      uncoloredMinY: ramp.minY,
++      uncoloredInvYSpan: ramp.invYSpan,
++      selectionMode: box == null
++          ? LodSelectionMode.none
++          : (widget.editing ? LodSelectionMode.tintOutside : LodSelectionMode.cullOutside),
++      selectionCenter: box == null ? const [0, 0, 0] : [box.cx, box.cy, box.cz],
++      selectionSize: box == null ? const [0, 0, 0] : [box.sx, box.sy, box.sz],
++      selectionRotRowMajor: box == null ? kIdentityRot : box.rot,
++      selectionOutArgb: kSelectionOutColor,
++    );
++  }
++
++  /// Mirrors this frame's state into the GPU layer (cheap when nothing changed).
++  void _syncGpu(Size size, double dpr) {
++    final g = _gpu;
++    if (g == null || size.isEmpty) return;
++    g.setViewport(size, dpr);
++    var src = _gpuSource;
++    final vis = widget.visibility;
++    final n = widget.xyz.length ~/ 3;
++    final visOk = vis != null && vis.length == n ? vis : null;
++    if (src == null ||
++        !identical(src.xyz, widget.xyz) ||
++        !identical(src.rgb, widget.rgb) ||
++        !identical(src.visibility, visOk) ||
++        src.octreeDir != widget.octreeDir) {
++      final a = SparseCloudPainter.fullAabbOf(widget.xyz);
++      src = _gpuSource = GpuCloudSource(
++        xyz: widget.xyz,
++        rgb: widget.rgb,
++        colored: SparseCloudPainter.hasColorOf(widget.rgb),
++        visibility: visOk,
++        boxMin: [a.cx - a.hx, a.cy - a.hy, a.cz - a.hz],
++        boxMax: [a.cx + a.hx, a.cy + a.hy, a.cz + a.hz],
++        octreeDir: widget.octreeDir,
++      );
++    }
++    g.setStyle(_gpuStyle());
++    g.setCamera(_projectionFor(size), size);
++    g.setSource(src);
++  }
++
+   /// 当前俯仰 —— 守门断言"编辑态绝不出现 45°"。
+   @visibleForTesting
+   double get debugPitch => _pitch;
+@@ -447,6 +556,10 @@ class _SparseCloudViewState extends State<SparseCloudView>
+   @override
+   void didUpdateWidget(SparseCloudView old) {
+     super.didUpdateWidget(old);
++    if (widget.gpu != old.gpu) {
++      _detachGpu();
++      if (widget.gpu) _attachGpu();
++    }
+     // [LIVE-WAIT] the cloud is swapped under a live view (white → refined →
+     // dense): the fit radius (reframe zoom, handle minimum, near clip) must
+     // follow the cloud on screen. The pivot and the user's camera do not move.
+@@ -486,6 +599,7 @@ class _SparseCloudViewState extends State<SparseCloudView>
+     widget.controller?.removeListener(_onControllerTarget);
+     _tween.dispose();
+     _morph.dispose();
++    _detachGpu();
+     super.dispose();
+   }
+ 
+@@ -836,6 +950,8 @@ class _SparseCloudViewState extends State<SparseCloudView>
+             builder: (context, constraints) {
+               _viewSize = constraints.biggest;
+               _applyPendingPerspective(_viewSize);
++              _syncGpu(_viewSize, MediaQuery.devicePixelRatioOf(context));
++              final gpuTexture = _gpu?.textureId;
+               return GestureDetector(
+                 onScaleStart: _onScaleStart,
+                 onScaleUpdate: (d) {
+@@ -888,6 +1004,23 @@ class _SparseCloudViewState extends State<SparseCloudView>
+                     color: Colors.black,
+                     child: Stack(
+                       children: [
++                        if (gpuTexture != null) ...[
++                          // [LOD v3] the GPU viewer draws the points (same camera/look).
++                          Positioned.fill(child: Texture(textureId: gpuTexture)),
++                          // Bottom fade above the scrubber, drawn over the texture with the
++                          // painter's geometry (see CloudBottomFadeMask).
++                          if (widget.bottomFade > 0)
++                            Positioned.fill(
++                              child: IgnorePointer(
++                                child: CustomPaint(
++                                  painter: CloudBottomFadeMask(
++                                    bottomFade: widget.bottomFade,
++                                    arcRadius: widget.bottomFadeArcRadius,
++                                  ),
++                                ),
++                              ),
++                            ),
++                        ] else
+                         Positioned.fill(
+                           child: CustomPaint(
+                             painter: SparseCloudPainter(
+@@ -956,6 +1089,52 @@ class _SparseCloudViewState extends State<SparseCloudView>
+   }
+ }
+ 
++/// [LOD v3 2026-09-24] The painter's bottom fade (SparseCloudPainter.bottomFade /
++/// bottomFadeArcRadius) for the GPU path, drawn OVER the texture as a black mask. Same geometry:
++/// crest = height − bottomFade − kCloudBottomFadeGap; with an arc of radius R the boundary circle is
++/// centred at (width/2, crest + R) and a point `above` = |p − centre| − R px above it is drawn with
++/// alpha × clamp(above / kCloudBottomFadeBand, 0, 1) (nothing at or below the arc); without an arc
++/// the boundary is the line y = crest. On the view's black background, «point alpha × fade» equals
++/// «black mask of alpha 1 − fade over the point», so the mask is black with alpha 1 − fade:
++/// RadialGradient black → black at R → transparent at R + band (linear in the radius, like
++/// `above`), or the same as a LinearGradient in y.
++class CloudBottomFadeMask extends CustomPainter {
++  const CloudBottomFadeMask({required this.bottomFade, required this.arcRadius});
++
++  final double bottomFade;
++  final double arcRadius;
++
++  @override
++  void paint(Canvas canvas, Size size) {
++    if (bottomFade <= 0 || size.isEmpty) return;
++    final crest = size.height - bottomFade - kCloudBottomFadeGap;
++    const band = kCloudBottomFadeBand;
++    const black = Color(0xFF000000), clear = Color(0x00000000);
++    final paint = Paint();
++    if (arcRadius > 0) {
++      final center = Offset(size.width / 2, crest + arcRadius);
++      final outer = arcRadius + band;
++      paint.shader = ui.Gradient.radial(
++        center,
++        outer,
++        const [black, black, clear],
++        [0, arcRadius / outer, 1],
++      );
++    } else {
++      paint.shader = ui.Gradient.linear(
++        Offset(0, crest - band),
++        Offset(0, crest),
++        const [clear, black],
++      );
++    }
++    canvas.drawRect(Offset.zero & size, paint);
++  }
++
++  @override
++  bool shouldRepaint(CloudBottomFadeMask old) =>
++      old.bottomFade != bottomFade || old.arcRadius != arcRadius;
++}
++
+ // ─── painter ─────────────────────────────────────────────────────────
+ 
+ class SparseCloudPainter extends CustomPainter {
+@@ -1289,6 +1468,28 @@ class SparseCloudPainter extends CustomPainter {
+     return (cx: _cx, cy: _cy, cz: _cz, radius: _radius);
+   }
+ 
++  /// The painter's hasColor rule (was inline in [paint], moved here unchanged so the GPU viewer's
++  /// set_points `colored` flag is the same decision): any non-black rgb triplet among the drawn
++  /// points ⇒ coloured; an all-zero rgb ⇒ the height ramp.
++  static bool hasColorOf(Uint8List rgb, {int stride = 1}) {
++    for (var i = 0; i < rgb.length; i += 3 * math.max(1, stride)) {
++      if (rgb[i] != 0 || rgb[i + 1] != 0 || rgb[i + 2] != 0) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  /// The height-ramp domain the painter uses for an uncoloured cloud (`_minY` / `_invYSpan`
++  /// from the same [_ensureFit]), exposed read-only so the GPU viewer's style
++  /// (pwlod_style.uncolored_min_y / uncolored_inv_y_span) and the parity fixture take the
++  /// painter's own numbers instead of re-deriving them. Behaviour unchanged.
++  @visibleForTesting
++  static ({double minY, double invYSpan}) heightRampOf(Float32List xyz) {
++    _ensureFit(xyz);
++    return (minY: _minY, invYSpan: _invYSpan);
++  }
++
+   /// 点云**全量**轴对齐包围盒(逐点 min/max,一个点都不排除)。
+   ///
+   /// [2026-08-09 用户签决] "框选点云的初始范围必须包含全部点云" —— 初始框
+@@ -1572,13 +1773,7 @@ class SparseCloudPainter extends CustomPainter {
+     final cosR = proj.cosR, sinR = proj.sinR;
+     final hasRoll = !(sinR == 0.0 && cosR == 1.0);
+ 
+-    var hasColor = false;
+-    for (var i = 0; i < rgb.length; i += 3 * math.max(1, stride)) {
+-      if (rgb[i] != 0 || rgb[i + 1] != 0 || rgb[i + 2] != 0) {
+-        hasColor = true;
+-        break;
+-      }
+-    }
++    final hasColor = hasColorOf(rgb, stride: stride);
+     final displayColors = _displayColors(hasColor);
+ 
+     // drawRawAtlas: ONE call renders every point with its EXACT tone-mapped
+diff --git a/lib/ui/official_capture/sparse_cloud_viewer_page.dart b/lib/ui/official_capture/sparse_cloud_viewer_page.dart
+index 038cdae..ba330c4 100644
+--- a/lib/ui/official_capture/sparse_cloud_viewer_page.dart
++++ b/lib/ui/official_capture/sparse_cloud_viewer_page.dart
+@@ -8,7 +8,7 @@ import 'dart:async';
+ import 'dart:io';
+ import 'dart:typed_data';
+ 
+-import 'package:flutter/foundation.dart' show compute;
++import 'package:flutter/foundation.dart' show ValueListenable, compute;
+ import 'package:flutter/material.dart';
+ 
+ import '../../l10n/app_localizations.dart';
+@@ -22,6 +22,7 @@ import 'ruler_scrubber.dart';
+ import 'selection_tools_layer.dart';
+ import 'sfm_preview_overlay.dart' show SfmBottomActionButton;
+ import '../../point_cloud_display/progressive_octree_order.dart';
++import '../../point_cloud_lod/dense_lod_cache.dart';
+ import 'sparse_cloud_view.dart';
+ 
+ /// Parsed cloud (full set — delivery never downsamples). [sourceCount] is the
+@@ -156,14 +157,35 @@ class _SparseCloudViewerPageState extends State<SparseCloudViewerPage> {
+   final ValueNotifier<CloudViewCamera?> _camera = ValueNotifier(null);
+   final CloudViewController _cloudController = CloudViewController();
+ 
++  /// [LOD v3 2026-09-24] For the dense PLY (「稠密点云」, _openDense): its octree from
++  /// DenseLodCache — the same path the capture page uses, so both show the same viewer. The
++  /// sparse PLY never gets one (sparse stays a flat set, with its editing).
++  ValueListenable<DenseLodState>? _denseLod;
++
++  bool get _isDensePly =>
++      File(widget.plyPath).uri.pathSegments.last == kDensePlyFileName;
++
+   @override
+   void initState() {
+     super.initState();
++    if (_isDensePly) {
++      _denseLod = DenseLodCache.instance.watch(widget.plyPath)..addListener(_onDenseLod);
++    }
+     _load();
+   }
+ 
++  void _onDenseLod() {
++    if (mounted) setState(() {});
++  }
++
++  String? get _lodOctreeDir {
++    final s = _denseLod?.value;
++    return s != null && s.phase == DenseLodPhase.ready ? s.octreeDir : null;
++  }
++
+   @override
+   void dispose() {
++    _denseLod?.removeListener(_onDenseLod);
+     _cloudController.dispose();
+     _camera.dispose();
+     super.dispose();
+@@ -573,6 +595,9 @@ class _SparseCloudViewerPageState extends State<SparseCloudViewerPage> {
+                   child: SparseCloudView(
+                     xyz: cloud.xyz,
+                     rgb: cloud.rgb,
++                    // [LOD v3] same GPU viewer as the capture page; the dense PLY's octree when ready.
++                    gpu: true,
++                    octreeDir: _lodOctreeDir,
+                     controller: _cloudController,
+                     onCameraChanged: (c) => _camera.value = c,
+                     // 编辑态必须传框(画手柄 + 框外染红);浏览态只在用户
+diff --git a/test/point_cloud_display_integration_contract_test.dart b/test/point_cloud_display_integration_contract_test.dart
+index b7835ac..e06a494 100644
+--- a/test/point_cloud_display_integration_contract_test.dart
++++ b/test/point_cloud_display_integration_contract_test.dart
+@@ -1,8 +1,90 @@
+ import 'dart:io';
+ 
++import 'package:crypto/crypto.dart' show sha256;
+ import 'package:flutter_test/flutter_test.dart';
++import 'package:pocketworld_flutter/point_cloud_lod/dense_lod_cache.dart';
++
++import 'point_cloud_lod/fake_lod_platform.dart';
++
++/// Product rule CLAUDE.md:14 (user 2026-09-24): 「全量存盘、任一点拉近可见」. The shown tree must
++/// hold every PLY point on disk and every leaf must be reachable; otherwise it is not shown.
++/// Judged on the files, not on the builder's own report: points on disk = octree.bin / 18
++/// compared with the PLY header this test reads itself.
++({bool shown, int? diskPoints}) judgeShownTree(DenseLodState s, int plyPoints) {
++  if (s.phase != DenseLodPhase.ready) return (shown: false, diskPoints: null);
++  final bin = File('${s.octreeDir}/octree.bin');
++  final disk = bin.lengthSync() ~/ 18;
++  expect(bin.lengthSync() % 18, 0);
++  expect(disk, greaterThanOrEqualTo(plyPoints), reason: '盘上点数少于 PLY');
++  return (shown: true, diskPoints: disk);
++}
+ 
+ void main() {
++  TestWidgetsFlutterBinding.ensureInitialized();
++
++  group('CLAUDE.md:14 全量存盘、任一点拉近可见', () {
++    late Directory tmp;
++    late FakeLodPlatform fake;
++    late String ply;
++    late String plySha;
++    const n = 4096;
++
++    setUp(() {
++      tmp = Directory.systemTemp.createTempSync('contract_lod');
++      ply = writeDensePly('${tmp.path}/Documents/captures_official/cap_c/official_dense.ply', n).path;
++      plySha = sha256.convert(File(ply).readAsBytesSync()).toString();
++      fake = FakeLodPlatform()..install();
++    });
++    tearDown(() {
++      FakeLodPlatform.uninstall();
++      tmp.deleteSync(recursive: true);
++    });
++
++    Future<DenseLodState> run(String root) async {
++      final c = DenseLodCache(cacheRoot: () async => Directory('${tmp.path}/$root'));
++      final s = c.watch(ply);
++      await c.whenIdle();
++      return s.value;
++    }
++
++    test('the rule is written down, and the old wording is gone', () {
++      final line = File('CLAUDE.md').readAsStringSync().split('\n')[13];
++      expect(line, contains('全量存盘、任一点拉近可见'));
++      expect(line, contains('C1'));
++      expect(line, contains('S2'));
++      // NEGATIVE: the superseded rule is not what line 14 says any more
++      expect(line.startsWith('- 点云**全量交付**,不为展示降采样。'), isFalse);
++    });
++
++    test('a complete tree is shown: every PLY point is on disk, every leaf reachable, the PLY untouched', () async {
++      final s = await run('ok');
++      final j = judgeShownTree(s, n);
++      expect(j.shown, isTrue, reason: '$s');
++      expect(j.diskPoints, n);
++      expect(sha256.convert(File(ply).readAsBytesSync()).toString(), plySha, reason: 'PLY rewritten');
++    });
++
++    test('NEGATIVE: a tree one point short is never shown', () async {
++      fake.buildLosesPoints = 1;
++      final s = await run('short');
++      expect(judgeShownTree(s, n).shown, isFalse);
++      expect(Directory('${tmp.path}/short/cap_c').existsSync(), isFalse);
++    });
++
++    test('NEGATIVE: a tree with an unreachable leaf is never shown', () async {
++      fake.verifyUnreachableLeaves = 1;
++      final s = await run('leaf');
++      expect(judgeShownTree(s, n).shown, isFalse);
++    });
++
++    test('NEGATIVE: the disk judge itself catches a short octree.bin', () async {
++      final s = await run('disk');
++      final bin = File('${s.octreeDir}/octree.bin');
++      bin.writeAsBytesSync(bin.readAsBytesSync().sublist(18));
++      expect(() => judgeShownTree(s, n), throwsA(isA<TestFailure>()));
++    });
++  });
++
+   test('Review renders the complete persisted point set', () {
+     final source = File(
+       'lib/ui/official_capture/sparse_cloud_view.dart',

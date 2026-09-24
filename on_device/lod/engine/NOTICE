@@ -1,0 +1,90 @@
+Aether3D
+Copyright (c) 2024-2026 Aether3D. All rights reserved.
+
+===============================================================================
+
+Third-Party Software Notices
+===============================================================================
+
+This product includes the following third-party dependencies.
+Their inclusion does not imply any license grant over Aether3D's own code.
+
+-------------------------------------------------------------------------------
+swift-crypto
+-------------------------------------------------------------------------------
+Copyright (c) 2019-2023 Apple Inc. and the SwiftCrypto project authors
+Licensed under the Apache License, Version 2.0
+https://github.com/apple/swift-crypto
+
+-------------------------------------------------------------------------------
+swift-asn1 (transitive dependency via swift-crypto)
+-------------------------------------------------------------------------------
+Copyright (c) 2019-2025 Apple Inc. and the SwiftASN1 project authors
+Licensed under the Apache License, Version 2.0
+https://github.com/apple/swift-asn1
+
+-------------------------------------------------------------------------------
+nlohmann/json v3.11.3 (vendored, aether_cpp/third_party/nlohmann/)
+-------------------------------------------------------------------------------
+Copyright (c) 2013-2022 Niels Lohmann
+Licensed under the MIT License
+https://github.com/nlohmann/json
+Full text: aether_cpp/third_party/nlohmann/LICENSE
+
+-------------------------------------------------------------------------------
+Point-cloud LOD core (aether_cpp/src/pointcloud_lod/), on-device octree
+builder (aether_cpp/src/pointcloud_lod_build/) and LOD viewer render pass
+(aether_cpp/src/pointcloud_lod_render/)
+-------------------------------------------------------------------------------
+Algorithms and constants in these modules are transliterated from the upstreams
+below; no upstream source file is vendored. Each formula is cited to a file and
+line in aether_cpp/src/pointcloud_lod/DEVIATIONS.md,
+aether_cpp/src/pointcloud_lod_build/DEVIATIONS.md and
+aether_cpp/src/pointcloud_lod_render/DEVIATIONS.md, and each licence text is
+kept verbatim in aether_cpp/src/pointcloud_lod/upstream_licenses/ at the pinned
+revision listed in REVISIONS.txt there.
+
+  Potree (octree reader, node selection; the viewer's WGSL adaptive point
+  size / getLOD and visible-node table are transliterated from its
+  pointcloud.vs and PointCloudOctree.js, see the licence in the header of
+  aether_cpp/src/pointcloud_lod_render/lod_render.cpp and in
+  aether_cpp/src/pointcloud_lod_render/m1_bench/NOTICE)
+    Copyright (c) 2011-2020, Markus Schütz
+    BSD 2-Clause License
+    https://github.com/potree/potree
+
+  PotreeConverter (octree on-disk format; the octree builder in
+  aether_cpp/src/pointcloud_lod_build/ is a port of its source code --
+  counting-sort chunking, indexer, Poisson sampler, octree and hierarchy
+  writers -- modified for portability, see DEVIATIONS.md there)
+    Copyright 2020 Markus Schütz
+    BSD 2-Clause License
+    https://github.com/potree/PotreeConverter
+
+  three.js (view-frustum extraction and box test; the LOD viewer's AgX and
+  ACESFilmic tone mapping, r160 tonemapping_pars_fragment.glsl.js, as carried
+  by the product viewer it reproduces -- aether_cpp/src/pointcloud_lod_render/
+  viewer_look.cpp)
+    Copyright © 2010-2026 three.js authors
+    MIT License
+    https://github.com/mrdoob/three.js
+
+  Khronos PBR Neutral tone mapper (the LOD viewer's default tone map,
+  aether_cpp/src/pointcloud_lod_render/viewer_look.cpp; transliterated from
+  PBR_Neutral/pbrNeutral.glsl, licence text in
+  aether_cpp/src/pointcloud_lod/upstream_licenses/khronos_tonemapping.LICENSE)
+    Copyright 2024 The Khronos Group, Inc.
+    Licensed under the Apache License, Version 2.0
+    https://github.com/KhronosGroup/ToneMapping
+
+  CesiumJS (multiplicative screen-space-error controller; orthographic node
+  screen size from Cesium3DTile.js, DEVIATIONS.md D17)
+    Copyright 2011-2026 CesiumJS Contributors
+    Licensed under the Apache License, Version 2.0
+    https://github.com/CesiumGS/cesium
+
+  Dawn (the LOD viewer compiles against Dawn's C header webgpu/webgpu.h; no
+  Dawn source or binary is part of that library)
+    Copyright 2017-2023 The Dawn & Tint Authors
+    BSD 3-Clause License
+    https://dawn.googlesource.com/dawn
